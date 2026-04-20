@@ -170,3 +170,41 @@ def test_run_job_accepts_friendly_yaml_shape(tmp_path: Path, monkeypatch, capsys
     payload = yaml.safe_load(capsys.readouterr().out)
     assert payload["status"] == "done"
     assert payload["metadata"]["notification_channel"] == "console"
+
+
+def test_run_job_bootstraps_missing_workspace(tmp_path: Path, monkeypatch, capsys) -> None:
+    workspace = tmp_path / "greenfield-workspace"
+    job_file = tmp_path / "job.yaml"
+    job_file.write_text(
+        yaml.safe_dump(
+            {
+                "request_text": "Create a new FastAPI app",
+                "repo_path": str(workspace),
+                "workspace_root": str(workspace),
+                "target_branch": "acos/greenfield-app",
+            },
+            allow_unicode=True,
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+
+    def fake_run_job(self, spec: JobSpec) -> JobRecord:
+        assert Path(spec.workspace_root or spec.repo_path) == workspace.resolve()
+        assert workspace.is_dir()
+        assert (workspace / ".acos_memory.sqlite3").exists()
+        assert (workspace / ".acos_approvals.sqlite3").exists()
+        return JobRecord(
+            job_id=spec.job_id,
+            spec=spec,
+            status=JobStatus.DONE,
+            outputs={"summary": {"status": "ok"}},
+        )
+
+    monkeypatch.setattr(cli.JobRunner, "run_job", fake_run_job)
+
+    exit_code = cli.main(["run-job", "--config-dir", str(config_dir()), "--file", str(job_file)])
+
+    assert exit_code == 0
+    payload = yaml.safe_load(capsys.readouterr().out)
+    assert payload["status"] == "done"

@@ -24,6 +24,7 @@ class SQLiteMemoryStore:
         return sqlite3.connect(self.db_path)
 
     def _ensure_schema(self) -> None:
+        Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
         with self._connect() as conn:
             conn.execute(
                 """

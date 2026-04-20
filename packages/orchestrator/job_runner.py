@@ -765,6 +765,9 @@ def build_default_runner(
     """Build a JobRunner wired to the local config directory and fake MCP tools."""
     config_path = Path(config_dir)
     workspace_path = Path(workspace_root).resolve()
+    if workspace_path.exists() and not workspace_path.is_dir():
+        raise ValueError(f"workspace_root must be a directory: {workspace_path}")
+    workspace_path.mkdir(parents=True, exist_ok=True)
     memory_db = Path(memory_db_path or (workspace_path / ".acos_memory.sqlite3"))
     approval_db = Path(approval_db_path or (workspace_path / ".acos_approvals.sqlite3"))
     job_store_file = Path(job_store_path or (workspace_path / ".acos_jobs.json"))
