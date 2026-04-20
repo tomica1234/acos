@@ -1,3 +1,4 @@
+# Provider and model catalog. Edit base_url and api_key_env for your local endpoints.
 providers:
   local_qwen:
     type: openai_compatible

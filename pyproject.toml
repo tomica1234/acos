@@ -8,6 +8,7 @@ version = "0.1.0"
 description = "ACOS: Autonomous Coding Operating System."
 readme = "README.md"
 requires-python = ">=3.11"
+keywords = ["acos", "agents", "llm", "mcp", "orchestrator"]
 dependencies = [
     "fastapi>=0.115,<1.0",
     "mcp>=1.9,<2.0",

@@ -8,16 +8,29 @@ from packages.schemas.jobs import JobRecord
 from packages.schemas.models import JobStatus
 
 ALLOWED_TRANSITIONS: dict[JobStatus, set[JobStatus]] = {
-    JobStatus.SUBMITTED: {JobStatus.ANALYZING, JobStatus.FAILED},
-    JobStatus.ANALYZING: {JobStatus.DESIGNING, JobStatus.BLOCKED, JobStatus.FAILED},
-    JobStatus.DESIGNING: {JobStatus.PLANNING, JobStatus.BLOCKED, JobStatus.FAILED},
-    JobStatus.PLANNING: {JobStatus.IMPLEMENTING, JobStatus.BLOCKED, JobStatus.FAILED},
-    JobStatus.IMPLEMENTING: {JobStatus.WRITING_TESTS, JobStatus.BLOCKED, JobStatus.FAILED},
-    JobStatus.WRITING_TESTS: {JobStatus.REVIEWING, JobStatus.BLOCKED, JobStatus.FAILED},
-    JobStatus.REVIEWING: {JobStatus.TESTING, JobStatus.FIXING, JobStatus.BLOCKED, JobStatus.FAILED},
-    JobStatus.TESTING: {JobStatus.FINALIZING, JobStatus.FIXING, JobStatus.FAILED},
-    JobStatus.FIXING: {JobStatus.REVIEWING, JobStatus.TESTING, JobStatus.STUCK, JobStatus.FAILED},
-    JobStatus.FINALIZING: {JobStatus.DONE, JobStatus.FAILED},
+    JobStatus.SUBMITTED: {JobStatus.ANALYZING, JobStatus.WAITING_APPROVAL, JobStatus.FAILED},
+    JobStatus.WAITING_APPROVAL: {
+        JobStatus.ANALYZING,
+        JobStatus.DESIGNING,
+        JobStatus.PLANNING,
+        JobStatus.IMPLEMENTING,
+        JobStatus.WRITING_TESTS,
+        JobStatus.REVIEWING,
+        JobStatus.TESTING,
+        JobStatus.FIXING,
+        JobStatus.FINALIZING,
+        JobStatus.BLOCKED,
+        JobStatus.FAILED,
+    },
+    JobStatus.ANALYZING: {JobStatus.DESIGNING, JobStatus.WAITING_APPROVAL, JobStatus.BLOCKED, JobStatus.FAILED},
+    JobStatus.DESIGNING: {JobStatus.PLANNING, JobStatus.WAITING_APPROVAL, JobStatus.BLOCKED, JobStatus.FAILED},
+    JobStatus.PLANNING: {JobStatus.IMPLEMENTING, JobStatus.WAITING_APPROVAL, JobStatus.BLOCKED, JobStatus.FAILED},
+    JobStatus.IMPLEMENTING: {JobStatus.WRITING_TESTS, JobStatus.WAITING_APPROVAL, JobStatus.BLOCKED, JobStatus.FAILED},
+    JobStatus.WRITING_TESTS: {JobStatus.REVIEWING, JobStatus.WAITING_APPROVAL, JobStatus.BLOCKED, JobStatus.FAILED},
+    JobStatus.REVIEWING: {JobStatus.TESTING, JobStatus.FIXING, JobStatus.WAITING_APPROVAL, JobStatus.BLOCKED, JobStatus.FAILED},
+    JobStatus.TESTING: {JobStatus.FINALIZING, JobStatus.FIXING, JobStatus.WAITING_APPROVAL, JobStatus.FAILED},
+    JobStatus.FIXING: {JobStatus.REVIEWING, JobStatus.TESTING, JobStatus.WAITING_APPROVAL, JobStatus.STUCK, JobStatus.FAILED},
+    JobStatus.FINALIZING: {JobStatus.DONE, JobStatus.WAITING_APPROVAL, JobStatus.FAILED},
 }
 
 

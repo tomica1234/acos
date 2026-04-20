@@ -17,8 +17,11 @@ from packages.llm.registry import ModelRegistry
 from packages.llm.routing import FailureHistory, ModelRouter, RoutingContext, TaskState
 from packages.llm.tool_schema import build_response_schema, build_tool_manifest
 from packages.mcp_client.router import MCPRouter
+from packages.orchestrator.approval import ApprovalRequiredError
 from packages.orchestrator.audit import AuditRecorder
 from packages.orchestrator.policy import PolicyEngine
+from packages.orchestrator.quality_gates import ensure_test_patch_quality
+from packages.schemas.agent_outputs import FilePatch
 from packages.schemas.audit import AuditEvent
 from packages.schemas.context import ContextPacket
 from packages.schemas.models import (
@@ -79,6 +82,7 @@ class AgentRunner:
         audit_events: list[AuditEvent] | None = None,
     ) -> tuple[T, ModelSelection, ModelCallRecord]:
         agent_config = self.registry.get_agent(role)
+        self._assert_requested_tools_subset(role, allowed_tools, agent_config.allowed_tools)
         configured_tools = (
             allowed_tools
             if allowed_tools is not None
@@ -187,6 +191,7 @@ class AgentRunner:
             if result.tool_calls:
                 self._handle_tool_calls(
                     role=role,
+                    context_packet=context_packet,
                     messages=messages,
                     tool_calls=result.tool_calls,
                     audit_events=audit_events,
@@ -328,6 +333,7 @@ class AgentRunner:
         self,
         *,
         role: str,
+        context_packet: ContextPacket,
         messages: list[dict[str, Any]],
         tool_calls: list[dict[str, Any]],
         audit_events: list[AuditEvent] | None,
@@ -341,6 +347,51 @@ class AgentRunner:
             arguments = tool_call.get("arguments", {})
             if not isinstance(arguments, dict):
                 arguments = {"value": arguments}
+            if self.policy_engine is not None:
+                decision = self.policy_engine.classify_tool_call(
+                    role=role,
+                    tool_name=tool_name,
+                    arguments=arguments,
+                    workspace_root=context_packet.repo_path,
+                )
+                if audit_events is not None:
+                    audit_events.append(
+                        self.audit_recorder.policy_event(
+                            role=role,
+                            job_id=context_packet.job_id,
+                            task_id=context_packet.task.id if context_packet.task else None,
+                            decision=decision,
+                        )
+                    )
+                if decision.policy_action.value == "deny":
+                    raise PermissionError(decision.reason)
+                if decision.policy_action.value == "require_approval":
+                    raise ApprovalRequiredError(
+                        requested_by=role,
+                        operation=decision.operation,
+                        decision=decision,
+                        proposed_action={
+                            "tool_name": tool_name,
+                            "arguments": arguments,
+                        },
+                        task_id=context_packet.task.id if context_packet.task else None,
+                    )
+            if tool_name == "repo_server.apply_patch" and self.policy_engine is not None:
+                path = arguments.get("path")
+                if not isinstance(path, str):
+                    raise PermissionError("repo_server.apply_patch requires a string path")
+                self.policy_engine.assert_patch_target_allowed(role, path)
+                if role == "test_writer":
+                    ensure_test_patch_quality(
+                        [
+                            FilePatch(
+                                path=path,
+                                content=str(arguments.get("content", "")),
+                                operation=str(arguments.get("operation", "update")),
+                            )
+                        ],
+                        role=role,
+                    )
             result = self.mcp_router.call(tool_name, **arguments)
             event = self.audit_recorder.tool_event(
                 role=role,
@@ -366,6 +417,20 @@ class AgentRunner:
             return
         for tool_name in tool_names:
             self.policy_engine.assert_tool_allowed(role, tool_name)
+
+    @staticmethod
+    def _assert_requested_tools_subset(
+        role: str,
+        requested_tools: list[str] | None,
+        configured_tools: list[str],
+    ) -> None:
+        if requested_tools is None:
+            return
+        unexpected = sorted(set(requested_tools) - set(configured_tools))
+        if unexpected:
+            raise PermissionError(
+                f"Role {role} requested tools outside agent config: {', '.join(unexpected)}"
+            )
 
     def _parse_response(self, content: str, response_model: type[T]) -> T:
         return response_model.model_validate(_extract_json(content))

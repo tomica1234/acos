@@ -40,6 +40,7 @@ class FixStatus(str, Enum):
 
 class JobStatus(str, Enum):
     SUBMITTED = "submitted"
+    WAITING_APPROVAL = "waiting_approval"
     ANALYZING = "analyzing"
     DESIGNING = "designing"
     PLANNING = "planning"
@@ -58,6 +59,7 @@ class JobStatus(str, Enum):
 class TaskStatus(str, Enum):
     TODO = "todo"
     READY = "ready"
+    WAITING_APPROVAL = "waiting_approval"
     IN_PROGRESS = "in_progress"
     IMPLEMENTED = "implemented"
     TESTS_WRITTEN = "tests_written"

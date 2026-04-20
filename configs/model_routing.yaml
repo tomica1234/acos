@@ -1,3 +1,4 @@
+# Fallback, escalation, and capability requirements for model routing.
 routing:
   default_strategy: role_primary
 

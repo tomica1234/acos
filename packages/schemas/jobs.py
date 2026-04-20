@@ -26,6 +26,7 @@ class JobSpec(BaseModel):
     repo_path: str
     target_branch: str = "acos/default"
     metadata: dict[str, Any] = Field(default_factory=dict)
+    workspace_root: str | None = None
 
 
 class JobRecord(BaseModel):
@@ -42,6 +43,9 @@ class JobRecord(BaseModel):
     failure_count: int = 0
     same_test_failure_count: int = 0
     last_error: str | None = None
+    current_role: str | None = None
+    current_task_id: str | None = None
+    pending_approval_id: str | None = None
+    runtime_state: dict[str, Any] = Field(default_factory=dict)
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)
-

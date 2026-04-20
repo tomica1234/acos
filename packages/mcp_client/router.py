@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from packages.memory.redaction import redact_text
 from packages.mcp_client.types import ToolCallResult, ToolHandler
 
 
@@ -16,6 +17,9 @@ class MCPRouter:
     def register(self, tool_name: str, handler: ToolHandler) -> None:
         self._handlers[tool_name] = handler
 
+    def has_tool(self, tool_name: str) -> bool:
+        return tool_name in self._handlers
+
     def call(self, tool_name: str, **kwargs: Any) -> ToolCallResult:
         handler = self._handlers.get(tool_name)
         if handler is None:
@@ -23,8 +27,7 @@ class MCPRouter:
         try:
             return ToolCallResult(ok=True, data=handler(**kwargs))
         except Exception as exc:  # pragma: no cover - defensive boundary
-            return ToolCallResult(ok=False, error=str(exc))
+            return ToolCallResult(ok=False, error=redact_text(str(exc)))
 
     def available_tools(self) -> list[str]:
         return sorted(self._handlers)
-

@@ -1,181 +1,291 @@
 # ACOS
 
 ACOS is an Autonomous Coding Operating System. A user provides product
-requirements in natural language, and ACOS decomposes the work across multiple
-specialized roles for requirements analysis, architecture, planning,
-implementation, test generation, review, deterministic test execution, fixing,
-release finalization, memory summarization, and notification.
+requirements in natural language, and ACOS decomposes the work across explicit
+roles such as PM, Architect, Planner, Implementer, Test Writer, Reviewer,
+Security Reviewer, Fixer, Summarizer, and Release Manager.
 
-The system is explicitly orchestrated. It does not delegate job lifecycle
-control to LLMs. Every role is model-routed through a registry and adapter
-layer so providers and model sizes remain interchangeable.
+The orchestrator owns state transitions, retries, stuck and blocked handling,
+tool permissions, and model selection. LLMs do not own workflow control.
 
-## Features
+## Architecture Overview
 
-- Orchestrator-owned state machine with retries, blocked and stuck handling
-- Role-specific model configuration and dynamic model escalation
-- OpenAI-compatible provider support plus a deterministic mock adapter
-- Pydantic-validated agent outputs and context packets
-- MCP-based tool routing for repo, git, test, memory, and notification actions
-- SQLite-backed memory store for MVP persistence
-- FastAPI API and CLI entrypoints
-- End-to-end vertical slice tests using fake MCP tools
+- `packages/orchestrator/`: job runner, policy engine, audit, context builder
+- `packages/agents/`: role runner and role-specific prompt/config glue
+- `packages/llm/`: provider registry, model adapters, routing, budgets
+- `packages/mcp_client/`: local MCP-style router and fake tool environment
+- `mcp_servers/`: repo, git, test, memory, and notify server skeletons
+- `apps/`: CLI, API, and worker entrypoints
 
-## Setup From Scratch
+## Model Routing Design
+
+ACOS does not fix itself to one model family. Every role resolves models
+through:
+
+- `ModelProviderConfig`: provider endpoint and capability metadata
+- `ModelConfig`: concrete model entry with context/output limits
+- `AgentModelConfig`: role-to-model mapping
+- `ModelRegistry`: YAML-backed provider/model/agent catalog
+- `ModelRouter`: role-aware selection, fallback, escalation, capability checks
+- `ModelAdapter`: provider-specific execution layer
+
+This allows patterns such as:
+
+- PM and Architect on a large long-context model
+- Summarizer on a cheaper model
+- Fixer on a smaller model first, then escalation after repeated failures
+
+See [docs/MODEL_ROUTING.md](/Users/tachibanashunta/wip/acos/docs/MODEL_ROUTING.md) for
+the detailed routing design.
+
+## Setup
+
+### 1. Install Dependencies
 
 ```bash
 uv sync --group dev
+```
+
+### 2. Configure Environment
+
+```bash
 cp .env.example .env
 ```
 
-For local Qwen or any OpenAI-compatible endpoint, set the provider URL and API
-key environment variables expected by `configs/model_providers.yaml`.
+Set the API key variables expected by `configs/model_providers.yaml`.
 
 Example:
 
 ```bash
 export QWEN_API_KEY=replace-me
 export SMALL_MODEL_API_KEY=replace-me
+export MOCK_API_KEY=dummy
 ```
 
-## OpenAI-Compatible Qwen Configuration
+### 3. Point ACOS at Your OpenAI-Compatible API
 
-`configs/model_providers.yaml` defines providers and concrete model records.
-Each provider includes:
+Edit [configs/model_providers.yaml](/Users/tachibanashunta/wip/acos/configs/model_providers.yaml).
+For a local Qwen endpoint, update the provider `base_url` fields to match your
+OpenAI-compatible server.
+
+Example provider shape:
+
+```yaml
+providers:
+  local_qwen:
+    type: openai_compatible
+    base_url: "http://localhost:8000/v1"
+    api_key_env: "QWEN_API_KEY"
+    supports_tools: true
+    supports_json_mode: false
+```
+
+## Config Files
+
+### `configs/model_providers.yaml`
+
+Defines:
 
 - provider type
 - base URL
-- API key environment variable name
+- API key env var
 - timeout
 - tool support
 - JSON mode support
-- streaming support
-- provider-wide token limits
+- context and output limits
 
-Each model includes:
+### `configs/agents.yaml`
 
-- provider binding
-- display name
-- max context and output tokens
-- tool calling support
-- structured output support
-- JSON repair capability
-- tags
+Defines, per role:
 
-## Role-Specific Model Settings
+- primary model
+- fallback models
+- sampling settings
+- context budget
+- allowed tools
+- output schema
 
-`configs/agents.yaml` assigns models by role. This is where you decide that:
+Example idea:
 
-- PM uses a long-context model
-- Architect uses a design-capable model
-- Implementer uses a coding model
-- Reviewer uses a strict low-temperature model
-- Summarizer uses a smaller cheaper model
-- Fixer starts on a smaller model and escalates when failures repeat
+- `pm.primary_model = qwen_35b`
+- `summarizer.primary_model = qwen_small`
+- `fixer.fallback_models = [qwen_35b, mock_structured]`
 
-`configs/model_routing.yaml` controls:
+### `configs/model_routing.yaml`
 
-- fallback errors
-- escalation thresholds
-- roles that require tools
+Controls:
+
+- fallback errors such as `timeout`, `rate_limit`, `invalid_json`
+- escalation triggers such as repeated failures
+- roles that require tool calling
 - roles that require strict JSON
 
-## CLI
+### `configs/policies.yaml`
 
-Validate all config cross-references:
+Defines:
+
+- deny-by-default tool policy
+- release branch rules
+- test command restrictions
+- forbidden patch targets
+- protected file and secret-path restrictions
+
+## MCP Server Overview
+
+ACOS routes repo, git, test, memory, and notification actions through MCP-style
+tools rather than arbitrary shell execution.
+
+Current MVP state:
+
+- fake in-process MCP environment is implemented and used by tests
+- `mcp_servers/*` contains skeleton wrappers for future standalone servers
+
+## Local Execution
+
+### Validate Config
 
 ```bash
 acos validate-config
 ```
 
-List loaded models:
+### Inspect Models
 
 ```bash
 acos list-models
 ```
 
-List role-to-model assignments:
+### Inspect Role Assignments
 
 ```bash
 acos list-agents
 ```
 
-Resolve the currently selected model for a role:
+### Resolve A Model For A Role
 
 ```bash
 acos resolve-model --role implementer
-```
-
-Resolve the model after repeated failures:
-
-```bash
 acos resolve-model --role fixer --repeated-failures 2
 ```
 
-Explain why routing chose a model and which fallback or escalation rules apply:
+### Explain Routing In Human Terms
 
 ```bash
 acos explain-routing --role implementer
 ```
 
-Run a job from YAML:
+### Run A Job From YAML
+
+Start from [job.yaml.example](/Users/tachibanashunta/wip/acos/job.yaml.example):
 
 ```bash
+cp job.yaml.example job.yaml
 acos run-job --file job.yaml
 ```
 
-Start the API:
+`run-job` accepts both:
+
+- direct `JobSpec` fields such as `request_text`, `repo_path`, `target_branch`
+- a friendlier job file format using `requester_input`, `title`,
+  `base_branch`, `notification_channel`, `constraints`, and `workspace_root`
+
+### Approval Commands
+
+When ACOS hits a high-risk action, the job moves to `waiting_approval`.
+
+```bash
+acos approvals list --workspace .
+acos approvals show <approval_id> --workspace .
+acos approvals approve <approval_id> --workspace .
+acos approvals reject <approval_id> --workspace . --reason "not acceptable"
+acos jobs resume <job_id> --workspace .
+```
+
+Inside the configured workspace, normal development work is auto-allowed.
+Approval is reserved for high-risk actions such as large patches, mass delete,
+release-like operations, or external send operations. Critical actions remain
+denied.
+
+### Start The API
 
 ```bash
 acos api
 ```
 
-Start the worker:
+### Start The Worker
 
 ```bash
-acos worker --request "build a small API" --repo .
+acos worker
+acos worker --request "READMEにセットアップ手順を追加してください" --repo .
+acos worker --file job.yaml.example
 ```
 
-## Repository Layout
+In the MVP, the worker is a simple entrypoint for running one job locally.
 
-- `apps/`: API, worker, and CLI entrypoints
-- `packages/`: reusable ACOS core modules
-- `mcp_servers/`: MCP server skeletons for repo, git, test, memory, notify
-- `configs/`: model, agent, routing, and policy configuration
-- `docs/`: implementation and operations documentation
-- `tests/`: schema, routing, orchestration, and vertical slice coverage
+## CLI Reference
 
-## Config Files
-
-- `configs/model_providers.yaml`: providers and model catalog
-- `configs/agents.yaml`: per-role model defaults and tool permissions
-- `configs/model_routing.yaml`: fallback, escalation, and capability rules
-- `configs/policies.yaml`: deny-by-default MCP and git policy
+- `acos validate-config`
+- `acos list-models`
+- `acos list-agents`
+- `acos resolve-model --role implementer`
+- `acos resolve-model --role fixer --repeated-failures 2`
+- `acos explain-routing --role implementer`
+- `acos run-job --file job.yaml`
+- `acos approvals list`
+- `acos approvals show <approval_id>`
+- `acos approvals approve <approval_id>`
+- `acos approvals reject <approval_id> --reason "..."`
+- `acos jobs resume <job_id>`
+- `acos api`
+- `acos worker`
 
 ## Testing
 
 ```bash
-make compile
-make pytest
-python -m apps.cli run-demo --workspace /tmp/acos-demo
+python3 -m compileall acos
+.venv/bin/pytest
+```
+
+For a deterministic smoke test without a real provider:
+
+```bash
+python3 -m apps.cli run-demo --workspace /tmp/acos-demo
 ```
 
 ## Security Policy
 
-- LLMs do not manage orchestration state
-- secrets are redacted before prompts, memory, audit, and notifications
-- workspace escapes are blocked
-- arbitrary shell is blocked
-- test execution is allowlisted
-- direct `main`/`master` writes are blocked
-- force push, production deploy, and destructive migrations are blocked
+ACOS enforces:
+
+- deny-by-default tool policy
+- workspace-only file access
+- symlink escape blocking
+- workspace-auto approval gateway for high-risk operations
+- secret redaction before prompt, memory, audit, and notification use
+- allowlisted test commands only
+- protected branch restrictions
+- release commit restriction to `release_manager`
+- patch restrictions on tests and dependency manifests
+
+See [docs/SECURITY.md](/Users/tachibanashunta/wip/acos/docs/SECURITY.md).
 
 ## Current Limitations
 
-- MCP server implementations are still local skeletons and fake adapters for MVP
-- the Docker sandbox runner is structural only
-- OpenAI-compatible integration is implemented, but tests do not call real APIs
-- branch and patch handling are safe MVP abstractions, not full git-native automation
+- `mcp_servers/*` are still skeletons for standalone server mode
+- Docker sandbox execution is not implemented yet
+- tests do not call real external model APIs
+- `run-job` needs a reachable configured provider unless you switch configs to
+  mock models or use `run-demo`
 
-See [docs/QUICKSTART.md](/Users/tachibanashunta/wip/acos/docs/QUICKSTART.md) for
-setup details.
+## Roadmap
+
+- standalone MCP server transports
+- persistent audit and job history
+- stronger worker queue and background processing
+- real sandbox execution
+- richer semantic review and test-quality gates
+
+## More Detail
+
+- [docs/QUICKSTART.md](/Users/tachibanashunta/wip/acos/docs/QUICKSTART.md)
+- [docs/ARCHITECTURE.md](/Users/tachibanashunta/wip/acos/docs/ARCHITECTURE.md)
+- [docs/MODEL_ROUTING.md](/Users/tachibanashunta/wip/acos/docs/MODEL_ROUTING.md)
+- [docs/SECURITY.md](/Users/tachibanashunta/wip/acos/docs/SECURITY.md)

@@ -20,6 +20,7 @@ from packages.schemas.models import FixStatus, ImplementationStatus, ReviewDecis
 from packages.schemas.tasks import PlannedTask, TaskGraph
 
 from tests.conftest import attach_mock_adapter, config_dir
+from tests.fakes import build_approval_harness
 
 
 def test_job_runner_review_request_changes_then_fix(tmp_path: Path) -> None:
@@ -202,3 +203,39 @@ def test_job_runner_max_attempts_stuck(tmp_path: Path) -> None:
     record = runner.run_job(spec)
 
     assert record.status.value == "stuck"
+
+
+def test_job_runner_enters_waiting_approval_and_can_resume(tmp_path: Path) -> None:
+    harness = build_approval_harness(tmp_path)
+
+    record = harness.run_job()
+
+    assert record.status.value == "waiting_approval"
+    assert record.pending_approval_id is not None
+    assert harness.environment.notify_server.approval_notifications
+
+    harness.runner.approval_gateway.approve(
+        record.pending_approval_id,
+        token=None,
+        approver="cli",
+    )
+    resumed = harness.runner.resume_job(record.job_id)
+
+    assert resumed.status.value == "done"
+    assert resumed.pending_approval_id is None
+
+
+def test_job_runner_reject_blocks_job(tmp_path: Path) -> None:
+    harness = build_approval_harness(tmp_path)
+    record = harness.run_job()
+
+    harness.runner.approval_gateway.reject(
+        record.pending_approval_id,
+        token=None,
+        approver="cli",
+        reason="do not modify this file",
+    )
+    blocked = harness.runner.resume_job(record.job_id)
+
+    assert blocked.status.value == "blocked"
+    assert blocked.last_error == "do not modify this file"

@@ -19,6 +19,7 @@ class PlannedTask(BaseModel):
     status: TaskStatus = TaskStatus.TODO
     complexity: TaskComplexity = TaskComplexity.MEDIUM
     depends_on: list[str] = Field(default_factory=list)
+    approval_id: str | None = None
 
 
 class TaskGraph(BaseModel):
@@ -29,4 +30,3 @@ class TaskGraph(BaseModel):
     goal: str
     tasks: list[PlannedTask] = Field(default_factory=list)
     notes: list[str] = Field(default_factory=list)
-

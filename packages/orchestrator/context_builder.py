@@ -57,6 +57,15 @@ class ContextBuilder:
         ]
         per_log_budget = max(32, allocation.logs // max(1, len(logs)))
         trimmed_logs = [truncate_to_budget(redact_text(item), per_log_budget) for item in logs]
+        trimmed_task = None
+        if task is not None:
+            trimmed_task = PlannedTask.model_validate(
+                {
+                    **task.model_dump(),
+                    "title": truncate_to_budget(redact_text(task.title), 128),
+                    "description": truncate_to_budget(redact_text(task.description), 256),
+                }
+            )
         return ContextPacket(
             job_id=job_id,
             role=role,
@@ -68,7 +77,7 @@ class ContextBuilder:
             diff=truncate_to_budget(redact_text(diff), allocation.diff),
             memory_summaries=trimmed_memory,
             logs=trimmed_logs,
-            task=task,
+            task=trimmed_task,
             token_budget=requested_budget,
             model_context_budget=model_context_budget,
             selected_model_hint=selected_model_hint,

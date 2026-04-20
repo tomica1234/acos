@@ -6,7 +6,8 @@ import json
 from hashlib import sha256
 from typing import Any
 
-from packages.memory.redaction import redact_text
+from packages.memory.redaction import redact_text, redact_value
+from packages.schemas.approvals import ApprovalRequest, RiskDecision
 from packages.schemas.audit import AuditEvent
 from packages.schemas.models import ModelCallRecord, ModelSelection
 
@@ -14,17 +15,6 @@ from packages.schemas.models import ModelCallRecord, ModelSelection
 def _hash_payload(payload: Any) -> str:
     redacted = redact_text(json.dumps(payload, sort_keys=True, default=str))
     return sha256(redacted.encode("utf-8")).hexdigest()
-
-
-def _redact_value(value: Any) -> Any:
-    if isinstance(value, str):
-        return redact_text(value)
-    if isinstance(value, dict):
-        return {str(key): _redact_value(item) for key, item in value.items()}
-    if isinstance(value, list):
-        return [_redact_value(item) for item in value]
-    return value
-
 
 class AuditRecorder:
     """Create sanitized audit events."""
@@ -37,7 +27,7 @@ class AuditRecorder:
             status=record.status.value,
             input_hash=record.input_hash,
             output_hash=record.output_hash,
-            metadata=_redact_value(
+            metadata=redact_value(
                 {
                     "model_key": selection.model_key,
                     "provider_key": selection.provider_key,
@@ -58,7 +48,7 @@ class AuditRecorder:
             role=role,
             action=selection.model_key,
             status="selected",
-            metadata=_redact_value(
+            metadata=redact_value(
                 {
                     "model_key": selection.model_key,
                     "provider_key": selection.provider_key,
@@ -84,4 +74,57 @@ class AuditRecorder:
             input_hash=_hash_payload(input_payload),
             output_hash=_hash_payload(output_payload or {}),
             metadata={"tool_name": tool_name},
+        )
+
+    def policy_event(
+        self,
+        *,
+        role: str,
+        job_id: str,
+        task_id: str | None,
+        decision: RiskDecision,
+        approval_id: str | None = None,
+    ) -> AuditEvent:
+        return AuditEvent(
+            event_type="policy_decision",
+            role=role,
+            action=decision.operation,
+            status=decision.policy_action.value,
+            metadata=redact_value(
+                {
+                    "job_id": job_id,
+                    "task_id": task_id,
+                    "operation": decision.operation,
+                    "risk_level": decision.risk_level.value,
+                    "policy_action": decision.policy_action.value,
+                    "reason": decision.reason,
+                    "details": decision.details,
+                    "approval_id": approval_id,
+                }
+            ),
+        )
+
+    def approval_event(
+        self,
+        *,
+        role: str,
+        action: str,
+        approval: ApprovalRequest,
+    ) -> AuditEvent:
+        return AuditEvent(
+            event_type="approval",
+            role=role,
+            action=action,
+            status=approval.status,
+            metadata=redact_value(
+                {
+                    "approval_id": approval.id,
+                    "job_id": approval.job_id,
+                    "task_id": approval.task_id,
+                    "operation": approval.operation,
+                    "risk_level": approval.risk_level.value,
+                    "approver": approval.approver,
+                    "resolution_reason": approval.resolution_reason,
+                }
+            ),
         )

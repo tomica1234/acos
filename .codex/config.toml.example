@@ -1,13 +1,41 @@
 # Example Codex-local helper config for working on ACOS itself.
-# This is separate from ACOS runtime MCP usage. Codex may talk to local ACOS MCP
-# servers during development, while ACOS jobs use their own MCP routing at run
-# time.
+# This is separate from ACOS runtime MCP usage.
+# Codex may connect to local ACOS-related MCP servers while you develop ACOS,
+# but ACOS jobs use their own runtime MCP routing and policy enforcement.
 
 [runtime]
-config_dir = "configs"
-memory_db = "config/acos_memory.sqlite3"
 workspace_root = "/path/to/workspace"
+config_dir = "configs"
+memory_db = ".acos_memory.sqlite3"
 
 [api]
 host = "127.0.0.1"
 port = 8080
+
+# Placeholder MCP server definitions for Codex-side development.
+# The current MVP server modules are library-style wrappers, so replace these
+# commands with your actual standalone launcher scripts when you add them.
+
+[mcp_servers.repo_server]
+command = "python"
+args = ["-m", "mcp_servers.repo_server.main"]
+env = { WORKSPACE_ROOT = "/path/to/workspace" }
+
+[mcp_servers.git_server]
+command = "python"
+args = ["-m", "mcp_servers.git_server.main"]
+env = { WORKSPACE_ROOT = "/path/to/workspace" }
+
+[mcp_servers.test_server]
+command = "python"
+args = ["-m", "mcp_servers.test_server.main"]
+env = { WORKSPACE_ROOT = "/path/to/workspace" }
+
+[mcp_servers.memory_server]
+command = "python"
+args = ["-m", "mcp_servers.memory_server.main"]
+env = { ACOS_MEMORY_DB = "/path/to/workspace/.acos_memory.sqlite3" }
+
+[mcp_servers.notify_server]
+command = "python"
+args = ["-m", "mcp_servers.notify_server.main"]

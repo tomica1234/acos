@@ -20,13 +20,23 @@ def ensure_reviews_pass(
 
 
 def ensure_fixer_safe(patches: list[FilePatch]) -> None:
-    suspicious_tokens = ("xfail", "skip(", "skipif(", "assert True")
+    ensure_test_patch_quality(patches, role="fixer")
+
+
+def ensure_test_patch_quality(patches: list[FilePatch], *, role: str) -> None:
+    suspicious_tokens = (
+        "xfail",
+        "skip(",
+        "skipif(",
+        "mark.skip",
+        "mark.xfail",
+        "assert True",
+    )
     for patch in patches:
         if patch.path.startswith("tests/") and any(token in patch.content for token in suspicious_tokens):
-            raise QualityGateError("Fixer attempted to weaken tests")
+            raise QualityGateError(f"{role} attempted to weaken tests")
 
 
 def ensure_tests_passed(result: TestRunResult) -> None:
     if not result.success:
         raise QualityGateError("Tests did not pass")
-

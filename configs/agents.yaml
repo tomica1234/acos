@@ -1,3 +1,4 @@
+# Role-to-model mapping, role budgets, and role-level tool permissions.
 agents:
   pm:
     primary_model: qwen_35b

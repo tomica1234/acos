@@ -1,9 +1,19 @@
+# Workspace-auto policy: allow normal development work inside the workspace,
+# require approval for high-risk operations, and deny critical operations.
 autonomy:
+  mode: workspace_auto
   level: 4
+  default_workspace_action: allow
+  require_approval_for_high_risk: true
+  deny_critical_operations: true
 
 tools:
   default_policy: deny
   allow_by_role:
+    orchestrator:
+      - git_server.create_branch
+      - notify_server.send_approval_request
+
     pm:
       - memory_server.write_memory
       - memory_server.read_memory
@@ -77,10 +87,97 @@ sandbox:
   max_memory: "8g"
   max_cpus: 4
 
-blocked_operations:
-  - production_deploy
-  - destructive_db_migration
-  - secret_access
-  - force_push
-  - direct_main_write
-  - arbitrary_shell
+workspace:
+  root_from_job: true
+  allow_read: true
+  allow_write: true
+  allow_delete: true
+  max_delete_files_without_approval: 20
+  max_patch_changed_files_without_approval: 50
+  max_patch_deleted_lines_without_approval: 2000
+  forbidden_path_patterns:
+    - ".env"
+    - ".env.*"
+    - "**/.env"
+    - "**/.env.*"
+    - "**/.ssh/**"
+    - "**/.aws/**"
+    - "**/id_rsa"
+    - "**/id_ed25519"
+    - "**/*credential*"
+    - "**/*secret*"
+    - "**/*token*"
+    - ".git"
+    - ".git/**"
+    - "**/.git/**"
+  test_path_prefixes:
+    - "tests/"
+  dependency_manifest_files:
+    - "pyproject.toml"
+    - "requirements.txt"
+    - "requirements-*.txt"
+    - "package.json"
+    - "package-lock.json"
+    - "pnpm-lock.yaml"
+    - "poetry.lock"
+    - "uv.lock"
+  forbid_test_writes_by_role:
+    - "implementer"
+    - "fixer"
+  forbid_dependency_writes_by_role:
+    - "implementer"
+    - "test_writer"
+    - "fixer"
+
+approval:
+  default_channel: console
+  request_ttl_minutes: 1440
+  allow_cli_approval: true
+  allow_http_approval: true
+  allow_notification_links: true
+  require_signed_tokens: true
+  notify_on:
+    - require_approval
+    - rejected
+    - expired
+    - approved
+
+risk_rules:
+  auto_allow:
+    - workspace_file_read
+    - workspace_file_write
+    - workspace_patch_apply
+    - git_status
+    - git_diff
+    - git_log
+    - branch_create_acos_prefix
+    - test_run_allowlisted
+    - lint_run_allowlisted
+    - typecheck_run_allowlisted
+    - memory_read_project
+    - memory_write_project
+    - notification_send_status
+
+  require_approval:
+    - force_push
+    - production_deploy
+    - destructive_db_migration
+    - external_network_non_allowlisted
+    - package_install_non_allowlisted
+    - mass_delete
+    - large_patch
+    - external_data_send
+    - dependency_addition_high_risk
+    - git_remote_write
+    - release_publish
+
+  deny:
+    - workspace_escape
+    - secret_file_read
+    - secret_exfiltration
+    - arbitrary_shell
+    - sudo
+    - privileged_docker
+    - direct_main_write
+    - system_path_write
+    - credential_store_access
