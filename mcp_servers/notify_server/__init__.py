@@ -1,0 +1,2 @@
+"""Notify MCP server."""
+

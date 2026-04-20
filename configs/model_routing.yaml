@@ -1,0 +1,53 @@
+routing:
+  default_strategy: role_primary
+
+  escalation:
+    implementer:
+      escalate_when:
+        repeated_failures_gte: 2
+        same_test_failure_gte: 2
+        changed_files_gte: 8
+        task_complexity_in: ["high", "critical"]
+      escalated_model: qwen_35b
+
+    fixer:
+      escalate_when:
+        repeated_failures_gte: 2
+        same_test_failure_gte: 2
+      escalated_model: qwen_35b
+
+    reviewer:
+      escalate_when:
+        security_sensitive: true
+      escalated_model: qwen_35b
+
+    security_reviewer:
+      escalate_when:
+        security_sensitive: true
+      escalated_model: qwen_35b
+
+  fallback:
+    on_errors:
+      - timeout
+      - rate_limit
+      - invalid_json
+      - tool_call_unsupported
+      - context_overflow
+
+  capability_requirements:
+    roles_requiring_tools:
+      - implementer
+      - test_writer
+      - fixer
+      - release_manager
+
+    roles_requiring_strict_json:
+      - pm
+      - architect
+      - planner
+      - implementer
+      - test_writer
+      - reviewer
+      - security_reviewer
+      - fixer
+      - release_manager

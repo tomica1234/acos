@@ -1,0 +1,86 @@
+autonomy:
+  level: 4
+
+tools:
+  default_policy: deny
+  allow_by_role:
+    pm:
+      - memory_server.write_memory
+      - memory_server.read_memory
+      - repo_server.repo_tree
+
+    architect:
+      - memory_server.read_memory
+      - memory_server.write_memory
+      - repo_server.repo_tree
+      - repo_server.read_file
+      - repo_server.search_text
+
+    planner:
+      - memory_server.read_memory
+      - memory_server.write_memory
+      - repo_server.repo_tree
+      - repo_server.search_text
+
+    implementer:
+      - repo_server.read_file
+      - repo_server.search_text
+      - repo_server.apply_patch
+      - git_server.diff
+
+    test_writer:
+      - repo_server.read_file
+      - repo_server.search_text
+      - repo_server.apply_patch
+      - git_server.diff
+
+    reviewer:
+      - repo_server.read_file
+      - git_server.diff
+      - memory_server.read_memory
+
+    security_reviewer:
+      - repo_server.read_file
+      - git_server.diff
+      - memory_server.read_memory
+
+    fixer:
+      - repo_server.read_file
+      - repo_server.search_text
+      - repo_server.apply_patch
+      - git_server.diff
+      - memory_server.read_memory
+      - memory_server.write_memory
+
+    summarizer:
+      - memory_server.read_memory
+      - memory_server.write_memory
+
+    runner:
+      - test_server.run_test
+
+    release_manager:
+      - git_server.status
+      - git_server.diff
+      - git_server.commit
+      - memory_server.read_memory
+      - notify_server.send_notification
+
+git:
+  branch_prefix: "acos/"
+  forbid_direct_main_write: true
+  forbid_force_push: true
+
+sandbox:
+  network_default: disabled
+  timeout_seconds: 600
+  max_memory: "8g"
+  max_cpus: 4
+
+blocked_operations:
+  - production_deploy
+  - destructive_db_migration
+  - secret_access
+  - force_push
+  - direct_main_write
+  - arbitrary_shell

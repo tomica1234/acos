@@ -1,0 +1,38 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "acos"
+version = "0.1.0"
+description = "ACOS: Autonomous Coding Operating System."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.115,<1.0",
+    "mcp>=1.9,<2.0",
+    "openai>=1.75,<2.0",
+    "pydantic>=2.8,<3.0",
+    "PyYAML>=6.0.2,<7.0",
+    "uvicorn>=0.34,<1.0",
+]
+
+[project.scripts]
+acos = "apps.cli:main"
+acos-worker = "apps.worker.main:main"
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3,<9.0",
+]
+
+[tool.setuptools]
+package-dir = {"" = "."}
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["acos*", "apps*", "packages*", "mcp_servers*"]
+
+[tool.pytest.ini_options]
+addopts = "-q"
+testpaths = ["tests"]

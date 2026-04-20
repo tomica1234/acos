@@ -1,0 +1,13 @@
+# Example Codex-local helper config for working on ACOS itself.
+# This is separate from ACOS runtime MCP usage. Codex may talk to local ACOS MCP
+# servers during development, while ACOS jobs use their own MCP routing at run
+# time.
+
+[runtime]
+config_dir = "configs"
+memory_db = "config/acos_memory.sqlite3"
+workspace_root = "/path/to/workspace"
+
+[api]
+host = "127.0.0.1"
+port = 8080
