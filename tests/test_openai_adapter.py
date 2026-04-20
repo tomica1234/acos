@@ -57,6 +57,24 @@ def test_openai_adapter_classifies_timeout(monkeypatch) -> None:
     assert "sk-test-secret" not in str(exc.value)
 
 
+def test_openai_adapter_allows_empty_api_key(monkeypatch) -> None:
+    monkeypatch.setenv("TEST_API_KEY", "")
+
+    adapter = OpenAICompatibleAdapter(_provider(), _model())
+
+    assert adapter.client.api_key == ""
+    assert adapter.client.auth_headers == {}
+
+
+def test_openai_adapter_defaults_missing_api_key_to_empty(monkeypatch) -> None:
+    monkeypatch.delenv("TEST_API_KEY", raising=False)
+
+    adapter = OpenAICompatibleAdapter(_provider(), _model())
+
+    assert adapter.client.api_key == ""
+    assert adapter.client.auth_headers == {}
+
+
 def test_openai_adapter_classifies_context_overflow(monkeypatch) -> None:
     monkeypatch.setenv("TEST_API_KEY", "sk-test-secret")
     adapter = OpenAICompatibleAdapter(_provider(), _model())

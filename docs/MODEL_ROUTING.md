@@ -144,10 +144,12 @@ Roles that require strict JSON may only use models that support:
 
 ## Role Examples
 
-- Summarizer can stay on `qwen_small` for low cost memory updates
-- PM and Architect can stay on `qwen_35b` for long-context planning
-- Fixer starts on `qwen_small` and escalates to `qwen_35b` after repeated
-  failures
+- `qwen_35b` and `qwen_small` may be routed to the same remote model when you
+  want one shared runtime endpoint
+- Summarizer can still use the `qwen_small` alias if you want a different role
+  policy without changing the served model
+- Fixer can start on `qwen_small` and escalate to `qwen_35b` while both aliases
+  still target the same backend model
 
 ## Audit Expectations
 

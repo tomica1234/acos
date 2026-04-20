@@ -126,7 +126,7 @@ def test_model_registry_loads_configs() -> None:
     model = registry.get_model("qwen_35b")
     agent = registry.get_agent("pm")
 
-    assert provider.base_url == "http://localhost:8000/v1"
+    assert provider.base_url == "https://msi.tail5c01da.ts.net/v1"
     assert model.provider == "local_qwen"
     assert agent.primary_model == "qwen_35b"
 

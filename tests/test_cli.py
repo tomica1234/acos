@@ -69,7 +69,7 @@ def test_list_agents_returns_role_model_mapping(capsys) -> None:
     payload = yaml.safe_load(capsys.readouterr().out)
     implementer = next(item for item in payload["agents"] if item["role"] == "implementer")
     assert implementer["primary_model"] == "qwen_35b"
-    assert "mock_structured" in implementer["fallback_models"]
+    assert "qwen_small" in implementer["fallback_models"]
     assert implementer["allowed_tools_count"] == 4
     assert implementer["output_schema"] == "ImplementationResult"
 
@@ -82,7 +82,7 @@ def test_resolve_model_for_implementer_returns_qwen_35b(capsys) -> None:
     assert payload["selected_model"] == "qwen_35b"
     assert payload["provider"] == "local_qwen"
     assert payload["routing_reason"] == "role_default"
-    assert "mock_structured" in payload["fallback_candidates"]
+    assert "qwen_small" in payload["fallback_candidates"]
 
 
 def test_resolve_model_with_repeated_failures_returns_escalation(capsys) -> None:

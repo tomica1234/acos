@@ -1,9 +1,11 @@
-# Provider and model catalog. Edit base_url and api_key_env for your local endpoints.
+# Provider and model catalog. For now all runtime roles use the same remote
+# OpenAI-compatible endpoint and model, even if multiple config keys remain for
+# routing compatibility.
 providers:
   local_qwen:
     type: openai_compatible
-    base_url: "http://localhost:8000/v1"
-    api_key_env: "QWEN_API_KEY"
+    base_url: "https://msi.tail5c01da.ts.net/v1"
+    api_key_env: "OPENAI_API_KEY"
     timeout_seconds: 120
     default_headers: {}
     supports_tools: true
@@ -14,15 +16,15 @@ providers:
 
   local_small:
     type: openai_compatible
-    base_url: "http://localhost:8001/v1"
-    api_key_env: "SMALL_MODEL_API_KEY"
-    timeout_seconds: 60
+    base_url: "https://msi.tail5c01da.ts.net/v1"
+    api_key_env: "OPENAI_API_KEY"
+    timeout_seconds: 120
     default_headers: {}
     supports_tools: true
     supports_json_mode: false
     supports_streaming: true
-    max_context_tokens: 32768
-    default_max_output_tokens: 8192
+    max_context_tokens: 262144
+    default_max_output_tokens: 32768
 
   mock_provider:
     type: mock
@@ -49,13 +51,13 @@ models:
 
   qwen_small:
     provider: local_small
-    model: "Qwen/Qwen2.5-Coder-7B-Instruct"
-    display_name: "Qwen Small Coder"
-    max_context_tokens: 32768
-    max_output_tokens: 8192
+    model: "Qwen/Qwen3.6-35B-A3B"
+    display_name: "Qwen 3.6 35B A3B"
+    max_context_tokens: 262144
+    max_output_tokens: 32768
     supports_tool_calling: true
     supports_structured_output: false
-    tags: ["coding", "cheap", "summarizer"]
+    tags: ["coding", "long-context", "agentic"]
 
   mock_structured:
     provider: mock_provider

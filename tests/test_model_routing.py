@@ -42,7 +42,7 @@ def test_model_router_default_fallback_escalation_and_budget() -> None:
     fallback_second_selection = router.select_model(
         RoutingContext(role="fixer", last_error="invalid_json", fallback_index=1)
     )
-    assert fallback_second_selection.model_id == "mock_structured"
+    assert fallback_second_selection.model_id == "qwen_small"
     assert fallback_second_selection.reason == RoutingReason.FALLBACK
 
     capability_selection = router.select_model(

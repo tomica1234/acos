@@ -3,7 +3,7 @@ agents:
   pm:
     primary_model: qwen_35b
     fallback_models:
-      - mock_structured
+      - qwen_small
     temperature: 0.2
     top_p: 0.8
     max_output_tokens: 12000
@@ -20,7 +20,7 @@ agents:
   architect:
     primary_model: qwen_35b
     fallback_models:
-      - mock_structured
+      - qwen_small
     temperature: 0.1
     top_p: 0.8
     max_output_tokens: 16000
@@ -39,7 +39,7 @@ agents:
   planner:
     primary_model: qwen_35b
     fallback_models:
-      - mock_structured
+      - qwen_small
     temperature: 0.2
     top_p: 0.8
     max_output_tokens: 12000
@@ -57,7 +57,7 @@ agents:
   implementer:
     primary_model: qwen_35b
     fallback_models:
-      - mock_structured
+      - qwen_small
     temperature: 0.1
     top_p: 0.8
     max_output_tokens: 20000
@@ -76,7 +76,7 @@ agents:
   test_writer:
     primary_model: qwen_35b
     fallback_models:
-      - mock_structured
+      - qwen_small
     temperature: 0.1
     top_p: 0.8
     max_output_tokens: 16000
@@ -94,7 +94,7 @@ agents:
   reviewer:
     primary_model: qwen_35b
     fallback_models:
-      - mock_structured
+      - qwen_small
     temperature: 0.0
     top_p: 0.8
     max_output_tokens: 12000
@@ -111,7 +111,7 @@ agents:
   security_reviewer:
     primary_model: qwen_35b
     fallback_models:
-      - mock_structured
+      - qwen_small
     temperature: 0.0
     top_p: 0.8
     max_output_tokens: 12000
@@ -130,7 +130,7 @@ agents:
     primary_model: qwen_small
     fallback_models:
       - qwen_35b
-      - mock_structured
+      - qwen_small
     temperature: 0.1
     top_p: 0.8
     max_output_tokens: 8192
@@ -152,7 +152,7 @@ agents:
     primary_model: qwen_small
     fallback_models:
       - qwen_35b
-      - mock_structured
+      - qwen_small
     temperature: 0.0
     top_p: 0.8
     max_output_tokens: 8192
@@ -172,7 +172,7 @@ agents:
     primary_model: qwen_small
     fallback_models:
       - qwen_35b
-      - mock_structured
+      - qwen_small
     temperature: 0.0
     top_p: 0.8
     max_output_tokens: 8192

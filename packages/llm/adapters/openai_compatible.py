@@ -26,7 +26,8 @@ class OpenAICompatibleAdapter:
     def __init__(self, provider: ModelProviderConfig, model: ModelConfig) -> None:
         self.provider = provider
         self.model = model
-        api_key = os.environ.get(provider.api_key_env, "missing-api-key")
+        api_key_env = provider.api_key_env.strip()
+        api_key = os.environ.get(api_key_env, "") if api_key_env else ""
         self.client = OpenAI(
             api_key=api_key,
             base_url=provider.base_url,

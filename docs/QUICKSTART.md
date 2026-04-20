@@ -17,8 +17,7 @@ Set the API keys expected by `configs/model_providers.yaml`.
 Example:
 
 ```bash
-export QWEN_API_KEY=replace-me
-export SMALL_MODEL_API_KEY=replace-me
+export OPENAI_API_KEY=replace-me
 export MOCK_API_KEY=dummy
 ```
 

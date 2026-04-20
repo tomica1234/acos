@@ -96,8 +96,7 @@ Example:
 例:
 
 ```bash
-export QWEN_API_KEY=replace-me
-export SMALL_MODEL_API_KEY=replace-me
+export OPENAI_API_KEY=replace-me
 export MOCK_API_KEY=dummy
 ```
 
@@ -119,8 +118,8 @@ Example provider shape:
 providers:
   local_qwen:
     type: openai_compatible
-    base_url: "http://localhost:8000/v1"
-    api_key_env: "QWEN_API_KEY"
+    base_url: "https://msi.tail5c01da.ts.net/v1"
+    api_key_env: "OPENAI_API_KEY"
     supports_tools: true
     supports_json_mode: false
 ```
@@ -175,7 +174,7 @@ Example idea:
 
 - `pm.primary_model = qwen_35b`
 - `summarizer.primary_model = qwen_small`
-- `fixer.fallback_models = [qwen_35b, mock_structured]`
+- `qwen_35b` and `qwen_small` can point at the same remote model while preserving routing aliases
 
 ### `configs/model_routing.yaml`
 
