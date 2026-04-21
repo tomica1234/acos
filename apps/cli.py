@@ -4,7 +4,13 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import plistlib
 from pathlib import Path
+import signal
+import subprocess
+import sys
+import time
 from typing import Any, Sequence
 
 import uvicorn
@@ -17,6 +23,9 @@ from packages.llm.routing import ModelRouter, RoutingContext
 from packages.orchestrator.approval import ApprovalError
 from packages.orchestrator.job_runner import JobRunner, build_default_runner
 from packages.orchestrator.policy import PolicyEngine
+from packages.orchestrator.provider_health import ProviderHealthChecker
+from packages.orchestrator.runtime import RuntimeManager
+from packages.orchestrator.worker_daemon import WorkerConfig, WorkerDaemon
 from packages.mcp_client.fake import FakeMCPEnvironment
 from packages.schemas.agent_outputs import (
     ArchitecturePlan,
@@ -33,10 +42,12 @@ from packages.schemas.jobs import JobSpec
 from packages.schemas.models import (
     FixStatus,
     ImplementationStatus,
+    JobStatus,
     ReviewDecision,
     TaskComplexity,
 )
 from packages.schemas.tasks import PlannedTask, TaskGraph
+from packages.schemas.runtime import RuntimeConfig
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -97,11 +108,14 @@ def build_parser() -> argparse.ArgumentParser:
     api.add_argument("--port", type=int, default=8080)
 
     worker = subparsers.add_parser("worker")
+    worker.add_argument("worker_action", nargs="?", choices=["run", "recover"], default="run")
     worker.add_argument("--config-dir", default="configs")
     worker.add_argument("--repo", default=".")
+    worker.add_argument("--workspace")
     worker.add_argument("--request")
     worker.add_argument("--branch", default="acos/default")
     worker.add_argument("--file")
+    worker.add_argument("--forever", action="store_true")
 
     run_demo = subparsers.add_parser("run-demo")
     run_demo.add_argument("--workspace", required=True)
@@ -142,10 +156,78 @@ def build_parser() -> argparse.ArgumentParser:
     jobs = subparsers.add_parser("jobs")
     jobs_subparsers = jobs.add_subparsers(dest="jobs_command", required=True)
 
+    jobs_submit = jobs_subparsers.add_parser("submit")
+    jobs_submit.add_argument("--config-dir", default="configs")
+    jobs_submit.add_argument("--workspace", default=".")
+    jobs_submit.add_argument("--file", required=True)
+
+    jobs_list = jobs_subparsers.add_parser("list")
+    jobs_list.add_argument("--config-dir", default="configs")
+    jobs_list.add_argument("--workspace", default=".")
+
+    jobs_show = jobs_subparsers.add_parser("show")
+    jobs_show.add_argument("job_id")
+    jobs_show.add_argument("--config-dir", default="configs")
+    jobs_show.add_argument("--workspace", default=".")
+
+    jobs_status = jobs_subparsers.add_parser("status")
+    jobs_status.add_argument("job_id")
+    jobs_status.add_argument("--config-dir", default="configs")
+    jobs_status.add_argument("--workspace", default=".")
+
+    jobs_watch = jobs_subparsers.add_parser("watch")
+    jobs_watch.add_argument("job_id")
+    jobs_watch.add_argument("--config-dir", default="configs")
+    jobs_watch.add_argument("--workspace", default=".")
+    jobs_watch.add_argument("--poll-interval", type=float, default=1.0)
+    jobs_watch.add_argument("--max-iterations", type=int)
+
+    jobs_pause = jobs_subparsers.add_parser("pause")
+    jobs_pause.add_argument("job_id")
+    jobs_pause.add_argument("--config-dir", default="configs")
+    jobs_pause.add_argument("--workspace", default=".")
+
     jobs_resume = jobs_subparsers.add_parser("resume")
     jobs_resume.add_argument("job_id")
     jobs_resume.add_argument("--config-dir", default="configs")
     jobs_resume.add_argument("--workspace", default=".")
+
+    jobs_cancel = jobs_subparsers.add_parser("cancel")
+    jobs_cancel.add_argument("job_id")
+    jobs_cancel.add_argument("--config-dir", default="configs")
+    jobs_cancel.add_argument("--workspace", default=".")
+
+    jobs_logs = jobs_subparsers.add_parser("logs")
+    jobs_logs.add_argument("job_id")
+    jobs_logs.add_argument("--config-dir", default="configs")
+    jobs_logs.add_argument("--workspace", default=".")
+
+    runtime = subparsers.add_parser("runtime")
+    runtime.add_argument("runtime_action", nargs="?", choices=["status", "check", "watch"], default="status")
+    runtime.add_argument("--config-dir", default="configs")
+    runtime.add_argument("--workspace", default=".")
+    runtime.add_argument("--poll-interval", type=float, default=2.0)
+    runtime.add_argument("--max-iterations", type=int)
+
+    check_provider = subparsers.add_parser("check-provider")
+    check_provider.add_argument("--config-dir", default="configs")
+    check_provider.add_argument("--provider", required=True)
+
+    check_model = subparsers.add_parser("check-model")
+    check_model.add_argument("--config-dir", default="configs")
+    check_model.add_argument("--model", required=True)
+
+    daemon = subparsers.add_parser("daemon")
+    daemon.add_argument(
+        "daemon_action",
+        nargs="?",
+        choices=["start", "stop", "status", "logs", "install-launchd", "uninstall-launchd"],
+        default="status",
+    )
+    daemon.add_argument("--config-dir", default="configs")
+    daemon.add_argument("--workspace", default=".")
+    daemon.add_argument("--foreground", action="store_true")
+    daemon.add_argument("--detach", action="store_true")
     return parser
 
 
@@ -172,6 +254,12 @@ def validate_config_bundle(config_dir: str | Path) -> list[str]:
             routing_path=config_path / "model_routing.yaml",
         )
         policy = PolicyEngine.from_path(config_path / "policies.yaml")
+        if (config_path / "runtime.yaml").exists():
+            runtime_payload = yaml.safe_load((config_path / "runtime.yaml").read_text(encoding="utf-8")) or {}
+            RuntimeConfig(**(runtime_payload.get("runtime") or {}))
+        if (config_path / "worker.yaml").exists():
+            worker_payload = yaml.safe_load((config_path / "worker.yaml").read_text(encoding="utf-8")) or {}
+            WorkerConfig(**(worker_payload.get("worker") or {}))
     except ConfigValidationError as exc:
         return list(exc.errors)
     except Exception as exc:
@@ -371,6 +459,7 @@ def serialize_approval(approval: Any) -> dict[str, Any]:
 def build_job_result_payload(record: Any) -> dict[str, Any]:
     return {
         "job_id": record.job_id,
+        "title": record.title,
         "status": record.status.value,
         "target_branch": record.spec.target_branch,
         "repo_path": record.spec.repo_path,
@@ -379,9 +468,86 @@ def build_job_result_payload(record: Any) -> dict[str, Any]:
         "failure_count": record.failure_count,
         "same_test_failure_count": record.same_test_failure_count,
         "last_error": record.last_error,
+        "runtime_error": getattr(record, "runtime_error", None),
+        "provider_status": getattr(record, "provider_status", None),
+        "current_phase": getattr(record, "current_phase", None),
+        "current_task_id": getattr(record, "current_task_id", None),
         "pending_approval_id": record.pending_approval_id,
+        "pending_runtime_issue_id": getattr(record, "pending_runtime_issue_id", None),
         "audit_event_count": len(record.audit_events),
         "outputs": record.outputs,
+    }
+
+
+def workspace_runtime_paths(workspace_root: str | Path) -> dict[str, Path]:
+    workspace = Path(workspace_root).resolve()
+    acos_dir = workspace / ".acos"
+    logs_dir = acos_dir / "logs"
+    jobs_log_dir = logs_dir / "jobs"
+    return {
+        "workspace": workspace,
+        "acos_dir": acos_dir,
+        "logs_dir": logs_dir,
+        "jobs_log_dir": jobs_log_dir,
+        "runtime_db": acos_dir / "acos.sqlite3",
+        "worker_log": logs_dir / "worker.log",
+        "worker_out_log": logs_dir / "worker.out.log",
+        "worker_err_log": logs_dir / "worker.err.log",
+        "audit_log": logs_dir / "audit.log",
+        "runtime_log": logs_dir / "runtime.log",
+        "pid_file": acos_dir / "worker.pid",
+        "launchd_plist": Path.home() / "Library" / "LaunchAgents" / "com.acos.worker.plist",
+    }
+
+
+def ensure_runtime_directories(workspace_root: str | Path) -> dict[str, Path]:
+    paths = workspace_runtime_paths(workspace_root)
+    paths["acos_dir"].mkdir(parents=True, exist_ok=True)
+    paths["logs_dir"].mkdir(parents=True, exist_ok=True)
+    paths["jobs_log_dir"].mkdir(parents=True, exist_ok=True)
+    for key in ("worker_log", "worker_out_log", "worker_err_log", "audit_log", "runtime_log"):
+        paths[key].touch(exist_ok=True)
+    return paths
+
+
+def build_health_checker(config_dir: str | Path) -> tuple[ModelRegistry, ProviderHealthChecker]:
+    registry, _ = load_registry_and_policy(config_dir)
+    return registry, ProviderHealthChecker(registry)
+
+
+def append_log_line(path: Path, message: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        (path.read_text(encoding="utf-8") if path.exists() else "") + message.rstrip() + "\n",
+        encoding="utf-8",
+    )
+
+
+def build_launchd_plist(
+    *,
+    workspace_root: str | Path,
+    config_dir: str | Path,
+    keep_alive: bool = True,
+    run_at_load: bool = True,
+) -> dict[str, Any]:
+    paths = ensure_runtime_directories(workspace_root)
+    return {
+        "Label": "com.acos.worker",
+        "ProgramArguments": [
+            "acos",
+            "worker",
+            "run",
+            "--forever",
+            "--config-dir",
+            str(Path(config_dir).resolve()),
+            "--repo",
+            str(paths["workspace"]),
+        ],
+        "WorkingDirectory": str(paths["workspace"]),
+        "StandardOutPath": str(paths["worker_out_log"]),
+        "StandardErrorPath": str(paths["worker_err_log"]),
+        "KeepAlive": keep_alive,
+        "RunAtLoad": run_at_load,
     }
 
 
@@ -580,39 +746,24 @@ def main(argv: Sequence[str] | None = None) -> int:
         uvicorn.run("apps.api.main:app", host=args.host, port=args.port, reload=False)
         return 0
     if args.command == "worker":
-        if args.file:
-            spec = load_job_spec_from_file(args.file)
-            runner = load_runner_for_workspace(
-                config_dir=args.config_dir,
-                workspace_root=spec.workspace_root or spec.repo_path,
-            )
-            record = runner.run_job(spec)
-            print(yaml.safe_dump(build_job_result_payload(record), sort_keys=False, allow_unicode=True))
-            return 0 if record.status.value == "done" else 1
-        if args.request is None:
-            dump_yaml(
-                {
-                    "status": "idle",
-                    "message": (
-                        "ACOS worker MVP is available. Pass --request or --file to execute a single job."
-                    ),
-                }
-            )
-            return 0
         from apps.worker.main import main as worker_main
 
-        return worker_main(
-            [
-                "--config-dir",
-                args.config_dir,
-                "--repo",
-                args.repo,
-                "--request",
-                args.request,
-                "--branch",
-                args.branch,
-            ]
-        )
+        forwarded_args = [
+            args.worker_action,
+            "--config-dir",
+            args.config_dir,
+            "--repo",
+            args.workspace or args.repo,
+        ]
+        if args.file:
+            forwarded_args.extend(["--file", args.file])
+        if args.request:
+            forwarded_args.extend(["--request", args.request])
+        if args.branch:
+            forwarded_args.extend(["--branch", args.branch])
+        if args.forever:
+            forwarded_args.append("--forever")
+        return worker_main(forwarded_args)
     if args.command == "run-demo":
         runner, environment = build_demo_runner(args.config_dir, args.workspace)
         spec = JobSpec(
@@ -637,6 +788,73 @@ def main(argv: Sequence[str] | None = None) -> int:
         record = runner.run_job(spec)
         dump_yaml(build_job_result_payload(record))
         return 0 if record.status.value == "done" else 1
+    if args.command == "check-provider":
+        _registry, checker = build_health_checker(args.config_dir)
+        health = checker.check_provider(args.provider)
+        dump_yaml(health.model_dump(mode="json"))
+        return 0 if health.status.value == "ok" else 1
+    if args.command == "check-model":
+        _registry, checker = build_health_checker(args.config_dir)
+        health = checker.check_model(args.model)
+        dump_yaml(health.model_dump(mode="json"))
+        return 0 if health.status.value == "ok" else 1
+    if args.command == "runtime":
+        runner = load_runner_for_workspace(
+            config_dir=args.config_dir,
+            workspace_root=args.workspace,
+        )
+        if args.runtime_action == "check":
+            resumed = runner.runtime_manager.maybe_resume_waiting_jobs() if runner.runtime_manager else []
+            dump_yaml(
+                {
+                    "ok": True,
+                    "resumed_jobs": [build_job_result_payload(item) for item in resumed],
+                    "runtime_issues": [
+                        issue.model_dump(mode="json")
+                        for issue in runner.store.list_runtime_issues()
+                    ],
+                }
+            )
+            return 0
+        if args.runtime_action == "watch":
+            iterations = 0
+            while True:
+                resumed = runner.runtime_manager.maybe_resume_waiting_jobs() if runner.runtime_manager else []
+                dump_yaml(
+                    {
+                        "resumed_jobs": [build_job_result_payload(item) for item in resumed],
+                        "runtime_issues": [
+                            issue.model_dump(mode="json")
+                            for issue in runner.store.list_runtime_issues()
+                        ],
+                    }
+                )
+                iterations += 1
+                if args.max_iterations is not None and iterations >= args.max_iterations:
+                    return 0
+                time.sleep(args.poll_interval)
+        dump_yaml(
+            {
+                "runtime_issues": [
+                    issue.model_dump(mode="json")
+                    for issue in runner.store.list_runtime_issues()
+                ],
+                "waiting_jobs": [
+                    build_job_result_payload(item)
+                    for item in runner.list_jobs(
+                        statuses=[
+                            item
+                            for item in (
+                                JobStatus.WAITING_RUNTIME,
+                                JobStatus.PROVIDER_UNAVAILABLE,
+                                JobStatus.RETRYING_PROVIDER,
+                            )
+                        ]
+                    )
+                ],
+            }
+        )
+        return 0
     if args.command == "approvals":
         runner = load_runner_for_workspace(
             config_dir=args.config_dir,
@@ -712,6 +930,70 @@ def main(argv: Sequence[str] | None = None) -> int:
             config_dir=args.config_dir,
             workspace_root=args.workspace,
         )
+        if args.jobs_command == "submit":
+            spec = load_job_spec_from_file(args.file)
+            runner = load_runner_for_workspace(
+                config_dir=args.config_dir,
+                workspace_root=spec.workspace_root or spec.repo_path,
+            )
+            record = runner.submit(spec)
+            dump_yaml({"ok": True, "job": build_job_result_payload(record)})
+            return 0
+        if args.jobs_command == "list":
+            dump_yaml({"jobs": [build_job_result_payload(item) for item in runner.list_jobs()]})
+            return 0
+        if args.jobs_command in {"show", "status"}:
+            try:
+                record = runner.get(args.job_id)
+            except KeyError:
+                dump_yaml({"ok": False, "error": "job not found"})
+                return 1
+            payload = build_job_result_payload(record)
+            if args.jobs_command == "status":
+                payload = {
+                    "job_id": record.job_id,
+                    "status": record.status.value,
+                    "current_phase": record.current_phase,
+                    "last_error": record.last_error,
+                    "runtime_error": record.runtime_error,
+                    "pending_approval_id": record.pending_approval_id,
+                    "pending_runtime_issue_id": record.pending_runtime_issue_id,
+                }
+            dump_yaml({"ok": True, "job": payload})
+            return 0
+        if args.jobs_command == "watch":
+            iterations = 0
+            while True:
+                try:
+                    record = runner.get(args.job_id)
+                except KeyError:
+                    dump_yaml({"ok": False, "error": "job not found"})
+                    return 1
+                dump_yaml({"job": build_job_result_payload(record)})
+                iterations += 1
+                if record.status in {
+                    JobStatus.DONE,
+                    JobStatus.BLOCKED,
+                    JobStatus.STUCK,
+                    JobStatus.FAILED,
+                    JobStatus.CANCELLED,
+                    JobStatus.WAITING_APPROVAL,
+                    JobStatus.WAITING_RUNTIME,
+                    JobStatus.PROVIDER_UNAVAILABLE,
+                    JobStatus.PAUSED,
+                }:
+                    return 0
+                if args.max_iterations is not None and iterations >= args.max_iterations:
+                    return 0
+                time.sleep(args.poll_interval)
+        if args.jobs_command == "pause":
+            try:
+                record = runner.pause_job(args.job_id)
+            except KeyError:
+                dump_yaml({"ok": False, "error": "job not found"})
+                return 1
+            dump_yaml({"ok": True, "job": build_job_result_payload(record)})
+            return 0
         if args.jobs_command == "resume":
             try:
                 record = runner.resume_job(args.job_id)
@@ -720,4 +1002,123 @@ def main(argv: Sequence[str] | None = None) -> int:
                 return 1
             dump_yaml({"ok": True, "job": build_job_result_payload(record)})
             return 0
+        if args.jobs_command == "cancel":
+            try:
+                record = runner.cancel_job(args.job_id)
+            except KeyError:
+                dump_yaml({"ok": False, "error": "job not found"})
+                return 1
+            dump_yaml({"ok": True, "job": build_job_result_payload(record)})
+            return 0
+        if args.jobs_command == "logs":
+            try:
+                runner.get(args.job_id)
+            except KeyError:
+                dump_yaml({"ok": False, "error": "job not found"})
+                return 1
+            dump_yaml(
+                {
+                    "ok": True,
+                    "notifications": runner.get_notifications(args.job_id),
+                    "events": [event.model_dump(mode="json") for event in runner.get_events(args.job_id)],
+                }
+            )
+            return 0
+    if args.command == "daemon":
+        workspace_root = args.workspace
+        runner = load_runner_for_workspace(
+            config_dir=args.config_dir,
+            workspace_root=workspace_root,
+        )
+        if runner.runtime_manager is None:
+            dump_yaml({"ok": False, "error": "runtime manager is not configured"})
+            return 1
+        daemon_paths = ensure_runtime_directories(workspace_root)
+        worker = WorkerDaemon.from_path(
+            Path(args.config_dir) / "worker.yaml",
+            runner=runner,
+            store=runner.store,
+            runtime_manager=runner.runtime_manager,
+        )
+        if args.daemon_action == "start":
+            if args.detach:
+                process = subprocess.Popen(
+                    [
+                        sys.executable,
+                        "-m",
+                        "apps.worker.main",
+                        "run",
+                        "--forever",
+                        "--config-dir",
+                        str(Path(args.config_dir).resolve()),
+                        "--repo",
+                        str(Path(workspace_root).resolve()),
+                    ],
+                    cwd=str(Path(workspace_root).resolve()),
+                    stdout=daemon_paths["worker_out_log"].open("a", encoding="utf-8"),
+                    stderr=daemon_paths["worker_err_log"].open("a", encoding="utf-8"),
+                    start_new_session=True,
+                )
+                daemon_paths["pid_file"].write_text(str(process.pid), encoding="utf-8")
+                dump_yaml({"ok": True, "pid": process.pid, "mode": "detached"})
+                return 0
+            dump_yaml({"ok": True, "mode": "foreground"})
+            worker.run_forever()
+            return 0
+        if args.daemon_action == "stop":
+            if daemon_paths["pid_file"].exists():
+                pid = int(daemon_paths["pid_file"].read_text(encoding="utf-8").strip())
+                try:
+                    os.kill(pid, signal.SIGTERM)
+                except ProcessLookupError:
+                    pass
+                daemon_paths["pid_file"].unlink(missing_ok=True)
+                dump_yaml({"ok": True, "stopped_pid": pid})
+                return 0
+            dump_yaml({"ok": True, "message": "no running daemon pid file"})
+            return 0
+        if args.daemon_action == "logs":
+            content = ""
+            for candidate in (daemon_paths["worker_out_log"], daemon_paths["worker_log"], daemon_paths["worker_err_log"]):
+                if candidate.exists():
+                    content += candidate.read_text(encoding="utf-8")
+            dump_yaml({"ok": True, "logs": content[-20000:]})
+            return 0
+        if args.daemon_action == "install-launchd":
+            plist_payload = build_launchd_plist(
+                workspace_root=workspace_root,
+                config_dir=args.config_dir,
+            )
+            daemon_paths["launchd_plist"].parent.mkdir(parents=True, exist_ok=True)
+            daemon_paths["launchd_plist"].write_bytes(plistlib.dumps(plist_payload))
+            dump_yaml(
+                {
+                    "ok": True,
+                    "plist_path": str(daemon_paths["launchd_plist"]),
+                    "launchctl_bootstrap": f"launchctl bootstrap gui/$(id -u) {daemon_paths['launchd_plist']}",
+                    "launchctl_bootout": f"launchctl bootout gui/$(id -u) {daemon_paths['launchd_plist']}",
+                    "launchctl_kickstart": "launchctl kickstart -k gui/$(id -u)/com.acos.worker",
+                }
+            )
+            return 0
+        if args.daemon_action == "uninstall-launchd":
+            daemon_paths["launchd_plist"].unlink(missing_ok=True)
+            dump_yaml({"ok": True, "plist_removed": str(daemon_paths["launchd_plist"])})
+            return 0
+        dump_yaml(
+            {
+                "ok": True,
+                "pid_file_exists": daemon_paths["pid_file"].exists(),
+                "launchd_plist_exists": daemon_paths["launchd_plist"].exists(),
+                "heartbeats": [
+                    heartbeat.model_dump(mode="json")
+                    for heartbeat in runner.store.list_worker_heartbeats()
+                ],
+            }
+        )
+        return 0
     return 1
+
+
+if __name__ == "__main__":  # pragma: no cover
+    raise SystemExit(main())

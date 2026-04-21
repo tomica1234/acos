@@ -16,6 +16,43 @@ tool permissions, and model selection. LLMs do not own workflow control.
 状態遷移、リトライ、stuck / blocked 判定、ツール権限、モデル選択は Orchestrator が担当し、
 LLM 自体はワークフロー制御を持ちません。
 
+## Durable Runtime / 永続実行
+
+ACOS now includes a durable runtime backed by SQLite. `acos jobs submit --file job.yaml`
+persists the job in `.acos/acos.sqlite3`, and `acos worker run --forever` or
+`acos daemon start --foreground` can continue execution even if your terminal,
+browser, SSH session, or Codex UI disconnects.
+
+ACOS は SQLite ベースの Durable Runtime を持ちます。`acos jobs submit --file job.yaml`
+で投入した job は `.acos/acos.sqlite3` に永続化され、`acos worker run --forever`
+または `acos daemon start --foreground` によって、ターミナルやブラウザ、SSH、
+Codex UI が切断されても再接続後に継続できます。
+
+Key behaviors:
+
+- approval-required operations move the job to `waiting_approval`
+- provider outages move the job to `waiting_runtime` or `provider_unavailable`
+- stale heartbeat / lease detection moves interrupted jobs to `recovering`
+- restart resumes from checkpoints instead of replaying every step
+
+主な挙動:
+
+- 承認が必要な操作は `waiting_approval`
+- provider 障害は `waiting_runtime` または `provider_unavailable`
+- stale heartbeat / lease は `recovering`
+- 再起動後は checkpoint から再開
+
+Important limitation:
+
+- If the host Mac sleeps or loses power, execution stops while the machine is
+  unavailable. After the host starts again, the worker can recover unfinished
+  jobs from checkpoints.
+
+重要な制限:
+
+- 実行ホストの Mac がスリープまたは電源断になると、その間の実行は止まります。
+  起動後に worker が checkpoint から復旧できます。
+
 ## Architecture Overview / アーキテクチャ概要
 
 - `packages/orchestrator/`: job runner, policy engine, audit, context builder
@@ -203,6 +240,58 @@ Defines:
 - test command restrictions
 - forbidden patch targets
 - protected file and secret-path restrictions
+
+### `configs/runtime.yaml`
+
+Defines provider health checks, waiting-runtime behavior, provider recovery,
+and whether recovery auto-resumes or waits for a manual `acos jobs resume`.
+
+### `configs/worker.yaml`
+
+Defines worker polling, heartbeat, lease TTL, stale recovery thresholds, and
+the default SQLite/log paths used by daemon mode.
+
+## Daemon Mode / 常駐実行
+
+Foreground:
+
+```bash
+acos daemon start --foreground --workspace .
+```
+
+Detached background process:
+
+```bash
+acos daemon start --detach --workspace .
+acos daemon status --workspace .
+acos daemon logs --workspace .
+```
+
+launchd plist generation on macOS:
+
+```bash
+acos daemon install-launchd --workspace .
+acos daemon uninstall-launchd --workspace .
+```
+
+The generated plist does not embed API keys or raw secrets.
+
+## Runtime Recovery / 復旧
+
+Check provider and model health:
+
+```bash
+acos check-provider --provider local_qwen
+acos check-model --model qwen_35b
+acos runtime status --workspace .
+acos runtime check --workspace .
+```
+
+If a provider recovers and auto-resume is disabled, continue manually:
+
+```bash
+acos jobs resume <job_id> --workspace .
+```
 
 - デフォルト拒否のツールポリシー
 - リリース系ブランチのルール

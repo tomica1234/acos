@@ -6,6 +6,8 @@ providers:
     type: openai_compatible
     base_url: "https://msi.tail5c01da.ts.net/v1"
     api_key_env: "OPENAI_API_KEY"
+    allow_empty_api_key: true
+    default_api_key: "EMPTY"
     timeout_seconds: 120
     default_headers: {}
     supports_tools: true
@@ -18,6 +20,8 @@ providers:
     type: openai_compatible
     base_url: "https://msi.tail5c01da.ts.net/v1"
     api_key_env: "OPENAI_API_KEY"
+    allow_empty_api_key: true
+    default_api_key: "EMPTY"
     timeout_seconds: 120
     default_headers: {}
     supports_tools: true

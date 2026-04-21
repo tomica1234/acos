@@ -13,6 +13,10 @@ tools:
     orchestrator:
       - git_server.create_branch
       - notify_server.send_approval_request
+      - notify_server.send_runtime_wait
+      - notify_server.send_provider_recovered
+      - notify_server.send_job_completed
+      - notify_server.send_job_failed
 
     pm:
       - memory_server.write_memory

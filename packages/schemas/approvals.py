@@ -7,7 +7,7 @@ from enum import StrEnum
 from typing import Any, Literal
 from uuid import uuid4
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, computed_field
 
 
 def utc_now() -> datetime:
@@ -26,6 +26,14 @@ class PolicyAction(StrEnum):
     ALLOW_AND_AUDIT = "allow_and_audit"
     REQUIRE_APPROVAL = "require_approval"
     DENY = "deny"
+
+
+class ApprovalStatus(StrEnum):
+    PENDING = "pending"
+    APPROVED = "approved"
+    REJECTED = "rejected"
+    EXPIRED = "expired"
+    CANCELLED = "cancelled"
 
 
 class RiskDecision(BaseModel):
@@ -56,11 +64,26 @@ class ApprovalRequest(BaseModel):
     proposed_action: dict[str, Any] = Field(default_factory=dict)
     created_at: datetime = Field(default_factory=utc_now)
     expires_at: datetime | None = None
-    status: Literal["pending", "approved", "rejected", "expired", "cancelled"] = "pending"
+    status: ApprovalStatus = ApprovalStatus.PENDING
     approval_token_hash: str | None = None
     approver: str | None = None
     resolution_reason: str | None = None
     resolved_at: datetime | None = None
+
+    @computed_field
+    @property
+    def decided_at(self) -> datetime | None:
+        return self.resolved_at
+
+    @computed_field
+    @property
+    def decided_by(self) -> str | None:
+        return self.approver
+
+    @computed_field
+    @property
+    def reject_reason(self) -> str | None:
+        return self.resolution_reason if self.status == ApprovalStatus.REJECTED else None
 
 
 class ApprovalChallenge(BaseModel):

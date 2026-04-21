@@ -1,6 +1,6 @@
 import pytest
 
-from packages.llm.errors import ContextBudgetExceededError
+from packages.llm.errors import ContextBudgetExceededError, RoutingError
 from packages.llm.routing import ModelRouter, RoutingContext
 from packages.schemas.models import RoutingReason, TaskComplexity
 
@@ -58,3 +58,23 @@ def test_model_router_default_fallback_escalation_and_budget() -> None:
 
     with pytest.raises(ContextBudgetExceededError):
         router.select_model(RoutingContext(role="summarizer", context_tokens=400000))
+
+
+def test_model_router_reports_exhausted_fallback_cause() -> None:
+    registry = load_registry()
+    router = ModelRouter(registry)
+
+    with pytest.raises(
+        RoutingError,
+        match=(
+            r"Fallbacks exhausted for role pm after timeout; "
+            r"attempted models: qwen_35b, qwen_small"
+        ),
+    ):
+        router.select_model(
+            RoutingContext(
+                role="pm",
+                last_error="timeout",
+                attempted_model_keys=["qwen_35b", "qwen_small"],
+            )
+        )

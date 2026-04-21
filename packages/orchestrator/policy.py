@@ -277,12 +277,18 @@ class PolicyEngine:
             return self.classify_named_operation("memory_write_project")
         if tool_name == "notify_server.send_notification":
             return self.classify_named_operation("notification_send_status")
-        if tool_name == "notify_server.send_approval_request":
+        if tool_name in {
+            "notify_server.send_approval_request",
+            "notify_server.send_runtime_wait",
+            "notify_server.send_provider_recovered",
+            "notify_server.send_job_completed",
+            "notify_server.send_job_failed",
+        }:
             return RiskDecision(
                 operation="notification_send_status",
                 policy_action=PolicyAction.ALLOW_AND_AUDIT,
                 risk_level=RiskLevel.MEDIUM,
-                reason="approval notification is allowed with audit",
+                reason="notification is allowed with audit",
             )
         return RiskDecision(
             operation=tool_name,

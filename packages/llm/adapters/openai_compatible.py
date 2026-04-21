@@ -10,7 +10,9 @@ from openai import (
     APIConnectionError,
     APIStatusError,
     APITimeoutError,
+    AuthenticationError,
     BadRequestError,
+    NotFoundError,
     OpenAI,
     RateLimitError,
 )
@@ -28,10 +30,15 @@ class OpenAICompatibleAdapter:
         self.model = model
         api_key_env = provider.api_key_env.strip()
         api_key = os.environ.get(api_key_env, "") if api_key_env else ""
+        if not api_key and provider.allow_empty_api_key:
+            api_key = provider.default_api_key or "EMPTY"
+        if not api_key and provider.default_api_key is not None:
+            api_key = provider.default_api_key
         self.client = OpenAI(
             api_key=api_key,
             base_url=provider.base_url,
             timeout=provider.timeout_seconds,
+            max_retries=0,
             default_headers=provider.default_headers,
         )
 
@@ -61,7 +68,7 @@ class OpenAICompatibleAdapter:
             response = self.client.chat.completions.create(**kwargs)
         except Exception as exc:  # pragma: no cover - network/provider failure
             raise AdapterError(
-                redact_text(str(exc)),
+                self._format_error_message(exc),
                 code=self._classify_error(exc),
             ) from exc
         choice = response.choices[0]
@@ -93,7 +100,7 @@ class OpenAICompatibleAdapter:
             model=self.model.model_id,
             provider=self.provider.name,
             finish_reason=getattr(choice, "finish_reason", None),
-            usage=response.usage.model_dump() if getattr(response, "usage", None) else None,
+            usage=self._normalize_usage(getattr(response, "usage", None)),
         )
 
     @staticmethod
@@ -111,16 +118,66 @@ class OpenAICompatibleAdapter:
         return {"value": arguments}
 
     @staticmethod
+    def _normalize_usage(usage: Any) -> dict[str, int] | None:
+        if usage is None:
+            return None
+        payload = usage.model_dump() if hasattr(usage, "model_dump") else usage
+        if not isinstance(payload, dict):
+            return None
+        normalized: dict[str, int] = {}
+        for key, value in payload.items():
+            if isinstance(value, bool):
+                continue
+            if isinstance(value, int):
+                normalized[key] = value
+        return normalized or None
+
+    def _format_error_message(self, exc: Exception) -> str:
+        if isinstance(exc, APIStatusError):
+            status_code = getattr(exc, "status_code", None)
+            if status_code is None and getattr(exc, "response", None) is not None:
+                status_code = exc.response.status_code
+            message = (
+                f"Provider {self.provider.name} returned HTTP {status_code} "
+                f"for model {self.model.model}"
+            )
+            body = getattr(exc, "body", None)
+            if body not in (None, ""):
+                serialized = (
+                    json.dumps(body, sort_keys=True, default=str)
+                    if not isinstance(body, str)
+                    else body
+                )
+                message = f"{message}: {serialized}"
+            elif getattr(exc, "response", None) is not None:
+                try:
+                    response_text = exc.response.text.strip()
+                except Exception:  # pragma: no cover - defensive
+                    response_text = ""
+                if response_text:
+                    message = f"{message}: {response_text}"
+            return redact_text(message)
+        return redact_text(str(exc))
+
+    @staticmethod
     def _classify_error(exc: Exception) -> str:
+        if isinstance(exc, AuthenticationError):
+            return "auth_error"
         if isinstance(exc, (APITimeoutError, APIConnectionError)):
             return "timeout"
         if isinstance(exc, RateLimitError):
             return "rate_limit"
+        if isinstance(exc, NotFoundError):
+            return "model_not_found"
         if isinstance(exc, APIStatusError):
             if getattr(exc, "status_code", None) == 429:
                 return "rate_limit"
             if getattr(exc, "status_code", None) == 408:
                 return "timeout"
+            if getattr(exc, "status_code", None) == 401:
+                return "auth_error"
+            if getattr(exc, "status_code", None) == 404:
+                return "model_not_found"
         if isinstance(exc, BadRequestError):
             message = str(exc).lower()
             if "context" in message and any(

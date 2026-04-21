@@ -9,7 +9,13 @@ from packages.orchestrator.audit import AuditRecorder
 from packages.orchestrator.policy import PolicyEngine
 from packages.schemas.agent_outputs import FixResult, ImplementationResult, PRD
 from packages.schemas.context import ContextPacket
-from packages.schemas.models import FixStatus, ImplementationStatus, TaskComplexity
+from packages.schemas.models import (
+    FixStatus,
+    ImplementationStatus,
+    ModelResult,
+    ProviderType,
+    TaskComplexity,
+)
 
 from tests.conftest import attach_mock_adapter, config_dir, load_registry
 
@@ -332,3 +338,86 @@ def test_agent_runner_rejects_forbidden_tool_calls(tmp_path) -> None:
             allowed_tools=["repo_server.search_text"],
             require_json_schema=True,
         )
+
+
+def test_agent_runner_serializes_tool_messages_for_openai_compat(tmp_path) -> None:
+    registry = load_registry()
+
+    class RecordingAdapter:
+        def __init__(self) -> None:
+            self.calls: list[list[dict[str, object]]] = []
+
+        def generate(self, **kwargs):
+            messages = kwargs["messages"]
+            self.calls.append(messages)
+            if len(self.calls) == 1:
+                return ModelResult(
+                    content="",
+                    tool_calls=[
+                        {
+                            "id": "call-1",
+                            "name": "repo_server.search_text",
+                            "arguments": {"query": "needle"},
+                        }
+                    ],
+                    raw={"mock": True},
+                    model="qwen_35b",
+                    provider="local_qwen",
+                    finish_reason="tool_calls",
+                )
+            return ModelResult(
+                content=json.dumps(
+                    {
+                        "status": "implemented",
+                        "summary": "Implemented with tool assistance",
+                        "patches": [],
+                    }
+                ),
+                tool_calls=[],
+                raw={"mock": True},
+                model="qwen_35b",
+                provider="local_qwen",
+                finish_reason="stop",
+            )
+
+    adapter = RecordingAdapter()
+    registry.register_adapter_factory(
+        ProviderType.OPENAI_COMPATIBLE,
+        lambda provider, model: adapter,
+    )
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "example.py").write_text("needle = 1\n", encoding="utf-8")
+    runner, _ = _runner(
+        registry,
+        workspace_root=str(workspace),
+        memory_db_path=workspace / ".memory.sqlite3",
+    )
+
+    result, _, _ = runner.run(
+        role="implementer",
+        response_model=ImplementationResult,
+        context_packet=_packet("implementer", repo_path=str(workspace)),
+        routing_context=RoutingContext(role="implementer"),
+        allowed_tools=["repo_server.search_text"],
+        require_json_schema=True,
+    )
+
+    assert result.summary == "Implemented with tool assistance"
+    second_messages = adapter.calls[1]
+    assistant_message = second_messages[-2]
+    tool_message = second_messages[-1]
+    assert assistant_message["role"] == "assistant"
+    assert assistant_message["tool_calls"] == [
+        {
+            "id": "call-1",
+            "type": "function",
+            "function": {
+                "name": "repo_server.search_text",
+                "arguments": "{\"query\": \"needle\"}",
+            },
+        }
+    ]
+    assert assistant_message["content"] is None
+    assert tool_message["role"] == "tool"
+    assert tool_message["tool_call_id"] == "call-1"

@@ -19,6 +19,8 @@ def _copy_configs(tmp_path: Path) -> Path:
         "agents.yaml",
         "model_routing.yaml",
         "policies.yaml",
+        "runtime.yaml",
+        "worker.yaml",
     ]:
         (target / name).write_text((config_dir() / name).read_text(encoding="utf-8"), encoding="utf-8")
     return target

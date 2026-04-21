@@ -1,5 +1,6 @@
 from pathlib import Path
 
+from packages.llm.errors import AdapterError
 from packages.llm.registry import ModelRegistry
 from packages.mcp_client.fake import FakeMCPEnvironment
 from packages.orchestrator.job_runner import JobRunner
@@ -16,7 +17,7 @@ from packages.schemas.agent_outputs import (
     TestWriterResult as TestWriterOutput,
 )
 from packages.schemas.jobs import JobSpec
-from packages.schemas.models import FixStatus, ImplementationStatus, ReviewDecision, Severity
+from packages.schemas.models import FixStatus, ImplementationStatus, ProviderType, ReviewDecision, Severity
 from packages.schemas.tasks import PlannedTask, TaskGraph
 
 from tests.conftest import attach_mock_adapter, config_dir
@@ -239,3 +240,41 @@ def test_job_runner_reject_blocks_job(tmp_path: Path) -> None:
 
     assert blocked.status.value == "blocked"
     assert blocked.last_error == "do not modify this file"
+
+
+def test_job_runner_surfaces_timeout_when_fallbacks_are_exhausted(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    registry = ModelRegistry.from_paths(
+        provider_path=config_dir() / "model_providers.yaml",
+        agents_path=config_dir() / "agents.yaml",
+        routing_path=config_dir() / "model_routing.yaml",
+    )
+
+    class TimeoutAdapter:
+        def generate(self, **_: object) -> object:
+            raise AdapterError("provider timed out", code="timeout")
+
+    registry.register_adapter_factory(
+        ProviderType.OPENAI_COMPATIBLE,
+        lambda provider, model: TimeoutAdapter(),
+    )
+    policy = PolicyEngine.from_path(config_dir() / "policies.yaml")
+    environment = FakeMCPEnvironment(
+        workspace_root=workspace,
+        memory_db_path=workspace / ".memory.sqlite3",
+    )
+    runner = JobRunner(registry=registry, policy=policy, router=environment.build_router())
+    spec = JobSpec(
+        request_text="Create feature with tests",
+        repo_path=str(workspace),
+        target_branch="acos/provider-timeout",
+    )
+
+    record = runner.run_job(spec)
+
+    assert record.status.value == "failed"
+    assert record.last_error == (
+        "Fallbacks exhausted for role pm after timeout; "
+        "attempted models: qwen_35b, qwen_small"
+    )

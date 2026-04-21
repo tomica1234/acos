@@ -13,8 +13,10 @@ from packages.llm.registry import ModelRegistry
 from packages.orchestrator.approval import ApprovalError
 from packages.orchestrator.job_runner import JobRunner, build_default_runner
 from packages.orchestrator.policy import PolicyEngine
+from packages.orchestrator.provider_health import ProviderHealthChecker
 from packages.schemas.approvals import ApprovalActionPayload, ApprovalRequest
 from packages.schemas.jobs import JobRecord, JobSpec
+from packages.schemas.models import JobStatus
 
 
 class SubmitJobRequest(BaseModel):
@@ -100,15 +102,46 @@ def create_app(
             metadata=payload.metadata,
             workspace_root=payload.workspace_root or payload.repo_path,
         )
-        return runner.run_job(spec)
+        return runner.submit(spec)
+
+    @app.get("/jobs")
+    def list_jobs(workspace: str | None = None) -> dict[str, list[dict[str, Any]]]:
+        runners = [get_runner_for_workspace(workspace)] if workspace is not None else iter_runners()
+        jobs: list[dict[str, Any]] = []
+        for runner in runners:
+            jobs.extend([item.model_dump(mode="json") for item in runner.list_jobs()])
+        return {"jobs": jobs}
 
     @app.get("/jobs/{job_id}", response_model=JobRecord)
     def get_job(job_id: str) -> JobRecord:
         return find_runner_for_job(job_id).get(job_id)
 
+    @app.post("/jobs/{job_id}/pause", response_model=JobRecord)
+    def pause_job(job_id: str) -> JobRecord:
+        return find_runner_for_job(job_id).pause_job(job_id)
+
     @app.post("/jobs/{job_id}/resume", response_model=JobRecord)
     def resume_job(job_id: str) -> JobRecord:
         return find_runner_for_job(job_id).resume_job(job_id)
+
+    @app.post("/jobs/{job_id}/cancel", response_model=JobRecord)
+    def cancel_job(job_id: str) -> JobRecord:
+        return find_runner_for_job(job_id).cancel_job(job_id)
+
+    @app.get("/jobs/{job_id}/events")
+    def get_job_events(job_id: str) -> dict[str, list[dict[str, Any]]]:
+        runner = find_runner_for_job(job_id)
+        return {
+            "events": [event.model_dump(mode="json") for event in runner.get_events(job_id)]
+        }
+
+    @app.get("/jobs/{job_id}/logs")
+    def get_job_logs(job_id: str) -> dict[str, Any]:
+        runner = find_runner_for_job(job_id)
+        return {
+            "notifications": runner.get_notifications(job_id),
+            "events": [event.model_dump(mode="json") for event in runner.get_events(job_id)],
+        }
 
     @app.get("/approvals")
     def list_approvals(
@@ -231,6 +264,83 @@ def create_app(
         policy = PolicyEngine.from_path(resolved_config_dir / "policies.yaml")
         errors = registry.validate(policy=policy)
         return {"ok": not errors, "errors": errors}
+
+    @app.get("/worker/status")
+    def worker_status(workspace: str | None = None) -> dict[str, Any]:
+        runner = get_runner_for_workspace(workspace)
+        heartbeats = runner.store.list_worker_heartbeats()
+        return {
+            "status": "alive" if heartbeats else "idle",
+            "heartbeats": [item.model_dump(mode="json") for item in heartbeats],
+        }
+
+    @app.get("/worker/heartbeats")
+    def worker_heartbeats(workspace: str | None = None) -> dict[str, Any]:
+        runner = get_runner_for_workspace(workspace)
+        return {
+            "heartbeats": [
+                item.model_dump(mode="json") for item in runner.store.list_worker_heartbeats()
+            ]
+        }
+
+    @app.get("/runtime/status")
+    def runtime_status(workspace: str | None = None) -> dict[str, Any]:
+        runner = get_runner_for_workspace(workspace)
+        return {
+            "runtime_issues": [
+                issue.model_dump(mode="json")
+                for issue in runner.store.list_runtime_issues()
+            ],
+            "waiting_jobs": [
+                item.model_dump(mode="json")
+                for item in runner.list_jobs(
+                    statuses=[
+                        JobStatus.WAITING_RUNTIME,
+                        JobStatus.PROVIDER_UNAVAILABLE,
+                        JobStatus.RETRYING_PROVIDER,
+                    ]
+                )
+            ],
+        }
+
+    @app.post("/runtime/check")
+    def runtime_check(workspace: str | None = None) -> dict[str, Any]:
+        runner = get_runner_for_workspace(workspace)
+        resumed = runner.runtime_manager.maybe_resume_waiting_jobs() if runner.runtime_manager else []
+        return {
+            "resumed_jobs": [item.model_dump(mode="json") for item in resumed],
+        }
+
+    @app.get("/providers")
+    def providers() -> dict[str, list[dict[str, Any]]]:
+        registry = ModelRegistry.from_paths(
+            provider_path=resolved_config_dir / "model_providers.yaml",
+            agents_path=resolved_config_dir / "agents.yaml",
+            routing_path=resolved_config_dir / "model_routing.yaml",
+        )
+        return {
+            "providers": [provider.model_dump(mode="json") for provider in registry.providers.values()]
+        }
+
+    @app.get("/providers/{provider_key}/health")
+    def provider_health(provider_key: str) -> dict[str, Any]:
+        registry = ModelRegistry.from_paths(
+            provider_path=resolved_config_dir / "model_providers.yaml",
+            agents_path=resolved_config_dir / "agents.yaml",
+            routing_path=resolved_config_dir / "model_routing.yaml",
+        )
+        checker = ProviderHealthChecker(registry)
+        return checker.check_provider(provider_key).model_dump(mode="json")
+
+    @app.get("/models/{model_key}/health")
+    def model_health(model_key: str) -> dict[str, Any]:
+        registry = ModelRegistry.from_paths(
+            provider_path=resolved_config_dir / "model_providers.yaml",
+            agents_path=resolved_config_dir / "agents.yaml",
+            routing_path=resolved_config_dir / "model_routing.yaml",
+        )
+        checker = ProviderHealthChecker(registry)
+        return checker.check_model(model_key).model_dump(mode="json")
 
     return app
 

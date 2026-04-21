@@ -190,7 +190,13 @@ class ModelRouter:
                 key for key in agent.fallback_models if key not in context.attempted_model_keys
             ]
             if context.fallback_index >= len(fallback_candidates):
-                raise RoutingError(f"No fallback model available for role {context.role}")
+                attempted_models = list(dict.fromkeys(context.attempted_model_keys))
+                attempted_label = ", ".join(attempted_models) if attempted_models else "none"
+                error_label = f" after {context.last_error}" if context.last_error else ""
+                raise RoutingError(
+                    f"Fallbacks exhausted for role {context.role}{error_label}; "
+                    f"attempted models: {attempted_label}"
+                )
             fallback_model = fallback_candidates[context.fallback_index]
             return (
                 [fallback_model, *fallback_candidates[context.fallback_index + 1 :]],

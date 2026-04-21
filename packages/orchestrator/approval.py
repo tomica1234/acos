@@ -14,6 +14,7 @@ from packages.memory.redaction import redact_text, redact_value
 from packages.schemas.approvals import (
     ApprovalChallenge,
     ApprovalRequest,
+    ApprovalStatus,
     PolicyAction,
     RiskDecision,
     RiskLevel,
@@ -127,7 +128,7 @@ class SQLiteApprovalStore:
                     json.dumps(approval.proposed_action, sort_keys=True),
                     approval.created_at.isoformat(),
                     approval.expires_at.isoformat() if approval.expires_at else None,
-                    approval.status,
+                    approval.status.value,
                     approval.approval_token_hash,
                     approval.approver,
                     approval.resolution_reason,
@@ -163,7 +164,7 @@ class SQLiteApprovalStore:
             proposed_action=json.loads(row[8]),
             created_at=datetime.fromisoformat(row[9]),
             expires_at=datetime.fromisoformat(row[10]) if row[10] else None,
-            status=row[11],
+            status=ApprovalStatus(row[11]),
             approval_token_hash=row[12],
             approver=row[13],
             resolution_reason=row[14],
@@ -202,7 +203,7 @@ class SQLiteApprovalStore:
                 proposed_action=json.loads(row[8]),
                 created_at=datetime.fromisoformat(row[9]),
                 expires_at=datetime.fromisoformat(row[10]) if row[10] else None,
-                status=row[11],
+                status=ApprovalStatus(row[11]),
                 approval_token_hash=row[12],
                 approver=row[13],
                 resolution_reason=row[14],
@@ -303,7 +304,7 @@ class ApprovalGateway:
     ) -> ApprovalRequest:
         approval = self._get_pending_or_raise(approval_id)
         self._validate_token_or_actor(approval, token=token, approver=approver)
-        approval.status = "approved"
+        approval.status = ApprovalStatus.APPROVED
         approval.approver = approver or "token"
         approval.approval_token_hash = None
         approval.resolved_at = utc_now()
@@ -319,7 +320,7 @@ class ApprovalGateway:
     ) -> ApprovalRequest:
         approval = self._get_pending_or_raise(approval_id)
         self._validate_token_or_actor(approval, token=token, approver=approver)
-        approval.status = "rejected"
+        approval.status = ApprovalStatus.REJECTED
         approval.approver = approver or "token"
         approval.approval_token_hash = None
         approval.resolution_reason = redact_text(reason or "rejected")
@@ -329,25 +330,30 @@ class ApprovalGateway:
 
     def get(self, approval_id: str) -> ApprovalRequest:
         approval = self.store.get(approval_id)
-        if self._is_expired(approval) and approval.status == "pending":
-            approval.status = "expired"
+        if self._is_expired(approval) and approval.status == ApprovalStatus.PENDING:
+            approval.status = ApprovalStatus.EXPIRED
             approval.resolved_at = utc_now()
             self.store.save(approval)
         return approval
 
     def get_pending(self, job_id: str | None = None) -> list[ApprovalRequest]:
         approvals = self.store.list(job_id=job_id, pending_only=True)
-        return [self.get(item.id) for item in approvals if self.get(item.id).status == "pending"]
+        pending: list[ApprovalRequest] = []
+        for item in approvals:
+            current = self.get(item.id)
+            if current.status == ApprovalStatus.PENDING:
+                pending.append(current)
+        return pending
 
     def list_all(self, job_id: str | None = None) -> list[ApprovalRequest]:
         return [self.get(item.id) for item in self.store.list(job_id=job_id, pending_only=False)]
 
     def _get_pending_or_raise(self, approval_id: str) -> ApprovalRequest:
         approval = self.get(approval_id)
-        if approval.status == "expired":
+        if approval.status == ApprovalStatus.EXPIRED:
             raise ApprovalError("approval request has expired")
-        if approval.status != "pending":
-            raise ApprovalError(f"approval request is already {approval.status}")
+        if approval.status != ApprovalStatus.PENDING:
+            raise ApprovalError(f"approval request is already {approval.status.value}")
         return approval
 
     @staticmethod

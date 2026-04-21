@@ -1,0 +1,13 @@
+worker:
+  id: "local-worker"
+  poll_interval_seconds: 5
+  heartbeat_interval_seconds: 10
+  lease_ttl_seconds: 120
+  max_concurrent_jobs: 1
+  max_concurrent_tasks_per_job: 1
+  recover_stale_jobs_after_seconds: 180
+  graceful_shutdown_timeout_seconds: 30
+  default_job_timeout_minutes: 720
+  log_dir: ".acos/logs"
+  sqlite_path: ".acos/acos.sqlite3"
+  continue_independent_tasks_while_waiting_approval: true

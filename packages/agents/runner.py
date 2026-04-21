@@ -340,13 +340,30 @@ class AgentRunner:
     ) -> None:
         if self.mcp_router is None:
             raise RuntimeError("MCP router is not configured for tool calls")
-        messages.append({"role": "assistant", "tool_calls": tool_calls, "content": ""})
-        for tool_call in tool_calls:
+        serialized_tool_calls: list[dict[str, Any]] = []
+        resolved_tool_calls: list[tuple[str, str, dict[str, Any]]] = []
+        for index, tool_call in enumerate(tool_calls):
             tool_name = str(tool_call["name"])
+            tool_call_id = str(tool_call.get("id") or f"tool_call_{index}")
             self._assert_tools_allowed(role, [tool_name])
             arguments = tool_call.get("arguments", {})
             if not isinstance(arguments, dict):
                 arguments = {"value": arguments}
+            resolved_tool_calls.append((tool_call_id, tool_name, arguments))
+            serialized_tool_calls.append(
+                {
+                    "id": tool_call_id,
+                    "type": "function",
+                    "function": {
+                        "name": tool_name,
+                        "arguments": json.dumps(arguments, sort_keys=True, default=str),
+                    },
+                }
+            )
+        messages.append(
+            {"role": "assistant", "tool_calls": serialized_tool_calls, "content": None}
+        )
+        for tool_call_id, tool_name, arguments in resolved_tool_calls:
             if self.policy_engine is not None:
                 decision = self.policy_engine.classify_tool_call(
                     role=role,
@@ -407,7 +424,7 @@ class AgentRunner:
             messages.append(
                 {
                     "role": "tool",
-                    "name": tool_name,
+                    "tool_call_id": tool_call_id,
                     "content": json.dumps(result.data, sort_keys=True, default=str),
                 }
             )

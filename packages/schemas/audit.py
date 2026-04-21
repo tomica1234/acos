@@ -22,7 +22,12 @@ class AuditEvent(BaseModel):
     role: str
     action: str
     status: str
+    job_id: str | None = None
+    task_id: str | None = None
+    step: str | None = None
+    provider_key: str | None = None
+    model_key: str | None = None
+    tool_name: str | None = None
     input_hash: str | None = None
     output_hash: str | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
-

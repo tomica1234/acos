@@ -39,8 +39,19 @@ class FixStatus(str, Enum):
 
 
 class JobStatus(str, Enum):
+    QUEUED = "queued"
+    RUNNING = "running"
     SUBMITTED = "submitted"
+    WAITING_RUNTIME = "waiting_runtime"
+    PROVIDER_UNAVAILABLE = "provider_unavailable"
+    RETRYING_PROVIDER = "retrying_provider"
     WAITING_APPROVAL = "waiting_approval"
+    PAUSED = "paused"
+    RESUMING = "resuming"
+    CANCELLING = "cancelling"
+    CANCELLED = "cancelled"
+    CRASHED = "crashed"
+    RECOVERING = "recovering"
     ANALYZING = "analyzing"
     DESIGNING = "designing"
     PLANNING = "planning"
@@ -57,9 +68,14 @@ class JobStatus(str, Enum):
 
 
 class TaskStatus(str, Enum):
+    QUEUED = "queued"
+    RUNNING = "running"
     TODO = "todo"
     READY = "ready"
     WAITING_APPROVAL = "waiting_approval"
+    WAITING_RUNTIME = "waiting_runtime"
+    PAUSED = "paused"
+    RESUMING = "resuming"
     IN_PROGRESS = "in_progress"
     IMPLEMENTED = "implemented"
     TESTS_WRITTEN = "tests_written"
@@ -70,6 +86,8 @@ class TaskStatus(str, Enum):
     DONE = "done"
     BLOCKED = "blocked"
     STUCK = "stuck"
+    SKIPPED = "skipped"
+    CANCELLED = "cancelled"
 
 
 class ModelCallStatus(str, Enum):
@@ -103,6 +121,8 @@ class ModelProviderConfig(BaseModel):
     type: ProviderType
     base_url: str
     api_key_env: str
+    allow_empty_api_key: bool = False
+    default_api_key: str | None = None
     timeout_seconds: int = Field(default=60)
     default_headers: dict[str, str] = Field(default_factory=dict)
     supports_tools: bool = False

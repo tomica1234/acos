@@ -48,6 +48,8 @@ Then set `workspace_root` or `repo_path` in your job file.
 
 ```bash
 acos validate-config
+acos check-provider --provider local_qwen
+acos check-model --model qwen_35b
 ```
 
 ## 5. Inspect Available Models
@@ -60,18 +62,33 @@ acos resolve-model --role fixer --repeated-failures 2
 acos explain-routing --role implementer
 ```
 
-## 6. Run A Job
+## 6. Start Durable Worker
+
+Foreground:
+
+```bash
+acos daemon start --foreground --workspace .
+```
+
+Or direct worker:
+
+```bash
+acos worker run --forever --repo .
+```
+
+## 7. Submit A Job
 
 ```bash
 cp job.yaml.example job.yaml
-acos run-job --file job.yaml
+acos jobs submit --file job.yaml --workspace .
+acos jobs watch <job_id> --workspace .
 ```
 
 The example job file supports a friendly shape with fields such as
 `requester_input`, `base_branch`, `notification_channel`, `constraints`, and
 `workspace_root`.
 
-## 7. Handle Approval Requests
+## 8. Handle Approval Requests
 
 Normal development work inside the configured workspace is auto-allowed. High
 risk actions pause the job in `waiting_approval` and emit a notification.
@@ -86,18 +103,30 @@ acos approvals reject <approval_id> --workspace . --reason "not acceptable"
 acos jobs resume <job_id> --workspace .
 ```
 
+## 9. Runtime Wait And Recovery
+
+If the model provider goes down, ACOS pauses the job in `waiting_runtime`
+instead of marking it failed.
+
+```bash
+acos runtime status --workspace .
+acos runtime check --workspace .
+acos check-provider --provider local_qwen
+acos check-model --model qwen_35b
+acos jobs resume <job_id> --workspace .
+```
+
 The approve and reject HTTP links are for local/dev convenience. In production,
 prefer authenticated POST endpoints over GET links.
 
-## 8. Start API Or Worker
+## 10. Start API Or Worker
 
 ```bash
 acos api
-acos worker
-acos worker --request "READMEにセットアップ手順を追加してください" --repo .
+acos worker run --repo . --request "READMEにセットアップ手順を追加してください"
 ```
 
-## 9. Approval Notification Settings
+## 11. Approval Notification Settings
 
 `configs/policies.yaml` controls:
 
@@ -109,14 +138,14 @@ acos worker --request "READMEにセットアップ手順を追加してくださ
 The MVP fake notify server prints approval requests to the console-style
 notification buffer. Optional Telegram or webhook delivery is future work.
 
-## 10. Run Tests
+## 12. Run Tests
 
 ```bash
 python3 -m compileall acos
 .venv/bin/pytest
 ```
 
-## 11. Optional Deterministic Demo
+## 13. Optional Deterministic Demo
 
 If you want a smoke test without a real model provider:
 

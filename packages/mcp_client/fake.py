@@ -328,6 +328,8 @@ class NotifyServer:
     def __init__(self) -> None:
         self.notifications: list[str] = []
         self.approval_notifications: list[dict[str, str]] = []
+        self.runtime_notifications: list[dict[str, str]] = []
+        self.job_notifications: list[dict[str, str]] = []
 
     def send_notification(self, body: str | None = None, message: str | None = None) -> dict[str, object]:
         text = redact_text((body if body is not None else message or "")[:2000])
@@ -384,6 +386,95 @@ class NotifyServer:
         )
         return payload
 
+    def send_runtime_wait(
+        self,
+        job_id: str,
+        provider_key: str,
+        model_key: str | None = None,
+        reason: str | None = None,
+        kind: str = "runtime_wait",
+        channel: str = "console",
+        cli_command: str | None = None,
+    ) -> dict[str, object]:
+        payload = {
+            "job_id": job_id,
+            "provider_key": provider_key,
+            "model_key": model_key,
+            "reason": redact_text(reason or "provider unavailable"),
+            "kind": kind,
+            "channel": channel,
+            "cli_command": cli_command or f"acos jobs resume {job_id}",
+        }
+        self.runtime_notifications.append({key: str(value or "") for key, value in payload.items()})
+        self.notifications.append(
+            redact_text(
+                "\n".join(
+                    [
+                        "ACOS runtime is waiting for model provider",
+                        f"Job: {job_id}",
+                        f"Provider: {provider_key}",
+                        f"Model: {model_key or '-'}",
+                        f"Reason: {reason or 'provider unavailable'}",
+                        f"CLI: {payload['cli_command']}",
+                    ]
+                )
+            )
+        )
+        return payload
+
+    def send_provider_recovered(
+        self,
+        job_id: str,
+        provider_key: str,
+        model_key: str | None = None,
+        cli_command: str | None = None,
+    ) -> dict[str, object]:
+        payload = {
+            "job_id": job_id,
+            "provider_key": provider_key,
+            "model_key": model_key,
+            "kind": "provider_recovered",
+            "channel": "console",
+            "cli_command": cli_command or f"acos jobs resume {job_id}",
+        }
+        self.runtime_notifications.append({key: str(value or "") for key, value in payload.items()})
+        self.notifications.append(
+            redact_text(
+                f"ACOS provider recovered\nJob: {job_id}\nProvider: {provider_key}\nCLI: {payload['cli_command']}"
+            )
+        )
+        return payload
+
+    def send_job_completed(
+        self,
+        job_id: str,
+        message: str | None = None,
+    ) -> dict[str, object]:
+        payload = {
+            "job_id": job_id,
+            "kind": "job_completed",
+            "channel": "console",
+            "message": redact_text(message or "job completed"),
+        }
+        self.job_notifications.append({key: str(value or "") for key, value in payload.items()})
+        self.notifications.append(payload["message"])
+        return payload
+
+    def send_job_failed(
+        self,
+        job_id: str,
+        message: str | None = None,
+    ) -> dict[str, object]:
+        payload = {
+            "job_id": job_id,
+            "kind": "job_failed",
+            "channel": "console",
+            "message": redact_text(message or "job failed"),
+        }
+        self.job_notifications.append({key: str(value or "") for key, value in payload.items()})
+        self.notifications.append(payload["message"])
+        return payload
+
 
 class FakeMCPEnvironment:
     """Convenience wrapper bundling fake servers and a router."""
@@ -420,4 +511,8 @@ class FakeMCPEnvironment:
         router.register("memory_server.update_task_summary", self.memory_server.update_task_summary)
         router.register("notify_server.send_notification", self.notify_server.send_notification)
         router.register("notify_server.send_approval_request", self.notify_server.send_approval_request)
+        router.register("notify_server.send_runtime_wait", self.notify_server.send_runtime_wait)
+        router.register("notify_server.send_provider_recovered", self.notify_server.send_provider_recovered)
+        router.register("notify_server.send_job_completed", self.notify_server.send_job_completed)
+        router.register("notify_server.send_job_failed", self.notify_server.send_job_failed)
         return router

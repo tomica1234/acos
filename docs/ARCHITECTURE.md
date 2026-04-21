@@ -11,12 +11,24 @@ tool execution, approval pauses, and model selection inputs.
 - `packages.schemas.*` define every durable and agent-facing structure.
 - `packages.llm.registry.ModelRegistry` loads provider, model, and role config.
 - `packages.llm.routing.ModelRouter` selects the model for each role.
+- `packages.orchestrator.job_store.SQLiteJobStore` persists jobs, tasks,
+  approvals, checkpoints, runtime issues, heartbeats, leases, and notifications.
 - `packages.orchestrator.policy.PolicyEngine` classifies every tool request as
   `allow`, `allow_and_audit`, `require_approval`, or `deny`.
 - `packages.orchestrator.workspace.WorkspacePolicy` enforces workspace-root
   confinement, symlink escape blocking, and forbidden path checks.
 - `packages.orchestrator.approval.ApprovalGateway` persists approval requests in
   SQLite and issues one-time approval links.
+- `packages.orchestrator.checkpoint.CheckpointStore` tracks durable step
+  completion.
+- `packages.orchestrator.leases.LeaseManager` prevents multiple workers from
+  executing the same job concurrently.
+- `packages.orchestrator.provider_health.ProviderHealthChecker` probes provider
+  reachability and model availability.
+- `packages.orchestrator.runtime.RuntimeManager` classifies provider failures and
+  converts them into `waiting_runtime` / `resuming` transitions.
+- `packages.orchestrator.worker_daemon.WorkerDaemon` is the autonomous durable
+  runtime loop.
 - `packages.agents.runner.AgentRunner` reads the role config, asks
   `ModelRouter` for a `ModelSelection`, resolves the concrete adapter through
   `ModelRegistry`, executes policy-approved MCP tools, retries invalid JSON once
@@ -61,6 +73,18 @@ auditable and policy-gated.
 Current MVP behavior is job-level pause and resume. Task-level parallel progress
 while another task waits for approval is not implemented yet.
 
+## Durable Runtime Flow
+
+1. `jobs submit` persists a job as `queued`.
+2. `WorkerDaemon` polls queued/running/recovering/resuming jobs.
+3. The worker acquires a lease and writes a heartbeat.
+4. `JobRunner.run_next_step()` advances exactly one durable step.
+5. Each step records a checkpoint before and after execution.
+6. Provider failures become `waiting_runtime` rather than `failed`.
+7. Stale lease / stale heartbeat detection moves interrupted jobs to
+   `recovering`.
+8. Recovery resumes from completed checkpoints rather than replaying every step.
+
 ## Notification Flow
 
 - `notify_server.send_approval_request` emits:
@@ -73,6 +97,11 @@ while another task waits for approval is not implemented yet.
   - CLI fallback command
 - The fake notify server writes these messages to console-style buffers for
   deterministic local testing.
+- Additional runtime notifications cover:
+  - provider wait
+  - provider recovered
+  - job completed
+  - job failed
 
 ## Audit Boundary
 

@@ -93,6 +93,17 @@ authority, or unrestricted filesystem access.
 - Approved operations are resumed exactly once through a one-shot override so
   the same action does not immediately re-trigger approval.
 
+### Durable Runtime And launchd
+
+- Durable job state is stored in SQLite rather than transient in-memory process
+  state.
+- `launchd` plist generation does not write API keys, raw approval tokens, or
+  other secrets into the plist.
+- Runtime logs and notifications store redacted reason strings rather than raw
+  prompts or secrets.
+- Worker recovery uses checkpoints, leases, and heartbeats; it does not grant
+  broader filesystem or shell access.
+
 ### Notification Link Risk
 
 - One-time approve/reject GET links are enabled only for local/dev ergonomics.
@@ -110,6 +121,8 @@ authority, or unrestricted filesystem access.
 - Job failures are redacted before being stored in `JobRecord.last_error`.
 - Infinite fix loops are bounded by `max_attempts_per_task` and
   `max_same_failure_repeats`.
+- Provider outages move jobs into runtime-wait states instead of encouraging
+  operators to weaken policy or bypass approvals.
 
 ## Review Outcome
 
