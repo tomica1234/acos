@@ -1,30 +1,29 @@
-# Role-to-model mapping, role budgets, and role-level tool permissions.
 agents:
   pm:
     primary_model: qwen_35b
-    fallback_models:
-      - qwen_small
-    temperature: 0.2
+    fallback_models: []
+    temperature: 0.0
     top_p: 0.8
-    max_output_tokens: 12000
-    context_budget_tokens: 96000
+    max_output_tokens: auto
+    context_budget_tokens: 262144
     allow_tools: true
     allowed_tools:
       - memory_server.write_memory
       - memory_server.read_memory
       - repo_server.repo_tree
+      - repo_server.read_file
+      - repo_server.search_text
+      - git_server.diff
     require_json_schema: true
     escalation_policy: {}
     output_schema: PRD
-
   architect:
     primary_model: qwen_35b
-    fallback_models:
-      - qwen_small
+    fallback_models: []
     temperature: 0.1
     top_p: 0.8
-    max_output_tokens: 16000
-    context_budget_tokens: 128000
+    max_output_tokens: auto
+    context_budget_tokens: 262144
     allow_tools: true
     allowed_tools:
       - memory_server.read_memory
@@ -35,15 +34,13 @@ agents:
     require_json_schema: true
     escalation_policy: {}
     output_schema: ArchitecturePlan
-
   planner:
     primary_model: qwen_35b
-    fallback_models:
-      - qwen_small
-    temperature: 0.2
+    fallback_models: []
+    temperature: 0.1
     top_p: 0.8
-    max_output_tokens: 12000
-    context_budget_tokens: 96000
+    max_output_tokens: auto
+    context_budget_tokens: 262144
     allow_tools: true
     allowed_tools:
       - memory_server.read_memory
@@ -53,15 +50,13 @@ agents:
     require_json_schema: true
     escalation_policy: {}
     output_schema: TaskGraph
-
   implementer:
     primary_model: qwen_35b
-    fallback_models:
-      - qwen_small
+    fallback_models: []
     temperature: 0.1
     top_p: 0.8
-    max_output_tokens: 20000
-    context_budget_tokens: 128000
+    max_output_tokens: auto
+    context_budget_tokens: 262144
     allow_tools: true
     allowed_tools:
       - repo_server.read_file
@@ -72,15 +67,13 @@ agents:
     escalation_policy:
       repeated_failures_gte: 2
     output_schema: ImplementationResult
-
   test_writer:
     primary_model: qwen_35b
-    fallback_models:
-      - qwen_small
+    fallback_models: []
     temperature: 0.1
     top_p: 0.8
-    max_output_tokens: 16000
-    context_budget_tokens: 96000
+    max_output_tokens: auto
+    context_budget_tokens: 262144
     allow_tools: true
     allowed_tools:
       - repo_server.read_file
@@ -90,15 +83,13 @@ agents:
     require_json_schema: true
     escalation_policy: {}
     output_schema: TestWriterResult
-
   reviewer:
     primary_model: qwen_35b
-    fallback_models:
-      - qwen_small
+    fallback_models: []
     temperature: 0.0
     top_p: 0.8
-    max_output_tokens: 12000
-    context_budget_tokens: 96000
+    max_output_tokens: auto
+    context_budget_tokens: 262144
     allow_tools: true
     allowed_tools:
       - repo_server.read_file
@@ -107,15 +98,13 @@ agents:
     require_json_schema: true
     escalation_policy: {}
     output_schema: ReviewResult
-
   security_reviewer:
     primary_model: qwen_35b
-    fallback_models:
-      - qwen_small
+    fallback_models: []
     temperature: 0.0
     top_p: 0.8
-    max_output_tokens: 12000
-    context_budget_tokens: 96000
+    max_output_tokens: auto
+    context_budget_tokens: 262144
     allow_tools: true
     allowed_tools:
       - repo_server.read_file
@@ -125,38 +114,34 @@ agents:
     escalation_policy:
       security_sensitive: true
     output_schema: SecurityReviewResult
-
   fixer:
-    primary_model: qwen_small
-    fallback_models:
-      - qwen_35b
-      - qwen_small
+    primary_model: qwen_35b
+    fallback_models: []
     temperature: 0.1
     top_p: 0.8
-    max_output_tokens: 8192
-    context_budget_tokens: 32768
+    max_output_tokens: auto
+    context_budget_tokens: 262144
     allow_tools: true
     allowed_tools:
       - repo_server.read_file
       - repo_server.search_text
       - repo_server.apply_patch
       - git_server.diff
+      - test_server.run_command
+      - test_server.install_package
       - memory_server.read_memory
       - memory_server.write_memory
     require_json_schema: true
     escalation_policy:
       repeated_failures_gte: 2
     output_schema: FixResult
-
   release_manager:
-    primary_model: qwen_small
-    fallback_models:
-      - qwen_35b
-      - qwen_small
+    primary_model: qwen_35b
+    fallback_models: []
     temperature: 0.0
     top_p: 0.8
-    max_output_tokens: 8192
-    context_budget_tokens: 32768
+    max_output_tokens: auto
+    context_budget_tokens: 262144
     allow_tools: true
     allowed_tools:
       - git_server.status
@@ -167,16 +152,13 @@ agents:
     require_json_schema: true
     escalation_policy: {}
     output_schema: ReleaseResult
-
   summarizer:
-    primary_model: qwen_small
-    fallback_models:
-      - qwen_35b
-      - qwen_small
+    primary_model: qwen_35b
+    fallback_models: []
     temperature: 0.0
     top_p: 0.8
-    max_output_tokens: 8192
-    context_budget_tokens: 32768
+    max_output_tokens: auto
+    context_budget_tokens: 262144
     allow_tools: true
     allowed_tools:
       - memory_server.read_memory

@@ -352,6 +352,7 @@ class SQLiteJobStore:
                     complexity TEXT NOT NULL,
                     dependencies_json TEXT NOT NULL,
                     target_files_json TEXT NOT NULL,
+                    required_artifacts_json TEXT NOT NULL DEFAULT '[]',
                     attempt_count INTEGER NOT NULL,
                     max_attempts INTEGER NOT NULL,
                     pending_approval_id TEXT,
@@ -472,7 +473,29 @@ class SQLiteJobStore:
                 );
                 """
             )
+            self._ensure_column(
+                conn,
+                table_name="tasks",
+                column_name="required_artifacts_json",
+                column_ddl="TEXT NOT NULL DEFAULT '[]'",
+            )
             conn.commit()
+
+    @staticmethod
+    def _ensure_column(
+        conn: sqlite3.Connection,
+        *,
+        table_name: str,
+        column_name: str,
+        column_ddl: str,
+    ) -> None:
+        columns = {
+            row["name"]
+            for row in conn.execute(f"PRAGMA table_info({table_name})").fetchall()
+        }
+        if column_name in columns:
+            return
+        conn.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_ddl}")
 
     def create(self, spec: JobSpec, *, status: JobStatus | None = None) -> JobRecord:
         initial_status = status or JobStatus.SUBMITTED
@@ -904,6 +927,7 @@ class SQLiteJobStore:
             complexity=TaskComplexity(row["complexity"]),
             dependencies=_json_loads(row["dependencies_json"], []),
             target_files=_json_loads(row["target_files_json"], []),
+            required_artifacts=_json_loads(row["required_artifacts_json"], []),
             attempt_count=row["attempt_count"],
             max_attempts=row["max_attempts"],
             pending_approval_id=row["pending_approval_id"],
@@ -951,10 +975,11 @@ class SQLiteJobStore:
             """
             INSERT INTO tasks(
                 id, job_id, status, title, description, role, complexity,
-                dependencies_json, target_files_json, attempt_count, max_attempts,
+                dependencies_json, target_files_json, required_artifacts_json,
+                attempt_count, max_attempts,
                 pending_approval_id, pending_runtime_issue_id, last_error,
                 checkpoint_key, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(id) DO UPDATE SET
                 job_id=excluded.job_id,
                 status=excluded.status,
@@ -964,6 +989,7 @@ class SQLiteJobStore:
                 complexity=excluded.complexity,
                 dependencies_json=excluded.dependencies_json,
                 target_files_json=excluded.target_files_json,
+                required_artifacts_json=excluded.required_artifacts_json,
                 attempt_count=excluded.attempt_count,
                 max_attempts=excluded.max_attempts,
                 pending_approval_id=excluded.pending_approval_id,
@@ -983,6 +1009,7 @@ class SQLiteJobStore:
                 task.complexity.value,
                 _json_dumps(task.dependencies),
                 _json_dumps(task.target_files),
+                _json_dumps(task.required_artifacts),
                 task.attempt_count,
                 task.max_attempts,
                 task.pending_approval_id,

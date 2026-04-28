@@ -31,11 +31,19 @@ def _base_provider_config() -> dict:
                 "type": "openai_compatible",
                 "base_url": "http://localhost:8000/v1",
                 "api_key_env": "KEY",
+                "allow_empty_api_key": True,
+                "default_api_key": "EMPTY",
+                "timeout_seconds": 900,
                 "supports_tools": True,
                 "supports_json_mode": False,
                 "supports_streaming": False,
                 "max_context_tokens": 262144,
-                "default_max_output_tokens": 32768,
+                "default_max_output_tokens": 262144,
+                "extra_body": {
+                    "chat_template_kwargs": {
+                        "enable_thinking": False,
+                    }
+                },
             },
             "mock_provider": {
                 "type": "mock",
@@ -54,7 +62,7 @@ def _base_provider_config() -> dict:
                 "model": "qwen/test",
                 "display_name": "Qwen",
                 "max_context_tokens": 262144,
-                "max_output_tokens": 32768,
+                "max_output_tokens": "auto",
                 "supports_tool_calling": True,
                 "supports_structured_output": False,
             },
@@ -88,7 +96,7 @@ def _base_agents_config() -> dict:
                 "fallback_models": ["mock_structured"],
                 "temperature": 0.1,
                 "top_p": 0.8,
-                "max_output_tokens": 1024,
+                "max_output_tokens": "auto",
                 "context_budget_tokens": 4096,
                 "allow_tools": True,
                 "allowed_tools": ["repo_server.apply_patch"],
@@ -127,8 +135,11 @@ def test_model_registry_loads_configs() -> None:
     agent = registry.get_agent("pm")
 
     assert provider.base_url == "https://msi.tail5c01da.ts.net/v1"
+    assert provider.extra_body["chat_template_kwargs"]["enable_thinking"] is False
     assert model.provider == "local_qwen"
+    assert model.max_output_tokens == "auto"
     assert agent.primary_model == "qwen_35b"
+    assert agent.max_output_tokens == "auto"
 
     with pytest.raises(UnknownProviderError):
         registry.get_provider("missing")

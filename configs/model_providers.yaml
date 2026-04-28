@@ -4,27 +4,17 @@ providers:
     base_url: https://msi.tail5c01da.ts.net/v1
     api_key_env: OPENAI_API_KEY
     allow_empty_api_key: true
-    default_api_key: EMPTY
-    timeout_seconds: 120
+    default_api_key: "EMPTY"
+    timeout_seconds: 900
     default_headers: {}
+    extra_body:
+      chat_template_kwargs:
+        enable_thinking: false
     supports_tools: true
     supports_json_mode: false
     supports_streaming: true
     max_context_tokens: 262144
-    default_max_output_tokens: 32768
-  local_small:
-    type: openai_compatible
-    base_url: https://msi.tail5c01da.ts.net/v1
-    api_key_env: OPENAI_API_KEY
-    allow_empty_api_key: true
-    default_api_key: EMPTY
-    timeout_seconds: 120
-    default_headers: {}
-    supports_tools: true
-    supports_json_mode: false
-    supports_streaming: true
-    max_context_tokens: 262144
-    default_max_output_tokens: 32768
+    default_max_output_tokens: 262144
   mock_provider:
     type: mock
     base_url: mock://local
@@ -36,31 +26,20 @@ providers:
     supports_streaming: false
     max_context_tokens: 262144
     default_max_output_tokens: 8192
+
 models:
   qwen_35b:
     provider: local_qwen
-    model: HauhauCS/Qwen3.6-35B-A3B-Uncensored-HauhauCS-Aggressive
-    display_name: Qwen 3.6 35B A3B
+    model: "HauhauCS/Qwen3.6-35B-A3B-Uncensored-HauhauCS-Aggressive"
+    display_name: "Qwen 3.6 35B A3B"
     max_context_tokens: 262144
-    max_output_tokens: 32768
+    max_output_tokens: auto
     supports_tool_calling: true
     supports_structured_output: false
     tags:
-    - coding
-    - long-context
-    - agentic
-  qwen_small:
-    provider: local_small
-    model: Qwen/Qwen3.6-35B-A3B
-    display_name: Qwen 3.6 35B A3B
-    max_context_tokens: 262144
-    max_output_tokens: 32768
-    supports_tool_calling: true
-    supports_structured_output: false
-    tags:
-    - coding
-    - long-context
-    - agentic
+      - coding
+      - long-context
+      - agentic
   mock_structured:
     provider: mock_provider
     model: mock/structured
@@ -70,9 +49,9 @@ models:
     supports_tool_calling: true
     supports_structured_output: true
     tags:
-    - testing
-    - structured
-    - agentic
+      - testing
+      - structured
+      - agentic
   mock_small:
     provider: mock_provider
     model: mock/small
@@ -82,5 +61,5 @@ models:
     supports_tool_calling: false
     supports_structured_output: true
     tags:
-    - testing
-    - cheap
+      - testing
+      - cheap

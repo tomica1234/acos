@@ -41,6 +41,7 @@ def test_sqlite_job_store_persists_jobs_tasks_checkpoints_and_audit(tmp_path) ->
                 description="Add durable runtime support",
                 role="implementer",
                 complexity=TaskComplexity.HIGH,
+                required_artifacts=["manage.py"],
             )
         ],
     )
@@ -78,6 +79,7 @@ def test_sqlite_job_store_persists_jobs_tasks_checkpoints_and_audit(tmp_path) ->
 
     assert loaded.status == JobStatus.RUNNING
     assert reopened.list_tasks(record.job_id)[0].task_id == "task-1"
+    assert reopened.list_tasks(record.job_id)[0].required_artifacts == ["manage.py"]
     assert reopened.get_checkpoint(
         job_id=record.job_id,
         task_id="task-1",

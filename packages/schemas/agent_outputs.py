@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -12,6 +12,7 @@ from packages.schemas.models import (
     ReviewDecision,
     Severity,
 )
+from packages.schemas.runtime import RuntimeHttpCheck
 
 
 class FilePatch(BaseModel):
@@ -37,6 +38,38 @@ class PRD(BaseModel):
     non_goals: list[str] = Field(default_factory=list)
     constraints: list[str] = Field(default_factory=list)
     success_criteria: list[str] = Field(default_factory=list)
+    framework_profile: str | None = None
+    framework_entrypoint: str | None = None
+    framework_project_name: str | None = None
+    required_artifacts: list[str] = Field(default_factory=list)
+    runtime: "RuntimePlan | None" = None
+    acceptance_checks: list[RuntimeHttpCheck] = Field(default_factory=list)
+
+
+class RuntimePlan(BaseModel):
+    """Execution-time runtime contract hints emitted by the PM."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    prepare_commands: list[list[str]] = Field(default_factory=list)
+    start_command: list[str] | None = None
+    http_probe_path: str | None = None
+    http_checks: list[RuntimeHttpCheck] = Field(default_factory=list)
+    prepare_timeout_seconds: int | None = None
+    startup_timeout_seconds: int | None = None
+    extra: dict[str, Any] = Field(default_factory=dict)
+
+
+class PMReviewResult(BaseModel):
+    """Product-manager review output for plans and delivered work."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    decision: ReviewDecision
+    summary: str
+    findings: list["Finding"] = Field(default_factory=list)
+    required_artifacts: list[str] = Field(default_factory=list)
+    required_verifications: list[str] = Field(default_factory=list)
 
 
 class ArchitecturePlan(BaseModel):

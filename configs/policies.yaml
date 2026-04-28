@@ -22,6 +22,9 @@ tools:
       - memory_server.write_memory
       - memory_server.read_memory
       - repo_server.repo_tree
+      - repo_server.read_file
+      - repo_server.search_text
+      - git_server.diff
 
     architect:
       - memory_server.read_memory
@@ -63,6 +66,8 @@ tools:
       - repo_server.search_text
       - repo_server.apply_patch
       - git_server.diff
+      - test_server.run_command
+      - test_server.install_package
       - memory_server.read_memory
       - memory_server.write_memory
 
@@ -72,6 +77,8 @@ tools:
 
     runner:
       - test_server.run_test
+      - test_server.run_command
+      - test_server.install_package
 
     release_manager:
       - git_server.status

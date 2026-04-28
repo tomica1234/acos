@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 from enum import Enum
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, computed_field, model_validator
+
+OutputTokenSetting = int | Literal["auto"]
 
 
 class ProviderType(str, Enum):
@@ -125,6 +127,7 @@ class ModelProviderConfig(BaseModel):
     default_api_key: str | None = None
     timeout_seconds: int = Field(default=60)
     default_headers: dict[str, str] = Field(default_factory=dict)
+    extra_body: dict[str, Any] = Field(default_factory=dict)
     supports_tools: bool = False
     supports_json_mode: bool = False
     supports_streaming: bool = False
@@ -147,12 +150,20 @@ class ModelConfig(BaseModel):
     model: str
     display_name: str
     max_context_tokens: int
-    max_output_tokens: int
+    max_output_tokens: OutputTokenSetting
     supports_tool_calling: bool = False
     supports_structured_output: bool = False
     supports_json_repair: bool = True
     cost_hints: dict[str, float] | None = None
     tags: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def validate_output_limit(self) -> "ModelConfig":
+        if self.max_context_tokens <= 0:
+            raise ValueError("max_context_tokens must be > 0")
+        if isinstance(self.max_output_tokens, int) and self.max_output_tokens <= 0:
+            raise ValueError("max_output_tokens must be > 0 when provided as an integer")
+        return self
 
 
 class AgentModelConfig(BaseModel):
@@ -165,7 +176,7 @@ class AgentModelConfig(BaseModel):
     fallback_models: list[str] = Field(default_factory=list)
     temperature: float = 0.0
     top_p: float | None = None
-    max_output_tokens: int
+    max_output_tokens: OutputTokenSetting
     context_budget_tokens: int
     allow_tools: bool = True
     allowed_tools: list[str] = Field(default_factory=list)
@@ -179,6 +190,10 @@ class AgentModelConfig(BaseModel):
             raise ValueError("temperature must be between 0 and 2")
         if self.top_p is not None and not 0 < self.top_p <= 1:
             raise ValueError("top_p must be between 0 and 1 when provided")
+        if self.context_budget_tokens <= 0:
+            raise ValueError("context_budget_tokens must be > 0")
+        if isinstance(self.max_output_tokens, int) and self.max_output_tokens <= 0:
+            raise ValueError("max_output_tokens must be > 0 when provided as an integer")
         return self
 
 
@@ -245,7 +260,7 @@ class ModelSelection(BaseModel):
     details: dict[str, Any] = Field(default_factory=dict)
     temperature: float
     top_p: float | None = None
-    max_output_tokens: int
+    max_output_tokens: OutputTokenSetting
 
     @computed_field
     @property
@@ -270,6 +285,7 @@ class ModelResult(BaseModel):
     provider: str
     finish_reason: str | None = None
     usage: dict[str, int] | None = None
+    output_truncated: bool = False
 
 
 class ModelCallRecord(BaseModel):
@@ -287,6 +303,14 @@ class ModelCallRecord(BaseModel):
     completion_tokens_estimate: int
     total_tokens_estimate: int
     error: str | None = None
+    finish_reason: str | None = None
+    configured_max_output_tokens: OutputTokenSetting | None = None
+    estimated_input_tokens: int | None = None
+    resolved_max_output_tokens: int | None = None
+    model_max_context_tokens: int | None = None
+    safety_margin_tokens: int | None = None
+    context_budget_tokens: int | None = None
+    output_truncated: bool = False
 
     @computed_field
     @property

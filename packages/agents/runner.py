@@ -9,9 +9,15 @@ from typing import Any, TypeVar
 from pydantic import BaseModel, ValidationError
 
 from packages.agents.config import get_role_prompt
-from packages.llm.budget import estimate_tokens
+from packages.llm.budget import (
+    TokenBudgetPolicy,
+    compute_max_output_tokens,
+    estimate_tokens,
+    estimate_tokens_from_messages,
+    resolve_configured_max_output_tokens,
+)
 from packages.llm.client import LLMClient
-from packages.llm.errors import AdapterError, StructuredOutputError
+from packages.llm.errors import AdapterError, ContextBudgetExceededError, StructuredOutputError
 from packages.llm.messages import build_messages
 from packages.llm.registry import ModelRegistry
 from packages.llm.routing import FailureHistory, ModelRouter, RoutingContext, TaskState
@@ -58,14 +64,19 @@ class AgentRunner:
         policy_engine: PolicyEngine | None = None,
         audit_recorder: AuditRecorder | None = None,
         llm_client: LLMClient | None = None,
+        token_budget_policy: TokenBudgetPolicy | None = None,
     ) -> None:
         self.registry = registry
         self.model_router = model_router or (llm_client.router if llm_client is not None else None)
         if self.model_router is None:
-            self.model_router = ModelRouter(registry)
+            self.model_router = ModelRouter(
+                registry,
+                token_budget_policy=token_budget_policy,
+            )
         self.mcp_router = mcp_router
         self.policy_engine = policy_engine
         self.audit_recorder = audit_recorder or AuditRecorder()
+        self.token_budget_policy = token_budget_policy or TokenBudgetPolicy()
         self._adapter_cache: dict[str, Any] = {}
 
     def run(
@@ -90,8 +101,13 @@ class AgentRunner:
         )
         self._assert_tools_allowed(role, configured_tools)
         tool_manifest = build_tool_manifest(configured_tools) if configured_tools else None
-        messages = build_messages(get_role_prompt(role), context_packet)
         response_schema = build_response_schema(response_model) if require_json_schema else None
+        messages = build_messages(get_role_prompt(role), context_packet)
+        if response_schema is not None:
+            messages[0]["content"] = (
+                f"{messages[0]['content']}\n\n"
+                f"{self._schema_instruction_text(response_schema)}"
+            )
         base_context = self._initial_routing_context(
             role=role,
             routing_context=routing_context,
@@ -129,13 +145,19 @@ class AgentRunner:
             if audit_events is not None:
                 audit_events.append(self.audit_recorder.selection_event(role, selection))
             adapter = self._get_adapter(selection.model_key)
+            budget_details = self._resolve_budget(
+                agent_role=role,
+                selection=selection,
+                messages=messages,
+                context_budget_tokens=agent_config.context_budget_tokens,
+            )
             try:
                 result = adapter.generate(
                     messages=messages,
                     tools=tool_manifest,
                     temperature=selection.temperature,
                     top_p=selection.top_p,
-                    max_tokens=selection.max_output_tokens,
+                    max_tokens=budget_details["resolved_max_output_tokens"],
                     response_schema=response_schema,
                     metadata={
                         "role": role,
@@ -151,6 +173,8 @@ class AgentRunner:
                     messages=messages,
                     result=None,
                     error=exc.code,
+                    finish_reason=None,
+                    budget_details=budget_details,
                 )
                 if audit_events is not None:
                     audit_events.append(self.audit_recorder.model_event(record, selection))
@@ -158,10 +182,18 @@ class AgentRunner:
                 last_record = record
                 if selection.model_key not in attempted_model_keys:
                     attempted_model_keys.append(selection.model_key)
+                if exc.code == "output_truncated":
+                    last_error = "output_truncated before valid JSON"
+                    raise StructuredOutputError(last_error) from exc
                 if exc.code == "invalid_json" and require_json_schema:
                     if not repair_attempted:
                         repair_attempted = True
-                        messages.append(self._repair_message())
+                        messages.append(
+                            self._repair_message(
+                                response_schema=response_schema,
+                                error_detail=str(exc),
+                            )
+                        )
                         continue
                     last_error = "invalid_json"
                     fallback_index = self._next_fallback_index(selection, fallback_index)
@@ -174,21 +206,23 @@ class AgentRunner:
                     continue
                 raise
 
-            record = self._build_model_record(
-                role=role,
-                selection=selection,
-                messages=messages,
-                result=result,
-                error=None,
-            )
             last_selection = selection
-            last_record = record
             if selection.model_key not in attempted_model_keys:
                 attempted_model_keys.append(selection.model_key)
-            if audit_events is not None:
-                audit_events.append(self.audit_recorder.model_event(record, selection))
 
             if result.tool_calls:
+                record = self._build_model_record(
+                    role=role,
+                    selection=selection,
+                    messages=messages,
+                    result=result,
+                    error=None,
+                    finish_reason=result.finish_reason,
+                    budget_details=budget_details,
+                )
+                last_record = record
+                if audit_events is not None:
+                    audit_events.append(self.audit_recorder.model_event(record, selection))
                 self._handle_tool_calls(
                     role=role,
                     context_packet=context_packet,
@@ -202,17 +236,54 @@ class AgentRunner:
 
             try:
                 parsed = self._parse_response(result.content, response_model)
-            except (ValidationError, json.JSONDecodeError, StructuredOutputError):
+            except (ValidationError, json.JSONDecodeError, StructuredOutputError) as exc:
+                error_code = "invalid_json"
+                error_message = "invalid_json"
+                if result.output_truncated or result.finish_reason == "length":
+                    error_code = "output_truncated"
+                    error_message = "output_truncated before valid JSON"
+                record = self._build_model_record(
+                    role=role,
+                    selection=selection,
+                    messages=messages,
+                    result=result,
+                    error=error_code,
+                    finish_reason=result.finish_reason,
+                    budget_details=budget_details,
+                )
+                last_record = record
+                if audit_events is not None:
+                    audit_events.append(self.audit_recorder.model_event(record, selection))
                 if not require_json_schema:
                     raise
+                if error_code == "output_truncated":
+                    last_error = error_message
+                    raise StructuredOutputError(error_message) from exc
                 if not repair_attempted:
                     repair_attempted = True
-                    messages.append(self._repair_message())
+                    messages.append(
+                        self._repair_message(
+                            response_schema=response_schema,
+                            error_detail=str(exc),
+                        )
+                    )
                     continue
-                last_error = "invalid_json"
+                last_error = error_message
                 fallback_index = self._next_fallback_index(selection, fallback_index)
                 repair_attempted = False
                 continue
+            record = self._build_model_record(
+                role=role,
+                selection=selection,
+                messages=messages,
+                result=result,
+                error=None,
+                finish_reason=result.finish_reason,
+                budget_details=budget_details,
+            )
+            last_record = record
+            if audit_events is not None:
+                audit_events.append(self.audit_recorder.model_event(record, selection))
             return parsed, selection, record
 
         last_model = last_selection.model_key if last_selection is not None else "unknown"
@@ -222,13 +293,39 @@ class AgentRunner:
         )
 
     @staticmethod
-    def _repair_message() -> dict[str, str]:
+    def _schema_instruction_text(response_schema: dict[str, Any]) -> str:
+        schema_json = json.dumps(response_schema, ensure_ascii=False, sort_keys=True)
+        patch_path_note = ""
+        properties = response_schema.get("properties", {})
+        if isinstance(properties, dict) and "patches" in properties:
+            patch_path_note = (
+                " For every item in `patches`, `path` must be a workspace-relative POSIX path "
+                "such as `todos/models.py`, never an absolute path."
+            )
+        return (
+            "Return exactly one JSON object that conforms to this schema. "
+            "Do not wrap the payload under extra keys. "
+            f"Do not include prose, markdown fences, or thinking tags.{patch_path_note}\n"
+            f"Schema:\n```json\n{schema_json}\n```"
+        )
+
+    @staticmethod
+    def _repair_message(
+        *,
+        response_schema: dict[str, Any] | None,
+        error_detail: str,
+    ) -> dict[str, str]:
+        content = [
+            "The previous response was not valid for the required JSON schema.",
+            f"Validation/parsing error: {error_detail}",
+            "Return only corrected JSON with no prose, markdown fences, or thinking tags.",
+        ]
+        if response_schema is not None:
+            schema_json = json.dumps(response_schema, ensure_ascii=False, sort_keys=True)
+            content.append(f"Schema:\n```json\n{schema_json}\n```")
         return {
             "role": "user",
-            "content": (
-                "The previous response was not valid JSON for the required schema. "
-                "Return only repaired JSON that conforms exactly to the schema."
-            ),
+            "content": "\n".join(content),
         }
 
     def _initial_routing_context(
@@ -283,6 +380,8 @@ class AgentRunner:
         messages: list[dict[str, Any]],
         result: ModelResult | None,
         error: str | None,
+        finish_reason: str | None,
+        budget_details: dict[str, Any],
     ) -> ModelCallRecord:
         status = ModelCallStatus.SUCCESS
         if error is not None:
@@ -291,7 +390,7 @@ class AgentRunner:
             status = ModelCallStatus.FALLBACK_USED
         elif selection.reason.value == "escalation":
             status = ModelCallStatus.ESCALATED
-        prompt_tokens_estimate = sum(len(str(item)) for item in messages) // 4
+        prompt_tokens_estimate = budget_details["estimated_input_tokens"]
         completion_tokens_estimate = (
             result.usage.get("completion_tokens", len(result.content) // 4)
             if result is not None and result.usage is not None
@@ -316,7 +415,57 @@ class AgentRunner:
             completion_tokens_estimate=completion_tokens_estimate,
             total_tokens_estimate=total_tokens_estimate,
             error=error,
+            finish_reason=finish_reason,
+            configured_max_output_tokens=budget_details["configured_max_output_tokens"],
+            estimated_input_tokens=budget_details["estimated_input_tokens"],
+            resolved_max_output_tokens=budget_details["resolved_max_output_tokens"],
+            model_max_context_tokens=budget_details["model_max_context_tokens"],
+            safety_margin_tokens=budget_details["safety_margin_tokens"],
+            context_budget_tokens=budget_details["context_budget_tokens"],
+            output_truncated=(
+                bool(result.output_truncated) or finish_reason == "length"
+                if result is not None
+                else error == "output_truncated"
+            ),
         )
+
+    def _resolve_budget(
+        self,
+        *,
+        agent_role: str,
+        selection: ModelSelection,
+        messages: list[dict[str, Any]],
+        context_budget_tokens: int,
+    ) -> dict[str, Any]:
+        selected_model = self.registry.get_model(selection.model_key)
+        configured_max_output_tokens = resolve_configured_max_output_tokens(
+            selection.max_output_tokens,
+            selected_model.max_output_tokens,
+            self.token_budget_policy.default_output_tokens,
+        )
+        estimated_input_tokens = estimate_tokens_from_messages(messages)
+        resolved_max_output_tokens = compute_max_output_tokens(
+            model_max_context_tokens=selected_model.max_context_tokens,
+            estimated_input_tokens=estimated_input_tokens,
+            configured_max_output_tokens=configured_max_output_tokens,
+            safety_margin_tokens=self.token_budget_policy.safety_margin_tokens,
+            minimum_output_tokens=self.token_budget_policy.minimum_output_tokens,
+            hard_max_output_tokens=self.token_budget_policy.hard_max_output_tokens,
+        )
+        if estimated_input_tokens > context_budget_tokens:
+            raise ContextBudgetExceededError(
+                f"Context exceeds role budget for {agent_role}",
+                required_tokens=estimated_input_tokens,
+                candidate_model_keys=[selection.model_key],
+            )
+        return {
+            "configured_max_output_tokens": configured_max_output_tokens,
+            "estimated_input_tokens": estimated_input_tokens,
+            "resolved_max_output_tokens": resolved_max_output_tokens,
+            "model_max_context_tokens": selected_model.max_context_tokens,
+            "safety_margin_tokens": self.token_budget_policy.safety_margin_tokens,
+            "context_budget_tokens": context_budget_tokens,
+        }
 
     def _get_adapter(self, model_key: str) -> Any:
         if model_key not in self._adapter_cache:

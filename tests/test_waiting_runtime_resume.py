@@ -13,6 +13,7 @@ from packages.orchestrator.runtime import RuntimeManager
 from packages.schemas.agent_outputs import (
     ArchitecturePlan,
     ImplementationResult,
+    PMReviewResult,
     PRD,
     ReleaseResult,
     ReviewResult,
@@ -88,7 +89,17 @@ def _attach_success_scenario(registry: ModelRegistry) -> None:
     attach_mock_adapter(
         registry,
         {
-            "pm": PRD(title="Feature", problem_statement="Need feature").model_dump(),
+            "pm": [
+                PRD(title="Feature", problem_statement="Need feature").model_dump(),
+                PMReviewResult(
+                    decision=ReviewDecision.APPROVE,
+                    summary="Design is complete",
+                ).model_dump(),
+                PMReviewResult(
+                    decision=ReviewDecision.APPROVE,
+                    summary="Delivery matches the request",
+                ).model_dump(),
+            ],
             "architect": ArchitecturePlan(summary="Simple architecture").model_dump(),
             "planner": TaskGraph(
                 goal="Build feature",

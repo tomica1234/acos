@@ -8,9 +8,11 @@ from typing import Sequence
 
 import yaml
 
+from apps.cli import build_worker_daemon, load_job_spec_from_file
 from packages.orchestrator.job_runner import build_default_runner
 from packages.orchestrator.worker_daemon import WorkerDaemon
 from packages.schemas.jobs import JobSpec
+from packages.schemas.models import JobStatus
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -37,22 +39,40 @@ def _build_daemon(config_dir: str | Path, repo: str | Path) -> WorkerDaemon:
     )
 
 
+def _run_submitted_job_inline(runner, job_id: str):
+    record = runner.get(job_id)
+    settled = {
+        JobStatus.DONE,
+        JobStatus.BLOCKED,
+        JobStatus.STUCK,
+        JobStatus.FAILED,
+        JobStatus.CANCELLED,
+        JobStatus.WAITING_APPROVAL,
+        JobStatus.WAITING_RUNTIME,
+        JobStatus.PROVIDER_UNAVAILABLE,
+        JobStatus.PAUSED,
+    }
+    while record.status not in settled:
+        record = runner.run_next_step(job_id)
+    return record
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     runner, _ = build_default_runner(config_dir=args.config_dir, workspace_root=Path(args.repo))
+    daemon = build_worker_daemon(
+        config_dir=args.config_dir,
+        workspace_root=args.repo,
+        runner=runner,
+    )
 
     if args.file:
-        payload = yaml.safe_load(Path(args.file).read_text(encoding="utf-8")) or {}
-        spec = JobSpec.model_validate(
-            {
-                "request_text": payload.get("request_text") or payload.get("requester_input"),
-                "repo_path": str(Path(payload.get("repo_path", args.repo)).resolve()),
-                "workspace_root": str(Path(payload.get("workspace_root", payload.get("repo_path", args.repo))).resolve()),
-                "target_branch": payload.get("target_branch", args.branch),
-                "metadata": payload.get("metadata", {}),
-            }
-        )
-        record = runner.run_job(spec)
+        spec = load_job_spec_from_file(args.file)
+        record = runner.submit(spec)
+        if daemon is not None:
+            record = daemon.run_until_job_settled(record.job_id)
+        else:
+            record = _run_submitted_job_inline(runner, record.job_id)
         print(record.model_dump_json(indent=2))
         return 0 if record.status.value == "done" else 1
 
@@ -62,11 +82,15 @@ def main(argv: Sequence[str] | None = None) -> int:
             repo_path=str(Path(args.repo).resolve()),
             target_branch=args.branch,
         )
-        record = runner.run_job(spec)
+        record = runner.submit(spec)
+        if daemon is not None:
+            record = daemon.run_until_job_settled(record.job_id)
+        else:
+            record = _run_submitted_job_inline(runner, record.job_id)
         print(record.model_dump_json(indent=2))
         return 0 if record.status.value == "done" else 1
 
-    daemon = _build_daemon(args.config_dir, args.repo)
+    daemon = daemon or _build_daemon(args.config_dir, args.repo)
     if args.action == "recover":
         recovered = daemon.recover_stale_jobs()
         print(

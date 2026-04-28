@@ -16,14 +16,8 @@ def test_model_router_default_fallback_escalation_and_budget() -> None:
     assert default_selection.reason == RoutingReason.ROLE_DEFAULT
 
     summarizer_selection = router.select_model(RoutingContext(role="summarizer"))
-    assert summarizer_selection.model_id == "qwen_small"
+    assert summarizer_selection.model_id == "qwen_35b"
     assert summarizer_selection.reason == RoutingReason.ROLE_DEFAULT
-
-    fallback_selection = router.select_model(
-        RoutingContext(role="fixer", last_error="timeout")
-    )
-    assert fallback_selection.model_id == "qwen_35b"
-    assert fallback_selection.reason == RoutingReason.FALLBACK
 
     implementer_escalation = router.select_model(
         RoutingContext(role="implementer", failure_count=2)
@@ -39,21 +33,15 @@ def test_model_router_default_fallback_escalation_and_budget() -> None:
     assert escalation_selection.reason == RoutingReason.ESCALATION
     assert escalation_selection.details["repeated_failures"] == 2
 
-    fallback_second_selection = router.select_model(
-        RoutingContext(role="fixer", last_error="invalid_json", fallback_index=1)
-    )
-    assert fallback_second_selection.model_id == "qwen_small"
-    assert fallback_second_selection.reason == RoutingReason.FALLBACK
-
-    capability_selection = router.select_model(
-        RoutingContext(role="fixer", last_error="invalid_json")
-    )
-    assert capability_selection.model_id == "qwen_35b"
-    assert capability_selection.reason == RoutingReason.FALLBACK
+    with pytest.raises(
+        RoutingError,
+        match=r"Fallbacks exhausted for role fixer after timeout; attempted models: none",
+    ):
+        router.select_model(RoutingContext(role="fixer", last_error="timeout"))
 
     with pytest.raises(ContextBudgetExceededError):
         router.select_model(
-            RoutingContext(role="fixer", context_tokens=100000, task_complexity=TaskComplexity.HIGH)
+            RoutingContext(role="fixer", context_tokens=400000, task_complexity=TaskComplexity.HIGH)
         )
 
     with pytest.raises(ContextBudgetExceededError):
@@ -68,13 +56,13 @@ def test_model_router_reports_exhausted_fallback_cause() -> None:
         RoutingError,
         match=(
             r"Fallbacks exhausted for role pm after timeout; "
-            r"attempted models: qwen_35b, qwen_small"
+            r"attempted models: qwen_35b"
         ),
     ):
         router.select_model(
             RoutingContext(
                 role="pm",
                 last_error="timeout",
-                attempted_model_keys=["qwen_35b", "qwen_small"],
+                attempted_model_keys=["qwen_35b"],
             )
         )

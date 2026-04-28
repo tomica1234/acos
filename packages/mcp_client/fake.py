@@ -2,11 +2,18 @@
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import shutil
+import socket
 import subprocess
 import sys
+import time
+import urllib.parse
+import urllib.error
+import urllib.request
+from http.cookiejar import CookieJar
 from pathlib import Path
 from pathlib import PurePosixPath
 from typing import Iterable
@@ -16,6 +23,7 @@ from packages.memory.store import SQLiteMemoryStore
 from packages.mcp_client.router import MCPRouter
 from packages.orchestrator.workspace import WorkspacePolicy
 from packages.schemas.agent_outputs import TestRunResult
+from packages.schemas.runtime import RuntimeHttpCheck
 
 SAFE_HIDDEN_FILE_NAMES = {
     ".env.example",
@@ -45,11 +53,35 @@ BINARY_SUFFIXES = {".sqlite3", ".db", ".pyc"}
 MAX_READ_CHARS = 50000
 MAX_PATCH_CHARS = 200000
 MAX_TEST_TIMEOUT_SECONDS = 600
+MAX_INSTALL_TIMEOUT_SECONDS = 900
+MAX_RUNTIME_STARTUP_WAIT_SECONDS = 10
+PACKAGE_SPEC_PATTERN = re.compile(
+    r"^[A-Za-z0-9][A-Za-z0-9._-]*(\[[A-Za-z0-9_,.-]+\])?([<>=!~]{1,2}[A-Za-z0-9.*+!-]+(,[<>=!~]{1,2}[A-Za-z0-9.*+!-]+)*)?$"
+)
+DJANGO_SETTINGS_PATTERN = re.compile(
+    r"setdefault\(\s*['\"]DJANGO_SETTINGS_MODULE['\"]\s*,\s*['\"]([^'\"]+)['\"]\s*\)"
+)
+CSRF_INPUT_PATTERN = re.compile(
+    r"<input[^>]*(?:name=['\"]csrfmiddlewaretoken['\"][^>]*value=['\"]([^'\"]+)['\"]|value=['\"]([^'\"]+)['\"][^>]*name=['\"]csrfmiddlewaretoken['\"])",
+    re.IGNORECASE,
+)
+FASTAPI_APP_PATTERN = re.compile(r"(?m)^([A-Za-z_][A-Za-z0-9_]*)\s*=\s*FastAPI\(")
+FLASK_APP_PATTERN = re.compile(r"(?m)^([A-Za-z_][A-Za-z0-9_]*)\s*=\s*Flask\(")
+PYTHON_WEB_ENTRYPOINT_CANDIDATES = (
+    "main.py",
+    "app.py",
+    "api.py",
+    "app/main.py",
+    "src/main.py",
+    "src/app.py",
+    "src/api.py",
+)
 
 TEST_COMMAND_ALLOWLIST: dict[str, list[str]] = {
     "python-compile": [sys.executable, "-m", "compileall", "."],
     "pytest": [sys.executable, "-m", "pytest", "-q"],
     "pytest-unit": [sys.executable, "-m", "pytest", "tests", "-q"],
+    "django-test": [sys.executable, "manage.py", "test"],
     "npm-test": ["npm", "test"],
     "npm-lint": ["npm", "run", "lint"],
     "npm-typecheck": ["npm", "run", "typecheck"],
@@ -225,51 +257,625 @@ class TestServer:
 
     def run_test(
         self,
-        command_name: str = "pytest",
+        command_name: str = "auto",
         timeout_seconds: int = 120,
+        http_checks: list[dict[str, object]] | None = None,
     ) -> dict[str, object]:
         if self.scripted_results:
             return self.scripted_results.pop(0).model_dump()
+        if command_name == "auto":
+            command_name = self._detect_test_command_name()
+        if command_name == "prepare-runtime-auto":
+            return self._run_runtime_prepare(timeout_seconds=timeout_seconds)
+        if command_name == "runtime-smoke-auto":
+            return self._run_runtime_smoke(timeout_seconds=timeout_seconds, http_checks=http_checks)
+        if command_name == "django-wsgi-check":
+            return self._run_django_wsgi_check(timeout_seconds=timeout_seconds)
         if command_name not in TEST_COMMAND_ALLOWLIST:
             raise ValueError(f"command_name {command_name} is not allowlisted")
         if timeout_seconds <= 0 or timeout_seconds > MAX_TEST_TIMEOUT_SECONDS:
             raise ValueError(
                 f"timeout_seconds must be between 1 and {MAX_TEST_TIMEOUT_SECONDS}"
             )
-        command = list(TEST_COMMAND_ALLOWLIST[command_name])
+        command = self._normalize_python_command(list(TEST_COMMAND_ALLOWLIST[command_name]))
+        return self._execute_test_command(command, timeout_seconds=timeout_seconds)
+
+    def install_package(
+        self,
+        package: str,
+        timeout_seconds: int = 600,
+    ) -> dict[str, object]:
+        package_spec = package.strip()
+        if not PACKAGE_SPEC_PATTERN.fullmatch(package_spec):
+            raise ValueError("package spec is not allowlisted")
+        if timeout_seconds <= 0 or timeout_seconds > MAX_INSTALL_TIMEOUT_SECONDS:
+            raise ValueError(
+                f"timeout_seconds must be between 1 and {MAX_INSTALL_TIMEOUT_SECONDS}"
+            )
+        if not self._is_virtualenv_python():
+            raise ValueError("package installation is only allowed inside an active virtualenv")
+        command = self._normalize_python_command(
+            [sys.executable, "-m", "pip", "install", package_spec]
+        )
+        completed = self._run_subprocess(command, timeout_seconds=timeout_seconds)
+        output = (completed.stdout + "\n" + completed.stderr).strip()
+        return {
+            "package": package_spec,
+            "command": command,
+            "success": completed.returncode == 0,
+            "output_excerpt": output[-20000:],
+            "exit_code": completed.returncode,
+        }
+
+    def run_command(
+        self,
+        argv: list[str],
+        timeout_seconds: int = 120,
+        mode: str = "oneshot",
+        port: int | None = None,
+        http_path: str = "/",
+        http_checks: list[dict[str, object]] | None = None,
+    ) -> dict[str, object]:
+        if timeout_seconds <= 0 or timeout_seconds > MAX_TEST_TIMEOUT_SECONDS:
+            raise ValueError(
+                f"timeout_seconds must be between 1 and {MAX_TEST_TIMEOUT_SECONDS}"
+            )
+        if mode not in {"oneshot", "server"}:
+            raise ValueError("mode must be oneshot or server")
+        if not isinstance(argv, list) or not argv or not all(isinstance(item, str) and item.strip() for item in argv):
+            raise ValueError("argv must be a non-empty list of strings")
+        if not http_path.startswith("/"):
+            raise ValueError("http_path must start with '/'")
+        normalized_http_checks = (
+            [RuntimeHttpCheck.model_validate(item).model_dump(exclude_none=True) for item in http_checks]
+            if http_checks is not None
+            else None
+        )
+        if normalized_http_checks is not None and mode != "server":
+            raise ValueError("http_checks are only supported in server mode")
+        resolved_port = port
+        if mode == "server":
+            if resolved_port is None:
+                if not any("{port}" in item for item in argv):
+                    raise ValueError("server mode argv must include a {port} placeholder or an explicit port")
+                resolved_port = self._reserve_tcp_port()
+            command = self._normalize_runtime_command(argv, port=resolved_port)
+            return self._run_listening_process_check(
+                command,
+                port=resolved_port,
+                timeout_seconds=timeout_seconds,
+                http_path=http_path,
+                http_checks=normalized_http_checks,
+            )
+        command = self._normalize_runtime_command(argv, port=resolved_port)
+        return self._execute_test_command(command, timeout_seconds=timeout_seconds)
+
+    def _detect_test_command_name(self) -> str:
+        if (self.workspace_root / "manage.py").exists():
+            return "django-test"
+        return "pytest"
+
+    def _run_runtime_prepare(self, *, timeout_seconds: int) -> dict[str, object]:
+        profile = self._detect_runtime_profile()
+        if profile is None:
+            return TestRunResult(
+                success=True,
+                command=["runtime-prepare", "skipped"],
+                failed_tests=[],
+                output_excerpt="no runtime preparation available",
+                exit_code=0,
+            ).model_dump()
+        if profile["kind"] == "django":
+            return self._run_django_runtime_prepare(timeout_seconds=timeout_seconds)
+        return TestRunResult(
+            success=True,
+            command=["runtime-prepare", profile["kind"], "skipped"],
+            failed_tests=[],
+            output_excerpt=f"no runtime preparation required for {profile['kind']}",
+            exit_code=0,
+        ).model_dump()
+
+    def _run_runtime_smoke(
+        self,
+        *,
+        timeout_seconds: int,
+        http_checks: list[dict[str, object]] | None = None,
+    ) -> dict[str, object]:
+        profile = self._detect_runtime_profile()
+        if profile is None:
+            return TestRunResult(
+                success=True,
+                command=["runtime-smoke", "skipped"],
+                failed_tests=[],
+                output_excerpt="no runtime smoke check available",
+                exit_code=0,
+        ).model_dump()
+        if profile["kind"] == "django":
+            return self._run_django_runserver_check(
+                timeout_seconds=timeout_seconds,
+                http_checks=http_checks,
+            )
+        if profile["kind"] == "fastapi":
+            return self._run_fastapi_runtime_check(
+                profile,
+                timeout_seconds=timeout_seconds,
+                http_checks=http_checks,
+            )
+        if profile["kind"] == "flask":
+            return self._run_flask_runtime_check(
+                profile,
+                timeout_seconds=timeout_seconds,
+                http_checks=http_checks,
+            )
+        return TestRunResult(
+            success=True,
+            command=["runtime-smoke", profile["kind"], "skipped"],
+            failed_tests=[],
+            output_excerpt=f"no runtime smoke check implemented for {profile['kind']}",
+            exit_code=0,
+        ).model_dump()
+
+    def _run_django_wsgi_check(self, *, timeout_seconds: int) -> dict[str, object]:
+        settings_module = self._detect_django_settings_module()
+        if settings_module is None:
+            raise ValueError("could not detect DJANGO_SETTINGS_MODULE from manage.py")
+        command = self._normalize_python_command(
+            [
+                sys.executable,
+                "-c",
+                (
+                    "import os; "
+                    f"os.environ.setdefault('DJANGO_SETTINGS_MODULE', {settings_module!r}); "
+                    "from django.core.servers.basehttp import get_internal_wsgi_application; "
+                    "get_internal_wsgi_application(); "
+                    "print('django runtime smoke ok')"
+                ),
+            ]
+        )
+        return self._execute_test_command(command, timeout_seconds=timeout_seconds)
+
+    def _run_django_runtime_prepare(self, *, timeout_seconds: int) -> dict[str, object]:
+        steps = [
+            self._normalize_python_command([sys.executable, "manage.py", "makemigrations"]),
+            self._normalize_python_command([sys.executable, "manage.py", "migrate", "--noinput"]),
+        ]
+        outputs: list[str] = []
+        for command in steps:
+            completed = self._run_subprocess(command, timeout_seconds=timeout_seconds)
+            output = (completed.stdout + "\n" + completed.stderr).strip()
+            outputs.append(f"$ {' '.join(command)}\n{output}".strip())
+            if completed.returncode != 0:
+                return TestRunResult(
+                    success=False,
+                    command=command,
+                    failed_tests=[],
+                    output_excerpt="\n\n".join(outputs)[-20000:],
+                    exit_code=completed.returncode,
+                ).model_dump()
+        return TestRunResult(
+            success=True,
+            command=steps[-1],
+            failed_tests=[],
+            output_excerpt="\n\n".join(outputs)[-20000:],
+            exit_code=0,
+        ).model_dump()
+
+    def _detect_django_settings_module(self) -> str | None:
+        manage_path = self.workspace_root / "manage.py"
+        if not manage_path.exists():
+            return None
+        content = manage_path.read_text(encoding="utf-8")
+        match = DJANGO_SETTINGS_PATTERN.search(content)
+        if match is None:
+            return None
+        return match.group(1)
+
+    def _run_django_runserver_check(
+        self,
+        *,
+        timeout_seconds: int,
+        http_checks: list[dict[str, object]] | None = None,
+    ) -> dict[str, object]:
+        port = self._reserve_tcp_port()
+        command = self._normalize_python_command(
+            [
+                sys.executable,
+                "manage.py",
+                "runserver",
+                f"127.0.0.1:{port}",
+                "--noreload",
+            ]
+        )
+        return self._run_listening_process_check(
+            command,
+            port=port,
+            timeout_seconds=timeout_seconds,
+            http_checks=http_checks,
+        )
+
+    def _detect_runtime_profile(self) -> dict[str, str] | None:
+        if (self.workspace_root / "manage.py").exists():
+            return {"kind": "django"}
+        for relative_path in PYTHON_WEB_ENTRYPOINT_CANDIDATES:
+            candidate = self.workspace_root / relative_path
+            if not candidate.exists() or not candidate.is_file():
+                continue
+            content = candidate.read_text(encoding="utf-8")
+            fastapi_match = FASTAPI_APP_PATTERN.search(content)
+            if fastapi_match is not None:
+                return {
+                    "kind": "fastapi",
+                    "module": self._module_path_from_relative_path(relative_path),
+                    "attribute": fastapi_match.group(1),
+                }
+            flask_match = FLASK_APP_PATTERN.search(content)
+            if flask_match is not None:
+                return {
+                    "kind": "flask",
+                    "module": self._module_path_from_relative_path(relative_path),
+                    "attribute": flask_match.group(1),
+                }
+        return None
+
+    def _run_fastapi_runtime_check(
+        self,
+        profile: dict[str, str],
+        *,
+        timeout_seconds: int,
+        http_checks: list[dict[str, object]] | None = None,
+    ) -> dict[str, object]:
+        return self.run_command(
+            argv=[
+                sys.executable,
+                "-m",
+                "uvicorn",
+                f"{profile['module']}:{profile['attribute']}",
+                "--host",
+                "{host}",
+                "--port",
+                "{port}",
+            ],
+            timeout_seconds=timeout_seconds,
+            mode="server",
+            http_checks=http_checks,
+        )
+
+    def _run_flask_runtime_check(
+        self,
+        profile: dict[str, str],
+        *,
+        timeout_seconds: int,
+        http_checks: list[dict[str, object]] | None = None,
+    ) -> dict[str, object]:
+        return self.run_command(
+            argv=[
+                sys.executable,
+                "-c",
+                (
+                    "import importlib; "
+                    f"module = importlib.import_module({profile['module']!r}); "
+                    f"app = getattr(module, {profile['attribute']!r}); "
+                    "app.run(host='{host}', port={port}, use_reloader=False)"
+                ),
+            ],
+            timeout_seconds=timeout_seconds,
+            mode="server",
+            http_checks=http_checks,
+        )
+
+    @staticmethod
+    def _module_path_from_relative_path(relative_path: str) -> str:
+        path = PurePosixPath(relative_path)
+        return ".".join(path.with_suffix("").parts)
+
+    @staticmethod
+    def _reserve_tcp_port() -> int:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.bind(("127.0.0.1", 0))
+            return int(sock.getsockname()[1])
+
+    @staticmethod
+    def _is_tcp_port_open(port: int) -> bool:
+        try:
+            with socket.create_connection(("127.0.0.1", port), timeout=0.2):
+                return True
+        except OSError:
+            return False
+
+    def _run_listening_process_check(
+        self,
+        command: list[str],
+        *,
+        port: int,
+        timeout_seconds: int,
+        http_path: str = "/",
+        http_checks: list[dict[str, object]] | None = None,
+    ) -> dict[str, object]:
+        deadline = time.monotonic() + min(timeout_seconds, MAX_RUNTIME_STARTUP_WAIT_SECONDS)
+        process = subprocess.Popen(
+            command,
+            cwd=self.workspace_root,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            env=self._build_subprocess_env(),
+        )
+        try:
+            while time.monotonic() < deadline:
+                if process.poll() is not None:
+                    stdout, stderr = process.communicate(timeout=1)
+                    output = (stdout + "\n" + stderr).strip()
+                    return TestRunResult(
+                        success=False,
+                        command=command,
+                        failed_tests=[],
+                        output_excerpt=output[-20000:],
+                        exit_code=int(process.returncode or 1),
+                    ).model_dump()
+                if self._is_tcp_port_open(port):
+                    probe = (
+                        self._run_http_checks(port=port, http_checks=http_checks)
+                        if http_checks
+                        else self._probe_http_root(port=port, http_path=http_path)
+                    )
+                    if probe is None:
+                        time.sleep(0.1)
+                        continue
+                    stdout, stderr = self._terminate_process(process)
+                    server_output = (stdout + "\n" + stderr).strip()
+                    output = "\n\n".join(
+                        part
+                        for part in (str(probe["output_excerpt"]), server_output)
+                        if part
+                    ).strip() or "runtime server boot ok"
+                    if not bool(probe["success"]):
+                        return TestRunResult(
+                            success=False,
+                            command=command,
+                            failed_tests=[],
+                            output_excerpt=output[-20000:],
+                            exit_code=int(probe["status_code"]),
+                        ).model_dump()
+                    return TestRunResult(
+                        success=True,
+                        command=command,
+                        failed_tests=[],
+                        output_excerpt=output[-20000:],
+                        exit_code=0,
+                    ).model_dump()
+                time.sleep(0.1)
+            stdout, stderr = self._terminate_process(process)
+            output = ((stdout + "\n" + stderr).strip() + "\nserver did not become ready before timeout").strip()
+            return TestRunResult(
+                success=False,
+                command=command,
+                failed_tests=[],
+                output_excerpt=output[-20000:],
+                exit_code=124,
+            ).model_dump()
+        finally:
+            if process.poll() is None:
+                self._terminate_process(process)
+
+    def _run_http_checks(
+        self,
+        *,
+        port: int,
+        http_checks: list[dict[str, object]],
+    ) -> dict[str, object] | None:
+        cookie_jar = CookieJar()
+        last_body = ""
+        last_url = f"http://127.0.0.1:{port}/"
+        outputs: list[str] = []
+        for index, raw in enumerate(http_checks, start=1):
+            check = RuntimeHttpCheck.model_validate(raw)
+            result = self._perform_http_check(
+                port=port,
+                check=check,
+                index=index,
+                cookie_jar=cookie_jar,
+                last_body=last_body,
+                last_url=last_url,
+            )
+            if result is None:
+                return None
+            outputs.append(str(result["output_excerpt"]))
+            last_body = str(result.get("body", ""))
+            last_url = str(result.get("url", last_url))
+            if not bool(result["success"]):
+                return {
+                    "success": False,
+                    "status_code": int(result["status_code"]),
+                    "output_excerpt": "\n\n".join(outputs)[-20000:],
+                }
+        return {
+            "success": True,
+            "status_code": 200,
+            "output_excerpt": "\n\n".join(outputs)[-20000:],
+        }
+
+    def _perform_http_check(
+        self,
+        *,
+        port: int,
+        check: RuntimeHttpCheck,
+        index: int,
+        cookie_jar: CookieJar,
+        last_body: str,
+        last_url: str,
+    ) -> dict[str, object] | None:
+        opener = self._build_http_opener(cookie_jar=cookie_jar, follow_redirects=check.follow_redirects)
+        url = f"http://127.0.0.1:{port}{check.path}"
+        headers = dict(check.headers)
+        data: bytes | None = None
+        if check.form is not None:
+            form_payload = {key: str(value) for key, value in check.form.items()}
+            if check.use_csrf_from_last_response and check.method in {"POST", "PUT", "PATCH", "DELETE"}:
+                csrf_form_token = self._extract_csrf_token(last_body) or self._cookie_value(
+                    cookie_jar,
+                    "csrftoken",
+                )
+                if csrf_form_token is not None and "csrfmiddlewaretoken" not in form_payload:
+                    form_payload["csrfmiddlewaretoken"] = csrf_form_token
+                csrf_cookie = self._cookie_value(cookie_jar, "csrftoken")
+                if csrf_cookie is not None and "X-CSRFToken" not in headers:
+                    headers["X-CSRFToken"] = csrf_cookie
+                headers.setdefault("Referer", last_url)
+            data = urllib.parse.urlencode(form_payload).encode("utf-8")
+            headers.setdefault("Content-Type", "application/x-www-form-urlencoded")
+        elif check.json_payload is not None:
+            data = json.dumps(check.json_payload).encode("utf-8")
+            headers.setdefault("Content-Type", "application/json")
+        elif check.body is not None:
+            data = check.body.encode("utf-8")
+        request = urllib.request.Request(url, data=data, headers=headers, method=check.method)
+        try:
+            with opener.open(request, timeout=0.5) as response:
+                status_code = int(getattr(response, "status", response.getcode()))
+                body = response.read(4000).decode("utf-8", errors="replace")
+                final_url = response.geturl()
+        except urllib.error.HTTPError as exc:
+            status_code = int(exc.code)
+            body = exc.read(4000).decode("utf-8", errors="replace")
+            final_url = exc.geturl()
+        except (urllib.error.URLError, TimeoutError, OSError):
+            return None
+        outputs = [
+            f"{check.name or f'check {index}'}: {check.method} {check.path} -> HTTP {status_code}"
+        ]
+        success = status_code == check.expect_status
+        if not success:
+            outputs.append(f"expected status {check.expect_status}")
+        for token in check.body_contains:
+            if token not in body:
+                success = False
+                outputs.append(f"missing body text: {token}")
+        for token in check.body_not_contains:
+            if token in body:
+                success = False
+                outputs.append(f"unexpected body text: {token}")
+        if body.strip():
+            outputs.append(body.strip()[:1000])
+        return {
+            "success": success,
+            "status_code": status_code,
+            "output_excerpt": "\n".join(outputs)[-20000:],
+            "body": body,
+            "url": final_url,
+        }
+
+    @staticmethod
+    def _build_http_opener(*, cookie_jar: CookieJar, follow_redirects: bool):
+        handlers: list[object] = [urllib.request.HTTPCookieProcessor(cookie_jar)]
+        if not follow_redirects:
+            class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
+                def redirect_request(self, req, fp, code, msg, headers, newurl):
+                    return None
+
+            handlers.append(_NoRedirectHandler())
+        return urllib.request.build_opener(*handlers)
+
+    @staticmethod
+    def _cookie_value(cookie_jar: CookieJar, name: str) -> str | None:
+        for cookie in cookie_jar:
+            if cookie.name == name:
+                return cookie.value
+        return None
+
+    @staticmethod
+    def _extract_csrf_token(body: str) -> str | None:
+        match = CSRF_INPUT_PATTERN.search(body)
+        if match is None:
+            return None
+        return match.group(1) or match.group(2)
+
+    def _probe_http_root(self, *, port: int, http_path: str = "/") -> dict[str, object] | None:
+        url = f"http://127.0.0.1:{port}{http_path}"
+        try:
+            with urllib.request.urlopen(url, timeout=0.5) as response:
+                status_code = int(getattr(response, "status", response.getcode()))
+                body = response.read(4000).decode("utf-8", errors="replace").strip()
+        except urllib.error.HTTPError as exc:
+            status_code = int(exc.code)
+            body = exc.read(4000).decode("utf-8", errors="replace").strip()
+        except (urllib.error.URLError, TimeoutError, OSError):
+            return None
+        output = f"GET / -> HTTP {status_code}"
+        if body:
+            output = f"{output}\n{body}"
+        return {
+            "success": status_code < 500,
+            "status_code": status_code,
+            "output_excerpt": output[-20000:],
+        }
+
+    @staticmethod
+    def _normalize_runtime_command(argv: list[str], *, port: int | None = None, host: str = "127.0.0.1") -> list[str]:
+        resolved = [
+            item.replace("{host}", host).replace("{port}", str(port) if port is not None else "{port}")
+            for item in argv
+        ]
+        return TestServer._normalize_python_command(resolved)
+
+    @staticmethod
+    def _terminate_process(process: subprocess.Popen[str]) -> tuple[str, str]:
+        if process.poll() is None:
+            process.terminate()
+            try:
+                return process.communicate(timeout=2)
+            except subprocess.TimeoutExpired:
+                process.kill()
+        return process.communicate()
+
+    @staticmethod
+    def _normalize_python_command(command: list[str]) -> list[str]:
         if len(command) >= 3 and command[0] == sys.executable and command[1] != "-B":
-            command = [command[0], "-B", *command[1:]]
-        for cache_dir in self.workspace_root.rglob("__pycache__"):
-            shutil.rmtree(cache_dir, ignore_errors=True)
+            return [command[0], "-B", *command[1:]]
+        return command
+
+    def _build_subprocess_env(self) -> dict[str, str]:
         env = os.environ.copy()
         existing = env.get("PYTHONPATH", "")
         env["PYTHONPATH"] = (
             str(self.workspace_root) if not existing else f"{self.workspace_root}{os.pathsep}{existing}"
         )
         env["PYTHONDONTWRITEBYTECODE"] = "1"
-        result = subprocess.run(
+        env["PIP_DISABLE_PIP_VERSION_CHECK"] = "1"
+        return env
+
+    def _run_subprocess(self, command: list[str], *, timeout_seconds: int) -> subprocess.CompletedProcess[str]:
+        for cache_dir in self.workspace_root.rglob("__pycache__"):
+            shutil.rmtree(cache_dir, ignore_errors=True)
+        return subprocess.run(
             command,
             cwd=self.workspace_root,
             capture_output=True,
             text=True,
             timeout=timeout_seconds,
-            env=env,
+            env=self._build_subprocess_env(),
             check=False,
         )
-        output = (result.stdout + "\n" + result.stderr).strip()
+
+    def _execute_test_command(self, command: list[str], *, timeout_seconds: int) -> dict[str, object]:
+        completed = self._run_subprocess(command, timeout_seconds=timeout_seconds)
+        output = (completed.stdout + "\n" + completed.stderr).strip()
         failed_tests = [
             line.strip()
             for line in output.splitlines()
             if "::" in line and ("FAILED" in line or "ERROR" in line)
         ]
         payload = TestRunResult(
-            success=result.returncode == 0,
+            success=completed.returncode == 0,
             command=command,
             failed_tests=failed_tests,
             output_excerpt=output[-20000:],
-            exit_code=result.returncode,
+            exit_code=completed.returncode,
         )
         return payload.model_dump()
+
+    @staticmethod
+    def _is_virtualenv_python() -> bool:
+        return sys.prefix != sys.base_prefix or bool(os.environ.get("VIRTUAL_ENV"))
 
 
 TestServer.__test__ = False
@@ -505,6 +1111,8 @@ class FakeMCPEnvironment:
         router.register("git_server.commit", self.git_server.commit)
         router.register("git_server.log_recent", self.git_server.log_recent)
         router.register("test_server.run_test", self.test_server.run_test)
+        router.register("test_server.run_command", self.test_server.run_command)
+        router.register("test_server.install_package", self.test_server.install_package)
         router.register("memory_server.write_memory", self.memory_server.write_memory)
         router.register("memory_server.read_memory", self.memory_server.read_memory)
         router.register("memory_server.search_memory", self.memory_server.search_memory)

@@ -15,6 +15,7 @@ from packages.schemas.agent_outputs import (
     ArchitecturePlan,
     FixResult,
     ImplementationResult,
+    PMReviewResult,
     PRD,
     ReleaseResult,
     ReviewResult,
@@ -71,11 +72,13 @@ class VerticalSliceHarness:
         *,
         request_text: str = "Build the requested feature",
         target_branch: str = "acos/vertical-slice",
+        metadata: dict[str, Any] | None = None,
     ) -> JobRecord:
         spec = JobSpec(
             request_text=request_text,
             repo_path=str(self.workspace),
             target_branch=target_branch,
+            metadata=metadata or {},
         )
         return self.runner.run_job(spec)
 
@@ -265,16 +268,31 @@ def base_vertical_slice_scenario(
     test_writer: Any,
     reviewer: Any,
     security_reviewer: Any,
+    pm: Any | None = None,
     fixer: Any | None = None,
     summarizer: Any | None = None,
     release_manager: Any | None = None,
 ) -> dict[str, Any]:
     return {
-        "pm": PRD(
-            title="Add Helper",
-            problem_statement="Need a correct add helper",
-            goals=["Pass tests"],
-        ).model_dump(),
+        "pm": pm
+        if pm is not None
+        else [
+            PRD(
+                title="Add Helper",
+                problem_statement="Need a correct add helper",
+                goals=["Pass tests"],
+            ).model_dump(),
+            PMReviewResult(
+                decision=ReviewDecision.APPROVE,
+                summary="The design covers the requested work.",
+                required_artifacts=["feature.py", "tests/test_feature.py"],
+            ).model_dump(),
+            PMReviewResult(
+                decision=ReviewDecision.APPROVE,
+                summary="The delivered result satisfies the request.",
+                required_artifacts=["feature.py", "tests/test_feature.py"],
+            ).model_dump(),
+        ],
         "architect": ArchitecturePlan(
             summary="Single module and pytest test.",
             components=["feature.py", "tests/test_feature.py"],
@@ -287,6 +305,7 @@ def base_vertical_slice_scenario(
                     title="Implement helper",
                     description="Create add function and tests",
                     role="implementer",
+                    required_artifacts=["feature.py", "tests/test_feature.py"],
                 )
             ],
         ).model_dump(),

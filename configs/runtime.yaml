@@ -7,6 +7,13 @@ runtime:
     test_chat_completion: true
     test_json_response: false
 
+  token_budget:
+    safety_margin_tokens: 4096
+    minimum_output_tokens: 1024
+    default_output_tokens: auto
+    hard_max_output_tokens:
+    estimate_chars_per_token: 4.0
+
   on_provider_unavailable:
     action: wait_and_retry
     notify: true

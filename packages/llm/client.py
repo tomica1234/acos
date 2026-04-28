@@ -6,6 +6,12 @@ import json
 from hashlib import sha256
 from typing import Any
 
+from packages.llm.budget import (
+    TokenBudgetPolicy,
+    compute_max_output_tokens,
+    estimate_tokens_from_messages,
+    resolve_configured_max_output_tokens,
+)
 from packages.llm.errors import AdapterError
 from packages.llm.registry import ModelRegistry
 from packages.llm.routing import ModelRouter, RoutingContext
@@ -26,9 +32,15 @@ def _hash_payload(payload: Any) -> str:
 class LLMClient:
     """Run routed model calls and return normalized results."""
 
-    def __init__(self, registry: ModelRegistry, router: ModelRouter) -> None:
+    def __init__(
+        self,
+        registry: ModelRegistry,
+        router: ModelRouter,
+        token_budget_policy: TokenBudgetPolicy | None = None,
+    ) -> None:
         self.registry = registry
         self.router = router
+        self.token_budget_policy = token_budget_policy or TokenBudgetPolicy()
         self._adapters: dict[str, object] = {}
 
     def generate(
@@ -41,13 +53,28 @@ class LLMClient:
         selection = self.router.select_model(routing_context)
         adapter = self._get_adapter(selection.model_id)
         tool_payload = build_tool_manifest(allowed_tools) if allowed_tools else None
+        selected_model = self.registry.get_model(selection.model_key)
+        configured_max_output_tokens = resolve_configured_max_output_tokens(
+            selection.max_output_tokens,
+            selected_model.max_output_tokens,
+            self.token_budget_policy.default_output_tokens,
+        )
+        estimated_input_tokens = estimate_tokens_from_messages(messages)
+        resolved_max_output_tokens = compute_max_output_tokens(
+            model_max_context_tokens=selected_model.max_context_tokens,
+            estimated_input_tokens=estimated_input_tokens,
+            configured_max_output_tokens=configured_max_output_tokens,
+            safety_margin_tokens=self.token_budget_policy.safety_margin_tokens,
+            minimum_output_tokens=self.token_budget_policy.minimum_output_tokens,
+            hard_max_output_tokens=self.token_budget_policy.hard_max_output_tokens,
+        )
         try:
             result = adapter.generate(
                 messages=messages,
                 tools=tool_payload,
                 temperature=selection.temperature,
                 top_p=selection.top_p,
-                max_tokens=selection.max_output_tokens,
+                max_tokens=resolved_max_output_tokens,
                 response_schema=response_schema,
                 metadata={
                     "role": routing_context.role,
@@ -84,6 +111,14 @@ class LLMClient:
                 if result.usage is not None
                 else sum(len(str(item)) for item in messages) // 4 + len(result.content) // 4
             ),
+            finish_reason=result.finish_reason,
+            configured_max_output_tokens=configured_max_output_tokens,
+            estimated_input_tokens=estimated_input_tokens,
+            resolved_max_output_tokens=resolved_max_output_tokens,
+            model_max_context_tokens=selected_model.max_context_tokens,
+            safety_margin_tokens=self.token_budget_policy.safety_margin_tokens,
+            context_budget_tokens=routing_context.context_tokens,
+            output_truncated=result.output_truncated,
         )
         return result, selection, record
 

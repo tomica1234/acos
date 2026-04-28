@@ -6,7 +6,12 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from packages.llm.errors import ContextBudgetExceededError, RoutingError
-from packages.llm.budget import TokenBudgetManager, estimate_tokens
+from packages.llm.budget import (
+    TokenBudgetManager,
+    TokenBudgetPolicy,
+    estimate_tokens,
+    resolve_configured_max_output_tokens,
+)
 from packages.llm.registry import ModelRegistry
 from packages.schemas.context import ContextPacket
 from packages.schemas.models import (
@@ -52,9 +57,14 @@ class FailureHistory:
 class ModelRouter:
     """Select models for agent invocations."""
 
-    def __init__(self, registry: ModelRegistry) -> None:
+    def __init__(
+        self,
+        registry: ModelRegistry,
+        token_budget_policy: TokenBudgetPolicy | None = None,
+    ) -> None:
         self.registry = registry
-        self.budget_manager = TokenBudgetManager()
+        self.token_budget_policy = token_budget_policy or TokenBudgetPolicy()
+        self.budget_manager = TokenBudgetManager(self.token_budget_policy)
 
     def select_model(
         self,
@@ -245,12 +255,17 @@ class ModelRouter:
         details: dict[str, Any],
     ) -> ModelSelection:
         for model in valid_models:
+            configured_max_output_tokens = resolve_configured_max_output_tokens(
+                agent.max_output_tokens,
+                model.max_output_tokens,
+                self.token_budget_policy.default_output_tokens,
+            )
             try:
                 self.budget_manager.assert_context_fits(
                     context_tokens=routing_context.context_tokens,
                     requested_budget=agent.context_budget_tokens,
                     model_max_context_tokens=model.max_context_tokens,
-                    model_max_output_tokens=min(agent.max_output_tokens, model.max_output_tokens),
+                    configured_max_output_tokens=configured_max_output_tokens,
                 )
             except ContextBudgetExceededError:
                 continue
@@ -267,7 +282,9 @@ class ModelRouter:
                 details=actual_details,
                 temperature=agent.temperature,
                 top_p=agent.top_p,
-                max_output_tokens=min(agent.max_output_tokens, model.max_output_tokens),
+                max_output_tokens=configured_max_output_tokens
+                if configured_max_output_tokens is not None
+                else self.token_budget_policy.default_output_tokens,
             )
         raise ContextBudgetExceededError(
             f"Context requires compaction for role {routing_context.role}",

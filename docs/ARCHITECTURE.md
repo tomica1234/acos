@@ -10,6 +10,8 @@ tool execution, approval pauses, and model selection inputs.
 
 - `packages.schemas.*` define every durable and agent-facing structure.
 - `packages.llm.registry.ModelRegistry` loads provider, model, and role config.
+- `packages.llm.budget.TokenBudgetPolicy` resolves prompt and completion
+  budgets with safety margins, minimum output, and optional hard caps.
 - `packages.llm.routing.ModelRouter` selects the model for each role.
 - `packages.orchestrator.job_store.SQLiteJobStore` persists jobs, tasks,
   approvals, checkpoints, runtime issues, heartbeats, leases, and notifications.
@@ -31,9 +33,10 @@ tool execution, approval pauses, and model selection inputs.
   runtime loop.
 - `packages.agents.runner.AgentRunner` reads the role config, asks
   `ModelRouter` for a `ModelSelection`, resolves the concrete adapter through
-  `ModelRegistry`, executes policy-approved MCP tools, retries invalid JSON once
-  with a repair prompt, then falls back or escalates according to routing
-  policy.
+  `ModelRegistry`, estimates prompt tokens from the message array, resolves an
+  integer API `max_tokens`, executes policy-approved MCP tools, retries invalid
+  JSON once with a repair prompt, and distinguishes `output_truncated` from
+  ordinary `invalid_json`.
 - `packages.mcp_client.router.MCPRouter` invokes only registered MCP tools.
 - `packages.memory.store.SQLiteMemoryStore` persists redacted memory entries.
 
@@ -55,6 +58,23 @@ tool execution, approval pauses, and model selection inputs.
 Agents do not edit the file system directly. They return structured outputs
 that the orchestrator turns into MCP tool calls. This keeps tool execution
 auditable and policy-gated.
+
+## Token Budget Flow
+
+1. `ContextBuilder` starts from the role budget in
+   `AgentModelConfig.context_budget_tokens`.
+2. `TokenBudgetPolicy` reserves `safety_margin_tokens` plus
+   `minimum_output_tokens`.
+3. `ContextBuilder` truncates or summarizes files, diffs, logs, and memory if
+   the estimated prompt would exceed the selected model window.
+4. `AgentRunner` re-estimates tokens from the actual message array and resolves
+   the final API `max_tokens` integer immediately before the adapter call.
+5. If there is not enough room for the minimum output after safety margin,
+   ACOS raises `ContextBudgetExceededError` rather than silently clipping the
+   completion budget.
+6. If a provider returns `finish_reason=length` before valid JSON is produced,
+   ACOS records `output_truncated` and surfaces that separately from
+   `invalid_json`.
 
 ## Approval Flow
 
@@ -108,7 +128,8 @@ while another task waits for approval is not implemented yet.
 `packages.orchestrator.audit.AuditRecorder` records:
 
 - model selection events with `model_key`, `provider_key`, and `routing_reason`
-- model call events with redacted hashes and token estimates
+- model call events with redacted hashes, estimated input tokens, resolved
+  `max_tokens`, model context window, safety margin, and completion token usage
 - tool call events with hashed inputs and outputs
 - policy decisions with operation, risk level, and approval id when present
 - approval lifecycle events such as requested, approved, rejected, and expired

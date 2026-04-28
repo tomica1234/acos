@@ -130,6 +130,33 @@ class WorkerDaemon:
             self.run_once()
             time.sleep(self.config.poll_interval_seconds)
 
+    def run_until_job_settled(
+        self,
+        job_id: str,
+        *,
+        poll_interval_seconds: float | None = None,
+        max_iterations: int | None = None,
+    ) -> JobRecord:
+        iterations = 0
+        sleep_seconds = (
+            float(poll_interval_seconds)
+            if poll_interval_seconds is not None
+            else float(self.config.poll_interval_seconds)
+        )
+        while True:
+            record = self.store.get(job_id)
+            if _is_settled_status(record.status):
+                return record
+            processed = self.run_once()
+            iterations += 1
+            latest = self.store.get(job_id)
+            if _is_settled_status(latest.status):
+                return latest
+            if max_iterations is not None and iterations >= max_iterations:
+                return latest
+            if not any(item.job_id == job_id for item in processed):
+                time.sleep(max(0.0, sleep_seconds))
+
     def request_shutdown(self) -> None:
         self._shutdown_requested = True
 
@@ -161,3 +188,17 @@ class WorkerDaemon:
     def _install_signal_handlers(self) -> None:
         signal.signal(signal.SIGTERM, lambda signum, frame: self.request_shutdown())
         signal.signal(signal.SIGINT, lambda signum, frame: self.request_shutdown())
+
+
+def _is_settled_status(status: JobStatus) -> bool:
+    return status in {
+        JobStatus.DONE,
+        JobStatus.BLOCKED,
+        JobStatus.STUCK,
+        JobStatus.FAILED,
+        JobStatus.CANCELLED,
+        JobStatus.WAITING_APPROVAL,
+        JobStatus.WAITING_RUNTIME,
+        JobStatus.PROVIDER_UNAVAILABLE,
+        JobStatus.PAUSED,
+    }

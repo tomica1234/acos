@@ -3,6 +3,7 @@ import json
 import pytest
 
 from packages.agents.runner import AgentRunner
+from packages.llm.errors import RoutingError, StructuredOutputError
 from packages.llm.routing import FailureHistory, ModelRouter, RoutingContext, TaskState
 from packages.mcp_client.fake import FakeMCPEnvironment
 from packages.orchestrator.audit import AuditRecorder
@@ -84,69 +85,81 @@ def test_agent_runner_uses_role_primary_model_and_records_audit() -> None:
     assert model_event.metadata["model_key"] == "qwen_35b"
     assert model_event.metadata["provider_key"] == "local_qwen"
     assert model_event.metadata["routing_reason"] == "role_default"
+    assert model_event.metadata["configured_max_output_tokens"] == "auto"
+    assert isinstance(model_event.metadata["resolved_max_output_tokens"], int)
+    assert model_event.metadata["resolved_max_output_tokens"] > 0
+    assert isinstance(model_event.metadata["estimated_input_tokens"], int)
 
     serialized_audit = json.dumps([event.model_dump(mode="json") for event in audit_events])
     assert "sk-this-should-not-appear" not in serialized_audit
 
 
-def test_agent_runner_uses_fallback_model_when_requested_by_routing_state() -> None:
+def test_agent_runner_raises_when_timeout_requires_missing_fallback() -> None:
     registry = load_registry()
-    attach_mock_adapter(
-        registry,
-        {
-            "fixer": FixResult(
-                status=FixStatus.FIXED,
-                summary="Recovered on fallback",
-            ).model_dump()
-        },
+    runner, _ = _runner(registry)
+    with pytest.raises(
+        RoutingError,
+        match=r"Fallbacks exhausted for role fixer after timeout; attempted models: none",
+    ):
+        runner.run(
+            role="fixer",
+            response_model=FixResult,
+            context_packet=_packet("fixer"),
+            routing_context=RoutingContext(role="fixer", last_error="timeout"),
+            require_json_schema=True,
+        )
+
+
+def test_agent_runner_resolves_auto_max_output_tokens_before_adapter_call() -> None:
+    registry = load_registry()
+
+    class RecordingAdapter:
+        def __init__(self) -> None:
+            self.max_tokens: list[object] = []
+
+        def generate(self, **kwargs):
+            self.max_tokens.append(kwargs["max_tokens"])
+            return ModelResult(
+                content=json.dumps(
+                    {
+                        "title": "ACOS",
+                        "problem_statement": "Automate product delivery",
+                        "goals": ["Generate structured outputs"],
+                    }
+                ),
+                tool_calls=[],
+                raw={"mock": True},
+                model="qwen_35b",
+                provider="local_qwen",
+                finish_reason="stop",
+                usage={"prompt_tokens": 128, "completion_tokens": 32, "total_tokens": 160},
+            )
+
+    adapter = RecordingAdapter()
+    registry.register_adapter_factory(
+        ProviderType.OPENAI_COMPATIBLE,
+        lambda provider, model: adapter,
     )
     runner, _ = _runner(registry)
     audit_events = []
 
-    result, selection, _ = runner.run(
-        role="fixer",
-        response_model=FixResult,
-        context_packet=_packet("fixer"),
-        routing_context=RoutingContext(role="fixer", last_error="timeout"),
+    result, _, _ = runner.run(
+        role="pm",
+        response_model=PRD,
+        context_packet=_packet("pm"),
+        routing_context=RoutingContext(role="pm"),
+        allowed_tools=["memory_server.write_memory"],
         require_json_schema=True,
         audit_events=audit_events,
     )
 
-    assert result.summary == "Recovered on fallback"
-    assert selection.model_key == "qwen_35b"
-    assert selection.reason.value == "fallback"
-    assert any(
-        event.event_type == "model_call"
-        and event.metadata["model_key"] == "qwen_35b"
-        and event.metadata["routing_reason"] == "fallback"
-        for event in audit_events
-    )
-
-
-def test_agent_runner_uses_fallback_model_from_failure_history() -> None:
-    registry = load_registry()
-    attach_mock_adapter(
-        registry,
-        {
-            "fixer": FixResult(
-                status=FixStatus.FIXED,
-                summary="Recovered from failure history fallback",
-            ).model_dump()
-        },
-    )
-    runner, _ = _runner(registry)
-
-    result, selection, _ = runner.run(
-        role="fixer",
-        response_model=FixResult,
-        context_packet=_packet("fixer"),
-        failure_history=FailureHistory(last_error="timeout"),
-        require_json_schema=True,
-    )
-
-    assert result.summary == "Recovered from failure history fallback"
-    assert selection.model_key == "qwen_35b"
-    assert selection.reason.value == "fallback"
+    assert result.title == "ACOS"
+    assert adapter.max_tokens
+    assert isinstance(adapter.max_tokens[0], int)
+    assert adapter.max_tokens[0] > 0
+    assert "auto" not in adapter.max_tokens
+    model_event = next(event for event in audit_events if event.event_type == "model_call")
+    assert model_event.metadata["resolved_max_output_tokens"] == adapter.max_tokens[0]
 
 
 def test_agent_runner_repairs_invalid_json_once_on_same_model() -> None:
@@ -183,7 +196,54 @@ def test_agent_runner_repairs_invalid_json_once_on_same_model() -> None:
     assert [event.metadata["model_key"] for event in model_calls] == ["qwen_35b", "qwen_35b"]
 
 
-def test_agent_runner_falls_back_after_repair_failure() -> None:
+def test_agent_runner_includes_response_schema_in_messages() -> None:
+    registry = load_registry()
+
+    class RecordingAdapter:
+        def __init__(self) -> None:
+            self.messages: list[dict[str, object]] = []
+
+        def generate(self, **kwargs):
+            self.messages = kwargs["messages"]
+            return ModelResult(
+                content=json.dumps(
+                    {
+                        "title": "ACOS",
+                        "problem_statement": "Automate product delivery",
+                        "goals": ["Generate structured outputs"],
+                    }
+                ),
+                tool_calls=[],
+                raw={"mock": True},
+                model="qwen_35b",
+                provider="local_qwen",
+                finish_reason="stop",
+                usage={"prompt_tokens": 128, "completion_tokens": 32, "total_tokens": 160},
+            )
+
+    adapter = RecordingAdapter()
+    registry.register_adapter_factory(
+        ProviderType.OPENAI_COMPATIBLE,
+        lambda provider, model: adapter,
+    )
+    runner, _ = _runner(registry)
+
+    result, _, _ = runner.run(
+        role="pm",
+        response_model=PRD,
+        context_packet=_packet("pm"),
+        routing_context=RoutingContext(role="pm"),
+        require_json_schema=True,
+    )
+
+    assert result.title == "ACOS"
+    assert len(adapter.messages) == 2
+    assert adapter.messages[0]["role"] == "system"
+    assert '"title"' in str(adapter.messages[0]["content"])
+    assert '"problem_statement"' in str(adapter.messages[0]["content"])
+
+
+def test_agent_runner_raises_when_repair_fails_without_fallbacks() -> None:
     registry = load_registry()
     attach_mock_adapter(
         registry,
@@ -199,26 +259,17 @@ def test_agent_runner_falls_back_after_repair_failure() -> None:
         },
     )
     runner, _ = _runner(registry)
-    audit_events = []
-
-    result, selection, _ = runner.run(
-        role="fixer",
-        response_model=FixResult,
-        context_packet=_packet("fixer"),
-        routing_context=RoutingContext(role="fixer"),
-        require_json_schema=True,
-        audit_events=audit_events,
-    )
-
-    assert result.summary == "Fixed after fallback"
-    assert selection.model_key == "qwen_35b"
-    model_calls = [event for event in audit_events if event.event_type == "model_call"]
-    assert [event.metadata["model_key"] for event in model_calls] == [
-        "qwen_small",
-        "qwen_small",
-        "qwen_35b",
-    ]
-    assert model_calls[-1].metadata["routing_reason"] == "fallback"
+    with pytest.raises(
+        RoutingError,
+        match=r"Fallbacks exhausted for role fixer after invalid_json; attempted models: qwen_35b",
+    ):
+        runner.run(
+            role="fixer",
+            response_model=FixResult,
+            context_packet=_packet("fixer"),
+            routing_context=RoutingContext(role="fixer"),
+            require_json_schema=True,
+        )
 
 
 def test_agent_runner_uses_escalated_model_from_failure_history() -> None:
@@ -253,6 +304,49 @@ def test_agent_runner_uses_escalated_model_from_failure_history() -> None:
         and event.metadata["routing_reason"] == "escalation"
         for event in audit_events
     )
+
+
+def test_agent_runner_marks_length_finish_reason_as_output_truncated() -> None:
+    registry = load_registry()
+    attach_mock_adapter(
+        registry,
+        {
+            "pm": {
+                "content": "{\"title\": \"ACOS\"",
+                "tool_calls": [],
+                "raw": {"mock": True},
+                "finish_reason": "length",
+                "usage": {
+                    "prompt_tokens": 120,
+                    "completion_tokens": 1024,
+                    "total_tokens": 1144,
+                },
+            }
+        },
+    )
+    runner, _ = _runner(registry)
+    audit_events = []
+
+    with pytest.raises(
+        StructuredOutputError,
+        match="output_truncated before valid JSON",
+    ):
+        runner.run(
+            role="pm",
+            response_model=PRD,
+            context_packet=_packet("pm"),
+            routing_context=RoutingContext(role="pm"),
+            allowed_tools=["memory_server.write_memory"],
+            require_json_schema=True,
+            audit_events=audit_events,
+        )
+
+    model_event = next(event for event in audit_events if event.event_type == "model_call")
+    assert model_event.metadata["error"] == "output_truncated"
+    assert model_event.metadata["output_truncated"] is True
+    assert model_event.metadata["finish_reason"] == "length"
+    assert isinstance(model_event.metadata["resolved_max_output_tokens"], int)
+    assert model_event.metadata["completion_tokens_estimate"] == 1024
 
 
 def test_agent_runner_executes_allowed_tool_calls_only(tmp_path) -> None:

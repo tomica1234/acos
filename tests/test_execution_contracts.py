@@ -1,0 +1,86 @@
+from __future__ import annotations
+
+from packages.orchestrator.execution_contracts import synthesize_job_metadata_from_prd
+from packages.schemas.agent_outputs import PRD, RuntimePlan
+from packages.schemas.runtime import RuntimeHttpCheck
+
+
+def test_synthesize_job_metadata_from_prd_uses_explicit_fastapi_contract(tmp_path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    prd = PRD(
+        title="Status API",
+        problem_statement="Build a FastAPI status API.",
+        framework_profile="fastapi-api",
+        framework_entrypoint="app.main:app",
+        required_artifacts=["tests/test_app.py"],
+        acceptance_checks=[
+            RuntimeHttpCheck(
+                name="home",
+                method="GET",
+                path="/",
+                expect_status=200,
+            )
+        ],
+        runtime=RuntimePlan(
+            http_checks=[
+                RuntimeHttpCheck(
+                    name="health",
+                    method="GET",
+                    path="/healthz",
+                    expect_status=200,
+                )
+            ]
+        ),
+    )
+
+    metadata = synthesize_job_metadata_from_prd(
+        prd,
+        {},
+        workspace_root=workspace,
+    )
+
+    assert metadata["framework_profile"] == "fastapi-api"
+    assert metadata["framework_entrypoint"] == "app.main:app"
+    assert metadata["required_artifacts"] == [
+        "app/__init__.py",
+        "app/main.py",
+        "tests/test_app.py",
+    ]
+    assert metadata["runtime"]["start_command"] == [
+        "python",
+        "-m",
+        "uvicorn",
+        "app.main:app",
+        "--host",
+        "{host}",
+        "--port",
+        "{port}",
+    ]
+    assert metadata["runtime"]["http_checks"][0]["path"] == "/healthz"
+    assert metadata["acceptance_checks"][0]["path"] == "/"
+
+
+def test_synthesize_job_metadata_from_prd_inferrs_django_contract(tmp_path) -> None:
+    workspace = tmp_path / "my-product"
+    workspace.mkdir()
+    prd = PRD(
+        title="Todo Project",
+        problem_statement="Build a Django todo web app with SQLite.",
+        goals=["Use Django and template rendering."],
+        success_criteria=["README should describe setup and run commands."],
+    )
+
+    metadata = synthesize_job_metadata_from_prd(
+        prd,
+        {},
+        workspace_root=workspace,
+    )
+
+    assert metadata["framework_profile"] == "django-web"
+    assert metadata["framework_project_name"] == "Todo_Project"
+    assert "manage.py" in metadata["required_artifacts"]
+    assert "README.md" in metadata["required_artifacts"]
+    assert any(path.endswith("/settings.py") for path in metadata["required_artifacts"])
+    assert metadata["runtime"]["prepare_commands"][0] == ["python", "manage.py", "makemigrations"]
+    assert metadata["acceptance_checks"][0]["path"] == "/"

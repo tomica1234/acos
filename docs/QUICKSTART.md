@@ -28,12 +28,22 @@ Update these files for your environment:
 - `configs/model_providers.yaml`
   - set `base_url`
   - set `api_key_env`
+  - set `timeout_seconds: 900` for long Qwen reasoning
+  - set provider `extra_body` such as `chat_template_kwargs.enable_thinking`
 - `configs/agents.yaml`
-  - choose primary and fallback models per role
+  - set `primary_model: qwen_35b`
+  - set `max_output_tokens: auto`
+  - set `context_budget_tokens: 262144`
 - `configs/model_routing.yaml`
   - tune fallback and escalation rules
+- `configs/runtime.yaml`
+  - keep `token_budget.safety_margin_tokens`
+  - keep `token_budget.default_output_tokens: auto`
 - `configs/policies.yaml`
   - confirm workspace sandbox, approval policy, tool policy, and git policy
+
+`max_context_tokens` is the model window. API `max_tokens` is the per-request
+output cap resolved by ACOS just before the call.
 
 If you want the workspace sandbox to follow the job file, keep:
 
@@ -60,6 +70,7 @@ acos list-agents
 acos resolve-model --role implementer
 acos resolve-model --role fixer --repeated-failures 2
 acos explain-routing --role implementer
+acos debug token-budget --role pm --file job.yaml
 ```
 
 ## 6. Start Durable Worker
@@ -115,6 +126,9 @@ acos check-provider --provider local_qwen
 acos check-model --model qwen_35b
 acos jobs resume <job_id> --workspace .
 ```
+
+If Qwen returns `finish_reason=length`, ACOS records `output_truncated` and
+preserves the resolved `max_tokens` plus completion token usage in audit logs.
 
 The approve and reject HTTP links are for local/dev convenience. In production,
 prefer authenticated POST endpoints over GET links.

@@ -219,6 +219,7 @@ class PolicyEngine:
         tool_name: str,
         arguments: dict[str, Any],
         workspace_root: str | Path,
+        job_metadata: dict[str, Any] | None = None,
     ) -> RiskDecision:
         self.assert_tool_allowed(role, tool_name)
         workspace_policy = self.build_workspace_policy(workspace_root)
@@ -262,7 +263,15 @@ class PolicyEngine:
             return self.classify_named_operation("git_commit_local")
         if tool_name == "test_server.run_test":
             command_name = str(arguments.get("command_name", ""))
-            if command_name == "pytest":
+            if command_name in {
+                "",
+                "auto",
+                "django-test",
+                "prepare-runtime-auto",
+                "runtime-smoke-auto",
+                "django-wsgi-check",
+                "pytest",
+            }:
                 return self.classify_named_operation("test_run_allowlisted")
             if command_name == "npm-lint":
                 return self.classify_named_operation("lint_run_allowlisted")
@@ -271,6 +280,47 @@ class PolicyEngine:
             if command_name in {"python-compile", "pytest-unit", "npm-test"}:
                 return self.classify_named_operation("test_run_allowlisted")
             return self.classify_named_operation("arbitrary_shell")
+        if tool_name == "test_server.install_package":
+            constraints = (job_metadata or {}).get("constraints", {})
+            if not isinstance(constraints, dict) or not constraints.get("allow_dependency_addition"):
+                return self.classify_named_operation("package_install_non_allowlisted")
+            return RiskDecision(
+                operation="package_install_allowlisted_virtualenv",
+                policy_action=PolicyAction.ALLOW_AND_AUDIT,
+                risk_level=RiskLevel.MEDIUM,
+                reason="job explicitly allows dependency installation inside the active virtualenv",
+                details={"package": str(arguments.get("package", ""))},
+            )
+        if tool_name == "test_server.run_command":
+            argv = arguments.get("argv", [])
+            if not isinstance(argv, list) or not argv or not all(isinstance(item, str) for item in argv):
+                return self.classify_named_operation("arbitrary_shell")
+            lowered = [item.lower() for item in argv]
+            joined = " ".join(lowered)
+            if lowered[0] == "sudo":
+                return self.classify_named_operation("sudo")
+            if lowered[0] in {"curl", "wget", "ssh", "scp", "rsync"}:
+                return self.classify_named_operation("external_network_non_allowlisted")
+            destructive_tokens = (
+                " drop ",
+                " dropdb",
+                " flush",
+                " sqlflush",
+                " db:drop",
+                " db:reset",
+                " db:rollback",
+                " migrate:rollback",
+                " downgrade",
+            )
+            if any(token in f" {joined} " for token in destructive_tokens):
+                return self.classify_named_operation("destructive_db_migration")
+            return RiskDecision(
+                operation="workspace_runtime_exec",
+                policy_action=PolicyAction.ALLOW_AND_AUDIT,
+                risk_level=RiskLevel.MEDIUM,
+                reason="workspace-local runtime command execution is allowed with audit",
+                details={"argv": argv, "mode": str(arguments.get("mode", "oneshot"))},
+            )
         if tool_name == "memory_server.read_memory" or tool_name == "memory_server.search_memory":
             return self.classify_named_operation("memory_read_project")
         if tool_name == "memory_server.write_memory" or tool_name == "memory_server.update_task_summary":

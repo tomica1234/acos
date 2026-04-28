@@ -155,6 +155,7 @@ class ModelRegistry:
                 )
             if (
                 provider.default_max_output_tokens is not None
+                and isinstance(model.max_output_tokens, int)
                 and model.max_output_tokens > provider.default_max_output_tokens
             ):
                 errors.append(
@@ -177,6 +178,8 @@ class ModelRegistry:
                     )
                 if (
                     model_key == agent.primary_model
+                    and isinstance(agent.max_output_tokens, int)
+                    and isinstance(model.max_output_tokens, int)
                     and agent.max_output_tokens > model.max_output_tokens
                 ):
                     errors.append(

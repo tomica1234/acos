@@ -23,6 +23,21 @@ class _StubRuntimeManager:
         return []
 
 
+class _TwoStepRunner:
+    def __init__(self, store: InMemoryJobStore) -> None:
+        self.store = store
+        self.calls = 0
+
+    def run_next_step(self, job_id: str):
+        self.calls += 1
+        record = self.store.get(job_id)
+        if self.calls == 1:
+            record.status = JobStatus.TESTING
+        else:
+            record.status = JobStatus.DONE
+        return self.store.update(record)
+
+
 def test_worker_daemon_processes_queued_job_and_updates_heartbeat(tmp_path) -> None:
     store = InMemoryJobStore(tmp_path / ".jobs.json")
     record = store.create(
@@ -64,6 +79,26 @@ def test_worker_daemon_does_not_double_execute_completed_job(tmp_path) -> None:
 
     assert runner.calls == 1
     assert processed == []
+
+
+def test_worker_daemon_run_until_job_settled_drives_queue_to_completion(tmp_path) -> None:
+    store = InMemoryJobStore(tmp_path / ".jobs.json")
+    record = store.create(
+        JobSpec(request_text="do work", repo_path=str(tmp_path)),
+        status=JobStatus.SUBMITTED,
+    )
+    runner = _TwoStepRunner(store)
+    daemon = WorkerDaemon(
+        runner=runner,
+        store=store,
+        runtime_manager=_StubRuntimeManager(),
+        config=WorkerConfig(id="worker-1", poll_interval_seconds=0),
+    )
+
+    settled = daemon.run_until_job_settled(record.job_id, max_iterations=5)
+
+    assert settled.status == JobStatus.DONE
+    assert runner.calls == 2
 
 
 def test_worker_daemon_recovers_stale_jobs(tmp_path) -> None:

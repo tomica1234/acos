@@ -138,6 +138,7 @@ ALLOWED_TRANSITIONS: dict[JobStatus, set[JobStatus]] = {
         JobStatus.FAILED,
     },
     JobStatus.PLANNING: {
+        JobStatus.REVIEWING,
         JobStatus.IMPLEMENTING,
         JobStatus.WAITING_APPROVAL,
         JobStatus.WAITING_RUNTIME,
@@ -162,8 +163,12 @@ ALLOWED_TRANSITIONS: dict[JobStatus, set[JobStatus]] = {
         JobStatus.FAILED,
     },
     JobStatus.REVIEWING: {
+        JobStatus.DESIGNING,
+        JobStatus.PLANNING,
+        JobStatus.IMPLEMENTING,
         JobStatus.TESTING,
         JobStatus.FIXING,
+        JobStatus.FINALIZING,
         JobStatus.WAITING_APPROVAL,
         JobStatus.WAITING_RUNTIME,
         JobStatus.PROVIDER_UNAVAILABLE,
@@ -171,6 +176,8 @@ ALLOWED_TRANSITIONS: dict[JobStatus, set[JobStatus]] = {
         JobStatus.FAILED,
     },
     JobStatus.TESTING: {
+        JobStatus.RUNNING,
+        JobStatus.REVIEWING,
         JobStatus.FINALIZING,
         JobStatus.FIXING,
         JobStatus.WAITING_APPROVAL,

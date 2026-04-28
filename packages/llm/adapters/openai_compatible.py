@@ -52,6 +52,8 @@ class OpenAICompatibleAdapter:
         response_schema: dict[str, Any] | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> ModelResult:
+        if not isinstance(max_tokens, int):
+            raise TypeError("max_tokens must be resolved to an integer before adapter.generate()")
         kwargs: dict[str, Any] = {
             "model": self.model.model,
             "messages": messages,
@@ -64,6 +66,9 @@ class OpenAICompatibleAdapter:
             kwargs["tools"] = tools
         if response_schema and self.provider.supports_json_mode:
             kwargs["response_format"] = {"type": "json_object"}
+        extra_body = self._merged_extra_body(metadata)
+        if extra_body:
+            kwargs["extra_body"] = extra_body
         try:
             response = self.client.chat.completions.create(**kwargs)
         except Exception as exc:  # pragma: no cover - network/provider failure
@@ -85,7 +90,13 @@ class OpenAICompatibleAdapter:
                 }
                 for item in choice.message.tool_calls
             ]
-        if response_schema and self.provider.supports_json_mode and content:
+        finish_reason = getattr(choice, "finish_reason", None)
+        if (
+            response_schema
+            and self.provider.supports_json_mode
+            and content
+            and finish_reason != "length"
+        ):
             try:
                 json.loads(content)
             except json.JSONDecodeError as exc:
@@ -99,9 +110,28 @@ class OpenAICompatibleAdapter:
             raw=response.model_dump(),
             model=self.model.model_id,
             provider=self.provider.name,
-            finish_reason=getattr(choice, "finish_reason", None),
+            finish_reason=finish_reason,
             usage=self._normalize_usage(getattr(response, "usage", None)),
+            output_truncated=finish_reason == "length",
         )
+
+    def _merged_extra_body(self, metadata: dict[str, Any] | None) -> dict[str, Any]:
+        provider_extra_body = dict(self.provider.extra_body)
+        metadata_extra_body = metadata.get("extra_body") if metadata is not None else None
+        if not isinstance(metadata_extra_body, dict):
+            return provider_extra_body
+        return self._deep_merge(provider_extra_body, metadata_extra_body)
+
+    @classmethod
+    def _deep_merge(cls, base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
+        merged = dict(base)
+        for key, value in override.items():
+            existing = merged.get(key)
+            if isinstance(existing, dict) and isinstance(value, dict):
+                merged[key] = cls._deep_merge(existing, value)
+                continue
+            merged[key] = value
+        return merged
 
     @staticmethod
     def _coerce_arguments(arguments: Any) -> dict[str, Any]:

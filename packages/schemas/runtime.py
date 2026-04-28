@@ -4,8 +4,11 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from enum import StrEnum
+from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+from packages.llm.budget import TokenBudgetPolicy
 
 
 def utc_now() -> datetime:
@@ -112,12 +115,44 @@ class RuntimeReactionConfig(BaseModel):
     mark_job_status: str | None = None
 
 
+class RuntimeHttpCheck(BaseModel):
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
+
+    name: str | None = None
+    method: Literal["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"] = "GET"
+    path: str
+    headers: dict[str, str] = Field(default_factory=dict)
+    form: dict[str, Any] | None = None
+    json_payload: dict[str, Any] | list[Any] | None = Field(default=None, alias="json", serialization_alias="json")
+    body: str | None = None
+    expect_status: int = 200
+    body_contains: list[str] = Field(default_factory=list)
+    body_not_contains: list[str] = Field(default_factory=list)
+    follow_redirects: bool = True
+    use_csrf_from_last_response: bool = True
+
+    @model_validator(mode="after")
+    def validate_payload_shape(self) -> "RuntimeHttpCheck":
+        if not self.path.startswith("/"):
+            raise ValueError("path must start with '/'")
+        payload_count = sum(
+            value is not None
+            for value in (self.form, self.json_payload, self.body)
+        )
+        if payload_count > 1:
+            raise ValueError("only one of form, json, or body may be provided")
+        if self.expect_status < 100 or self.expect_status > 599:
+            raise ValueError("expect_status must be a valid HTTP status code")
+        return self
+
+
 class RuntimeConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     provider_health_check: ProviderHealthCheckConfig = Field(
         default_factory=ProviderHealthCheckConfig
     )
+    token_budget: TokenBudgetPolicy = Field(default_factory=TokenBudgetPolicy)
     on_provider_unavailable: RuntimeReactionConfig = Field(
         default_factory=lambda: RuntimeReactionConfig(
             action="wait_and_retry",

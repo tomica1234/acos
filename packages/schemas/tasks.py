@@ -27,6 +27,7 @@ class PlannedTask(BaseModel):
     depends_on: list[str] = Field(default_factory=list)
     dependencies: list[str] = Field(default_factory=list)
     target_files: list[str] = Field(default_factory=list)
+    required_artifacts: list[str] = Field(default_factory=list)
     attempt_count: int = 0
     max_attempts: int = 3
     approval_id: str | None = None
@@ -49,6 +50,7 @@ class TaskRecord(BaseModel):
     complexity: TaskComplexity = TaskComplexity.MEDIUM
     dependencies: list[str] = Field(default_factory=list)
     target_files: list[str] = Field(default_factory=list)
+    required_artifacts: list[str] = Field(default_factory=list)
     attempt_count: int = 0
     max_attempts: int = 3
     pending_approval_id: str | None = None
@@ -70,6 +72,7 @@ class TaskRecord(BaseModel):
             complexity=task.complexity,
             dependencies=list(task.dependencies or task.depends_on),
             target_files=list(task.target_files),
+            required_artifacts=list(task.required_artifacts),
             attempt_count=task.attempt_count,
             max_attempts=task.max_attempts,
             pending_approval_id=task.approval_id,

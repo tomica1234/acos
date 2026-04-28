@@ -11,13 +11,20 @@ import signal
 import subprocess
 import sys
 import time
-from typing import Any, Sequence
+from typing import Any, Sequence, TextIO
 
 import uvicorn
 import yaml
 
+from packages.agents.config import get_role_prompt
+from packages.llm.budget import (
+    compute_max_output_tokens,
+    estimate_tokens_from_messages,
+    resolve_configured_max_output_tokens,
+)
 from packages.llm.adapters.mock import MockAdapter
 from packages.llm.errors import ConfigValidationError
+from packages.llm.messages import build_messages
 from packages.llm.registry import ModelRegistry
 from packages.llm.routing import ModelRouter, RoutingContext
 from packages.orchestrator.approval import ApprovalError
@@ -38,7 +45,7 @@ from packages.schemas.agent_outputs import (
     SummaryResult,
     TestWriterResult,
 )
-from packages.schemas.jobs import JobSpec
+from packages.schemas.jobs import JobRecord, JobSpec
 from packages.schemas.models import (
     FixStatus,
     ImplementationStatus,
@@ -103,6 +110,16 @@ def build_parser() -> argparse.ArgumentParser:
     list_tools.add_argument("--config-dir", default="configs")
     list_tools.add_argument("--role")
 
+    debug = subparsers.add_parser("debug")
+    debug_subparsers = debug.add_subparsers(dest="debug_command", required=True)
+    debug_token_budget = debug_subparsers.add_parser("token-budget")
+    debug_token_budget.add_argument("--config-dir", default="configs")
+    debug_token_budget.add_argument("--workspace", default=".")
+    debug_token_budget.add_argument("--role", required=True)
+    source_group = debug_token_budget.add_mutually_exclusive_group(required=True)
+    source_group.add_argument("--file")
+    source_group.add_argument("--job-id")
+
     api = subparsers.add_parser("api")
     api.add_argument("--host", default="127.0.0.1")
     api.add_argument("--port", type=int, default=8080)
@@ -124,6 +141,7 @@ def build_parser() -> argparse.ArgumentParser:
     run_job = subparsers.add_parser("run-job")
     run_job.add_argument("--config-dir", default="configs")
     run_job.add_argument("--file", required=True)
+    run_job.add_argument("--quiet", action="store_true")
 
     approvals = subparsers.add_parser("approvals")
     approvals_subparsers = approvals.add_subparsers(dest="approvals_command", required=True)
@@ -399,6 +417,90 @@ def explain_routing_for_humans(
     }
 
 
+def build_token_budget_debug_payload(
+    *,
+    runner: JobRunner,
+    role: str,
+    spec: JobSpec,
+    record: JobRecord | None = None,
+) -> dict[str, Any]:
+    registry = runner.registry
+    agent = registry.get_agent(role)
+    debug_record = (
+        record.model_copy(deep=True)
+        if record is not None
+        else JobRecord(
+            job_id=spec.job_id,
+            spec=spec,
+            status=JobStatus.QUEUED,
+            current_role=role,
+        )
+    )
+    previous_record = getattr(runner, "_active_record", None)
+    runner._active_record = debug_record
+    try:
+        relevant_files = runner._gather_relevant_files(role)
+        diff = (
+            runner._call_tool(role, "git_server.diff").get("diff", "")
+            if runner.policy.is_tool_allowed(role, "git_server.diff")
+            else ""
+        )
+        memory_summaries = runner._read_memory(role)
+    finally:
+        runner._active_record = previous_record
+    routing_context = RoutingContext(
+        role=role,
+        failure_count=record.failure_count if record is not None else 0,
+        same_test_failure_count=record.same_test_failure_count if record is not None else 0,
+        changed_files_count=len(relevant_files),
+        security_sensitive=False,
+        last_error=record.last_error if record is not None else None,
+    )
+    selection = runner.model_router.select_model(routing_context)
+    selected_model = registry.get_model(selection.model_key)
+    packet = runner.context_builder.build(
+        job_id=debug_record.job_id,
+        role=role,
+        objective=f"Debug token budget for {role}",
+        repo_path=spec.workspace_root or spec.repo_path,
+        request_text=spec.request_text,
+        constraints=list(runner.policy.config.risk_rules.deny),
+        relevant_files=relevant_files,
+        diff=diff,
+        memory_summaries=memory_summaries,
+        logs=[],
+        token_budget=agent.context_budget_tokens,
+        agent_config=agent,
+        selected_model=selected_model,
+        metadata={"debug": True},
+    )
+    messages = build_messages(get_role_prompt(role), packet)
+    estimated_input_tokens = estimate_tokens_from_messages(messages)
+    configured_max_output_tokens = resolve_configured_max_output_tokens(
+        selection.max_output_tokens,
+        selected_model.max_output_tokens,
+        runner.token_budget_policy.default_output_tokens,
+    )
+    resolved_max_output_tokens = compute_max_output_tokens(
+        model_max_context_tokens=selected_model.max_context_tokens,
+        estimated_input_tokens=estimated_input_tokens,
+        configured_max_output_tokens=configured_max_output_tokens,
+        safety_margin_tokens=runner.token_budget_policy.safety_margin_tokens,
+        minimum_output_tokens=runner.token_budget_policy.minimum_output_tokens,
+        hard_max_output_tokens=runner.token_budget_policy.hard_max_output_tokens,
+    )
+    return {
+        "role": role,
+        "selected_model": selection.model_key,
+        "model_max_context_tokens": selected_model.max_context_tokens,
+        "context_budget_tokens": agent.context_budget_tokens,
+        "estimated_input_tokens": estimated_input_tokens,
+        "configured_max_output_tokens": configured_max_output_tokens,
+        "resolved_max_output_tokens": resolved_max_output_tokens,
+        "safety_margin_tokens": runner.token_budget_policy.safety_margin_tokens,
+    }
+
+
 def load_job_spec_from_file(path: str | Path) -> JobSpec:
     payload = yaml.safe_load(Path(path).read_text(encoding="utf-8")) or {}
     if not isinstance(payload, dict):
@@ -452,6 +554,24 @@ def load_runner_for_workspace(
     return runner
 
 
+def build_worker_daemon(
+    *,
+    config_dir: str | Path,
+    workspace_root: str | Path,
+    runner: JobRunner,
+) -> WorkerDaemon | None:
+    runtime_manager = getattr(runner, "runtime_manager", None)
+    store = getattr(runner, "store", None)
+    if runtime_manager is None or store is None:
+        return None
+    return WorkerDaemon.from_path(
+        Path(config_dir) / "worker.yaml",
+        runner=runner,
+        store=store,
+        runtime_manager=runtime_manager,
+    )
+
+
 def serialize_approval(approval: Any) -> dict[str, Any]:
     return approval.model_dump(mode="json")
 
@@ -477,6 +597,141 @@ def build_job_result_payload(record: Any) -> dict[str, Any]:
         "audit_event_count": len(record.audit_events),
         "outputs": record.outputs,
     }
+
+
+TERMINAL_JOB_STATUSES = {
+    JobStatus.DONE,
+    JobStatus.BLOCKED,
+    JobStatus.STUCK,
+    JobStatus.FAILED,
+    JobStatus.CANCELLED,
+}
+
+WAITING_JOB_STATUSES = {
+    JobStatus.WAITING_APPROVAL,
+    JobStatus.WAITING_RUNTIME,
+    JobStatus.PROVIDER_UNAVAILABLE,
+    JobStatus.PAUSED,
+}
+
+
+def _print_job_progress(message: str, *, stream: TextIO) -> None:
+    print(message, file=stream, flush=True)
+
+
+def _format_job_progress(record: JobRecord) -> str:
+    parts = [
+        f"job={record.job_id}",
+        f"status={record.status.value}",
+    ]
+    if record.current_phase:
+        parts.append(f"phase={record.current_phase}")
+    if record.current_task_id:
+        parts.append(f"task={record.current_task_id}")
+    if record.failure_count:
+        parts.append(f"failures={record.failure_count}")
+    result_key = {
+        "tests": "test_run",
+        "runtime_prepare": "runtime_prepare",
+        "runtime_smoke": "runtime_smoke",
+        "acceptance_checks": "acceptance_checks",
+    }.get(record.current_phase or "")
+    if result_key and isinstance(record.outputs.get(result_key), dict):
+        result = record.outputs[result_key]
+        if "success" in result:
+            parts.append(f"success={bool(result['success'])}")
+        command = result.get("command")
+        if isinstance(command, list) and command:
+            parts.append(f"command={' '.join(str(item) for item in command)}")
+    if record.pending_approval_id:
+        parts.append(f"approval_id={record.pending_approval_id}")
+    if record.pending_runtime_issue_id:
+        parts.append(f"runtime_issue_id={record.pending_runtime_issue_id}")
+    if record.last_error and record.status in TERMINAL_JOB_STATUSES | WAITING_JOB_STATUSES:
+        parts.append(f"detail={record.last_error}")
+    return " ".join(parts)
+
+
+def _emit_new_job_notifications(
+    runner: Any,
+    *,
+    job_id: str,
+    seen_count: int,
+    stream: TextIO,
+) -> int:
+    if not hasattr(runner, "get_notifications"):
+        return seen_count
+    notifications = list(runner.get_notifications(job_id))
+    for payload in notifications[seen_count:]:
+        kind = str(payload.get("kind", "status"))
+        message = (
+            payload.get("message")
+            or payload.get("reason")
+            or payload.get("operation")
+            or payload.get("cli_command")
+            or kind
+        )
+        _print_job_progress(f"notification kind={kind} detail={message}", stream=stream)
+    return len(notifications)
+
+
+def run_job_with_live_progress(
+    runner: Any,
+    spec: JobSpec,
+    *,
+    quiet: bool = False,
+    stream: TextIO | None = None,
+    daemon: WorkerDaemon | None = None,
+) -> JobRecord:
+    supports_durable_progress = daemon is not None and hasattr(runner, "submit") and hasattr(runner, "get")
+    supports_oneshot_progress = hasattr(runner, "submit") and hasattr(runner, "run_next_step")
+    if quiet:
+        if supports_durable_progress:
+            record = runner.submit(spec)
+            return daemon.run_until_job_settled(record.job_id)
+        return runner.run_job(spec)
+    if not (supports_durable_progress or supports_oneshot_progress):
+        return runner.run_job(spec)
+    progress_stream = stream or sys.stderr
+    record = runner.submit(spec)
+    _print_job_progress(
+        " ".join(
+            [
+                "submitted",
+                f"job={record.job_id}",
+                f"title={record.title}",
+                f"target_branch={record.spec.target_branch}",
+            ]
+        ),
+        stream=progress_stream,
+    )
+    seen_notifications = _emit_new_job_notifications(
+        runner,
+        job_id=record.job_id,
+        seen_count=0,
+        stream=progress_stream,
+    )
+    while record.status not in TERMINAL_JOB_STATUSES and record.status not in WAITING_JOB_STATUSES:
+        if daemon is not None:
+            processed = daemon.run_once()
+            record = runner.get(record.job_id)
+            if (
+                record.status not in TERMINAL_JOB_STATUSES
+                and record.status not in WAITING_JOB_STATUSES
+                and not any(item.job_id == record.job_id for item in processed)
+            ):
+                time.sleep(max(0.0, float(daemon.config.poll_interval_seconds)))
+                record = runner.get(record.job_id)
+        else:
+            record = runner.run_next_step(record.job_id)
+        _print_job_progress(_format_job_progress(record), stream=progress_stream)
+        seen_notifications = _emit_new_job_notifications(
+            runner,
+            job_id=record.job_id,
+            seen_count=seen_notifications,
+            stream=progress_stream,
+        )
+    return record
 
 
 def workspace_runtime_paths(workspace_root: str | Path) -> dict[str, Path]:
@@ -742,6 +997,34 @@ def main(argv: Sequence[str] | None = None) -> int:
         _, policy = load_registry_and_policy(args.config_dir)
         print(yaml.safe_dump(policy.list_allowed_tools(role=args.role), sort_keys=False))
         return 0
+    if args.command == "debug":
+        if args.debug_command == "token-budget":
+            if args.job_id:
+                runner = load_runner_for_workspace(
+                    config_dir=args.config_dir,
+                    workspace_root=args.workspace,
+                )
+                record = runner.get(args.job_id)
+                payload = build_token_budget_debug_payload(
+                    runner=runner,
+                    role=args.role,
+                    spec=record.spec,
+                    record=record,
+                )
+                dump_yaml(payload)
+                return 0
+            spec = load_job_spec_from_file(args.file)
+            runner = load_runner_for_workspace(
+                config_dir=args.config_dir,
+                workspace_root=spec.workspace_root or spec.repo_path,
+            )
+            payload = build_token_budget_debug_payload(
+                runner=runner,
+                role=args.role,
+                spec=spec,
+            )
+            dump_yaml(payload)
+            return 0
     if args.command == "api":
         uvicorn.run("apps.api.main:app", host=args.host, port=args.port, reload=False)
         return 0
@@ -785,7 +1068,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             config_dir=args.config_dir,
             workspace_root=spec.workspace_root or spec.repo_path,
         )
-        record = runner.run_job(spec)
+        daemon = build_worker_daemon(
+            config_dir=args.config_dir,
+            workspace_root=spec.workspace_root or spec.repo_path,
+            runner=runner,
+        )
+        record = run_job_with_live_progress(runner, spec, quiet=args.quiet, daemon=daemon)
         dump_yaml(build_job_result_payload(record))
         return 0 if record.status.value == "done" else 1
     if args.command == "check-provider":

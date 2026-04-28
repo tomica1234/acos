@@ -97,13 +97,17 @@ This allows patterns such as:
 
 これにより、たとえば次のような運用ができます。
 
-- PM and Architect on a large long-context model
-- Summarizer on a cheaper model
-- Fixer on a smaller model first, then escalation after repeated failures
+- every role can share one long-context model while keeping role-specific
+  prompts, tools, schemas, and sampling
+- `max_output_tokens` can stay `auto` and resolve per request instead of using
+  a fixed `1024` or `2048`
+- the orchestrator can still add escalation and fallback later through config
 
-- PM と Architect は大きな long-context モデルを使う
-- Summarizer は安価なモデルを使う
-- Fixer は小さいモデルから始め、失敗が続いたら上位モデルへエスカレーションする
+- 全ロールで 1 つの long-context モデルを共有しつつ、ロールごとの
+  プロンプト、ツール、スキーマ、サンプリングを分離できる
+- `max_output_tokens` は固定 `1024` / `2048` ではなく、`auto` のまま
+  リクエストごとに解決できる
+- エスカレーションやフォールバックは後から設定で追加できる
 
 See [docs/MODEL_ROUTING.md](docs/MODEL_ROUTING.md) for the detailed routing
 design.
@@ -157,6 +161,12 @@ providers:
     type: openai_compatible
     base_url: "https://msi.tail5c01da.ts.net/v1"
     api_key_env: "OPENAI_API_KEY"
+    allow_empty_api_key: true
+    default_api_key: "EMPTY"
+    timeout_seconds: 900
+    extra_body:
+      chat_template_kwargs:
+        enable_thinking: false
     supports_tools: true
     supports_json_mode: false
 ```
@@ -176,6 +186,7 @@ Defines:
 - tool support
 - JSON mode support
 - context and output limits
+- provider-specific request body extensions such as Qwen thinking flags
 
 - provider の種類
 - base URL
@@ -184,6 +195,7 @@ Defines:
 - ツール呼び出し対応
 - JSON mode 対応
 - コンテキスト長と出力上限
+- Qwen thinking 設定のような provider 固有 request body 拡張
 
 ### `configs/agents.yaml`
 
@@ -194,6 +206,7 @@ Defines, per role:
 - primary model
 - fallback models
 - sampling settings
+- `max_output_tokens` or `auto`
 - context budget
 - allowed tools
 - output schema
@@ -201,6 +214,7 @@ Defines, per role:
 - primary model
 - fallback models
 - サンプリング設定
+- `max_output_tokens` または `auto`
 - コンテキスト予算
 - 使用可能ツール
 - 出力スキーマ
@@ -210,8 +224,8 @@ Example idea:
 例:
 
 - `pm.primary_model = qwen_35b`
-- `summarizer.primary_model = qwen_small`
-- `qwen_35b` and `qwen_small` can point at the same remote model while preserving routing aliases
+- every role can set `max_output_tokens: auto`
+- every role can set `context_budget_tokens: 262144`
 
 ### `configs/model_routing.yaml`
 
@@ -244,7 +258,50 @@ Defines:
 ### `configs/runtime.yaml`
 
 Defines provider health checks, waiting-runtime behavior, provider recovery,
-and whether recovery auto-resumes or waits for a manual `acos jobs resume`.
+token budget policy, and whether recovery auto-resumes or waits for a manual
+`acos jobs resume`.
+
+## Token Budgeting / トークン予算
+
+ACOS treats API `max_tokens` as an output cap and `max_context_tokens` as the
+model context window. They are not the same value.
+
+ACOS は API の `max_tokens` を出力上限、`max_context_tokens` をモデルの
+コンテキスト長として別物で扱います。
+
+Before each LLM call, ACOS resolves the integer `max_tokens` with:
+
+各 LLM call の直前に、ACOS は次の式で整数の `max_tokens` を解決します。
+
+```text
+max_tokens = min(
+  configured max_output_tokens or remaining context,
+  model.max_context_tokens - estimated_input_tokens - safety_margin_tokens
+)
+```
+
+Current long-context defaults:
+
+- `qwen_35b.max_context_tokens = 262144`
+- `qwen_35b.max_output_tokens = auto`
+- every role sets `max_output_tokens = auto`
+- every role sets `context_budget_tokens = 262144`
+- runtime keeps `safety_margin_tokens = 4096`
+- provider `timeout_seconds = 900`
+
+If Qwen spends too long in thinking mode and returns `finish_reason=length`,
+ACOS records `output_truncated` instead of treating that case as plain
+`invalid_json`.
+
+Qwen が thinking mode で長引いて `finish_reason=length` を返した場合、
+ACOS はそれを単なる `invalid_json` ではなく `output_truncated` として記録します。
+
+Debug the resolved budget with:
+
+```bash
+acos debug token-budget --role pm --file job.yaml
+acos debug token-budget --role implementer --job-id <job_id>
+```
 
 ### `configs/worker.yaml`
 

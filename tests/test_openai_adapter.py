@@ -16,6 +16,9 @@ def _provider() -> ModelProviderConfig:
         base_url="http://localhost:8000/v1",
         api_key_env="TEST_API_KEY",
         timeout_seconds=30,
+        allow_empty_api_key=True,
+        default_api_key="EMPTY",
+        extra_body={"chat_template_kwargs": {"enable_thinking": False}},
         supports_tools=True,
         supports_json_mode=False,
     )
@@ -57,13 +60,58 @@ def test_openai_adapter_classifies_timeout(monkeypatch) -> None:
     assert "sk-test-secret" not in str(exc.value)
 
 
+def test_openai_adapter_passes_int_max_tokens_and_extra_body(monkeypatch) -> None:
+    monkeypatch.setenv("TEST_API_KEY", "sk-test-secret")
+    adapter = OpenAICompatibleAdapter(_provider(), _model())
+    captured: dict[str, object] = {}
+
+    class FakeMessage:
+        content = "{\"ok\": true}"
+        tool_calls = None
+
+    class FakeChoice:
+        message = FakeMessage()
+        finish_reason = "stop"
+
+    class FakeResponse:
+        choices = [FakeChoice()]
+        usage = None
+
+        def model_dump(self):
+            return {"mock": True}
+
+    def fake_create(**kwargs):
+        captured.update(kwargs)
+        return FakeResponse()
+
+    adapter.client.chat.completions.create = fake_create
+
+    adapter.generate(
+        messages=[{"role": "user", "content": "hello"}],
+        tools=None,
+        temperature=0.0,
+        top_p=None,
+        max_tokens=256,
+        metadata={"extra_body": {"chat_template_kwargs": {"reasoning_effort": "low"}}},
+    )
+
+    assert captured["max_tokens"] == 256
+    assert isinstance(captured["max_tokens"], int)
+    assert captured["extra_body"] == {
+        "chat_template_kwargs": {
+        "enable_thinking": False,
+        "reasoning_effort": "low",
+        }
+    }
+
+
 def test_openai_adapter_allows_empty_api_key(monkeypatch) -> None:
     monkeypatch.setenv("TEST_API_KEY", "")
 
     adapter = OpenAICompatibleAdapter(_provider(), _model())
 
-    assert adapter.client.api_key == ""
-    assert adapter.client.auth_headers == {}
+    assert adapter.client.api_key == "EMPTY"
+    assert adapter.client.auth_headers == {"Authorization": "Bearer EMPTY"}
     assert adapter.client.max_retries == 0
 
 
@@ -72,8 +120,8 @@ def test_openai_adapter_defaults_missing_api_key_to_empty(monkeypatch) -> None:
 
     adapter = OpenAICompatibleAdapter(_provider(), _model())
 
-    assert adapter.client.api_key == ""
-    assert adapter.client.auth_headers == {}
+    assert adapter.client.api_key == "EMPTY"
+    assert adapter.client.auth_headers == {"Authorization": "Bearer EMPTY"}
 
 
 def test_openai_adapter_classifies_context_overflow(monkeypatch) -> None:
