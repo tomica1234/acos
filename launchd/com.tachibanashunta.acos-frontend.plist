@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.tachibanashunta.acos-frontend</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/tachibanashunta/wip/acos/scripts/start_frontend_service.sh</string>
+  </array>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>WorkingDirectory</key>
+  <string>/Users/tachibanashunta/wip/acos/frontend</string>
+  <key>StandardOutPath</key>
+  <string>/Users/tachibanashunta/wip/acos/.acos/logs/launchd-frontend.out.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/tachibanashunta/wip/acos/.acos/logs/launchd-frontend.err.log</string>
+</dict>
+</plist>

@@ -5,7 +5,7 @@ mkdir -p "$HOME/Library/LaunchAgents" /Users/tachibanashunta/wip/acos/.acos/logs
 
 cp /Users/tachibanashunta/wip/acos/launchd/com.tachibanashunta.acos-api.plist \
   "$HOME/Library/LaunchAgents/com.tachibanashunta.acos-api.plist"
-cp /Users/tachibanashunta/wip/local_llm_lp/launchd/com.tachibanashunta.acos-frontend.plist \
+cp /Users/tachibanashunta/wip/acos/launchd/com.tachibanashunta.acos-frontend.plist \
   "$HOME/Library/LaunchAgents/com.tachibanashunta.acos-frontend.plist"
 
 launchctl bootout "gui/$(id -u)" "$HOME/Library/LaunchAgents/com.tachibanashunta.acos-api.plist" 2>/dev/null || true

@@ -1,12 +1,16 @@
 param(
   [string]$AcosDir = "C:\Users\jalan\wip\acos",
-  [string]$FrontendDir = "C:\Users\jalan\wip\local_llm_lp"
+  [string]$FrontendDir = ""
 )
 
 $ErrorActionPreference = "Stop"
 
+if ([string]::IsNullOrWhiteSpace($FrontendDir)) {
+  $FrontendDir = Join-Path $AcosDir "frontend"
+}
+
 $apiScript = Join-Path $AcosDir "scripts\windows\Start-AcosApi.ps1"
-$frontendScript = Join-Path $FrontendDir "scripts\windows\Start-AcosFrontend.ps1"
+$frontendScript = Join-Path $AcosDir "scripts\windows\Start-AcosFrontend.ps1"
 $powerShell = "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe"
 
 $apiAction = New-ScheduledTaskAction `

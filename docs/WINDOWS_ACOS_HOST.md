@@ -5,7 +5,7 @@ This setup runs ACOS on the Windows machine that already hosts Ornith.
 ## Target Layout
 
 - ACOS repo: `C:\Users\jalan\wip\acos`
-- ACOS frontend repo: `C:\Users\jalan\wip\local_llm_lp`
+- ACOS frontend: `C:\Users\jalan\wip\acos\frontend`
 - Ornith lazy proxy: `http://127.0.0.1:8000/v1`
 - ACOS API: `http://0.0.0.0:8080`
 - ACOS frontend: `http://0.0.0.0:5174`
@@ -27,7 +27,7 @@ py -3 -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -e .
 .\.venv\Scripts\python.exe -m pip install pytest
 
-cd C:\Users\jalan\wip\local_llm_lp
+cd C:\Users\jalan\wip\acos\frontend
 npm install
 
 cd C:\Users\jalan\wip\acos
