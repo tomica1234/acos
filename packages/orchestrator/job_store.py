@@ -1,8 +1,11 @@
-"""In-memory job store."""
+"""Job record stores."""
 
 from __future__ import annotations
 
-from packages.schemas.jobs import JobRecord, JobSpec
+import os
+from pathlib import Path
+
+from packages.schemas.jobs import JobRecord, JobSpec, utc_now
 
 
 class InMemoryJobStore:
@@ -20,6 +23,59 @@ class InMemoryJobStore:
         return self._records[job_id]
 
     def update(self, record: JobRecord) -> JobRecord:
+        record.updated_at = utc_now()
         self._records[record.job_id] = record
         return record
 
+
+class FileJobStore(InMemoryJobStore):
+    """Persist job records as one JSON file per job."""
+
+    def __init__(self, root: str | Path) -> None:
+        super().__init__()
+        self.root = Path(root)
+        self.root.mkdir(parents=True, exist_ok=True)
+        self._load_existing_records()
+
+    def create(self, spec: JobSpec) -> JobRecord:
+        existing = self._records.get(spec.job_id)
+        if existing is not None:
+            return existing
+        return self.update(JobRecord(job_id=spec.job_id, spec=spec))
+
+    def update(self, record: JobRecord) -> JobRecord:
+        super().update(record)
+        path = self._path_for(record.job_id)
+        temp_path = self._temp_path_for(record.job_id)
+        self._write_atomic(temp_path, path, record.model_dump_json(indent=2))
+        return record
+
+    def _load_existing_records(self) -> None:
+        for path in self.root.glob("*.json"):
+            try:
+                record = JobRecord.model_validate_json(path.read_text(encoding="utf-8"))
+            except ValueError:
+                self._quarantine_invalid_record(path)
+                continue
+            self._records[record.job_id] = record
+
+    def _path_for(self, job_id: str) -> Path:
+        return self.root / f"{job_id}.json"
+
+    def _temp_path_for(self, job_id: str) -> Path:
+        return self.root / f".{job_id}.json.tmp"
+
+    def _write_atomic(self, temp_path: Path, path: Path, payload: str) -> None:
+        with temp_path.open("w", encoding="utf-8") as handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        temp_path.replace(path)
+
+    def _quarantine_invalid_record(self, path: Path) -> None:
+        quarantine_path = path.with_suffix(path.suffix + ".invalid")
+        counter = 1
+        while quarantine_path.exists():
+            quarantine_path = path.with_suffix(path.suffix + f".invalid.{counter}")
+            counter += 1
+        path.replace(quarantine_path)

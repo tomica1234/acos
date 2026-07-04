@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Todoリスト</title>
+  <style>
+    body { font-family: system-ui, sans-serif; max-width: 760px; margin: 40px auto; padding: 0 16px; }
+    form { display: inline; }
+    .create { display: flex; gap: 8px; margin-bottom: 24px; }
+    .create input { flex: 1; padding: 8px; }
+    button { padding: 7px 10px; cursor: pointer; }
+    li { display: flex; gap: 8px; align-items: center; justify-content: space-between; padding: 10px 0; border-bottom: 1px solid #ddd; }
+    .done { color: #777; text-decoration: line-through; }
+    .actions { white-space: nowrap; }
+  </style>
+</head>
+<body>
+  <h1>Todoリスト</h1>
+  <form class="create" method="post" action="{% url 'todos:create' %}">
+    {% csrf_token %}
+    <input name="title" placeholder="新しいTodoを入力" aria-label="新しいTodo">
+    <button type="submit">追加</button>
+  </form>
+
+  <ul>
+    {% for todo in todos %}
+      <li>
+        <span class="{% if todo.completed %}done{% endif %}">{{ todo.title }}</span>
+        <span class="actions">
+          <form method="post" action="{% url 'todos:toggle' todo.pk %}">
+            {% csrf_token %}
+            <button type="submit">{% if todo.completed %}未完了に戻す{% else %}完了{% endif %}</button>
+          </form>
+          <form method="post" action="{% url 'todos:delete' todo.pk %}">
+            {% csrf_token %}
+            <button type="submit">削除</button>
+          </form>
+        </span>
+      </li>
+    {% empty %}
+      <li>Todoはまだありません。</li>
+    {% endfor %}
+  </ul>
+</body>
+</html>

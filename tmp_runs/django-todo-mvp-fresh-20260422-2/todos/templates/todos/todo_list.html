@@ -1,0 +1,85 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Todoリスト</title>
+    <style>
+        body {
+            font-family: sans-serif;
+            max-width: 600px;
+            margin: 40px auto;
+            padding: 0 20px;
+        }
+        h1 {
+            color: #333;
+        }
+        form {
+            margin-bottom: 20px;
+        }
+        input[type="text"] {
+            padding: 8px;
+            width: 70%;
+            font-size: 16px;
+        }
+        button {
+            padding: 8px 16px;
+            font-size: 16px;
+            cursor: pointer;
+        }
+        ul {
+            list-style: none;
+            padding: 0;
+        }
+        li {
+            padding: 10px;
+            border-bottom: 1px solid #eee;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        .completed {
+            text-decoration: line-through;
+            color: #999;
+        }
+        .actions button {
+            margin-left: 5px;
+            font-size: 14px;
+            padding: 4px 8px;
+        }
+    </style>
+</head>
+<body>
+    <h1>Todoリスト</h1>
+
+    <form method="post" action="{% url 'todo_create' %}">
+        {% csrf_token %}
+        <input type="text" name="title" placeholder="新しいTodoを入力..." required>
+        <button type="submit">追加</button>
+    </form>
+
+    {% if todos %}
+    <ul>
+        {% for todo in todos %}
+        <li>
+            <span class="{% if todo.completed %}completed{% endif %}">
+                {{ todo.title }}
+            </span>
+            <div class="actions">
+                <form method="post" action="{% url 'todo_toggle' todo.pk %}" style="display:inline;">
+                    {% csrf_token %}
+                    <button type="submit">{{ todo.completed|yesno:"未完了,完了" }}</button>
+                </form>
+                <form method="post" action="{% url 'todo_delete' todo.pk %}" style="display:inline;">
+                    {% csrf_token %}
+                    <button type="submit" onclick="return confirm('削除しますか？');">削除</button>
+                </form>
+            </div>
+        </li>
+        {% endfor %}
+    </ul>
+    {% else %}
+    <p>Todoがありません。新しいTodoを追加してください。</p>
+    {% endif %}
+</body>
+</html>

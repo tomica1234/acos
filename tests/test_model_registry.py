@@ -1,3 +1,5 @@
+import os
+
 import pytest
 import yaml
 
@@ -9,7 +11,9 @@ from packages.llm.errors import (
     UnknownRoleError,
 )
 from packages.llm.registry import ModelRegistry
+from packages.llm.tool_schema import build_response_schema
 from packages.orchestrator.policy import PolicyEngine
+from packages.schemas.agent_outputs import PRD
 
 from tests.conftest import config_dir, load_registry
 
@@ -27,7 +31,7 @@ def _write_configs(tmp_path, providers: dict, agents: dict, routing: dict):
 def _base_provider_config() -> dict:
     return {
         "providers": {
-            "local_qwen": {
+            "local_ornith": {
                 "type": "openai_compatible",
                 "base_url": "http://localhost:8000/v1",
                 "api_key_env": "KEY",
@@ -49,10 +53,10 @@ def _base_provider_config() -> dict:
             },
         },
         "models": {
-            "qwen_35b": {
-                "provider": "local_qwen",
-                "model": "qwen/test",
-                "display_name": "Qwen",
+            "ornith_35b_q4": {
+                "provider": "local_ornith",
+                "model": "ornith-1.0-35b-Q4_K_M.gguf",
+                "display_name": "Ornith",
                 "max_context_tokens": 262144,
                 "max_output_tokens": 32768,
                 "supports_tool_calling": True,
@@ -84,7 +88,7 @@ def _base_agents_config() -> dict:
     return {
         "agents": {
             "implementer": {
-                "primary_model": "qwen_35b",
+                "primary_model": "ornith_35b_q4",
                 "fallback_models": ["mock_structured"],
                 "temperature": 0.1,
                 "top_p": 0.8,
@@ -107,7 +111,7 @@ def _base_routing_config() -> dict:
             "escalation": {
                 "implementer": {
                     "escalate_when": {"repeated_failures_gte": 2},
-                    "escalated_model": "qwen_35b",
+                    "escalated_model": "ornith_35b_q4",
                 }
             },
             "fallback": {"on_errors": ["timeout", "invalid_json"]},
@@ -122,13 +126,16 @@ def _base_routing_config() -> dict:
 def test_model_registry_loads_configs() -> None:
     registry = load_registry()
 
-    provider = registry.get_provider("local_qwen")
-    model = registry.get_model("qwen_35b")
+    provider = registry.get_provider("local_ornith")
+    model = registry.get_model("ornith_35b_q4")
     agent = registry.get_agent("pm")
 
-    assert provider.base_url == "http://localhost:8000/v1"
-    assert model.provider == "local_qwen"
-    assert agent.primary_model == "qwen_35b"
+    assert provider.base_url == os.environ.get(
+        "LOCAL_ORNITH_BASE_URL",
+        "http://localhost:8000/v1",
+    )
+    assert model.provider == "local_ornith"
+    assert agent.primary_model == "ornith_35b_q4"
 
     with pytest.raises(UnknownProviderError):
         registry.get_provider("missing")
@@ -143,9 +150,48 @@ def test_model_registry_loads_configs() -> None:
     assert registry.validate(policy=policy) == []
 
 
+def test_model_registry_expands_env_placeholders(tmp_path, monkeypatch) -> None:
+    providers = _base_provider_config()
+    providers["providers"]["local_ornith"]["base_url"] = "${LOCAL_ORNITH_BASE_URL:-http://localhost:8000/v1}"
+    monkeypatch.setenv("LOCAL_ORNITH_BASE_URL", "http://100.64.0.10:8000/v1")
+    provider_path, agents_path, routing_path = _write_configs(
+        tmp_path,
+        providers=providers,
+        agents=_base_agents_config(),
+        routing=_base_routing_config(),
+    )
+
+    registry = ModelRegistry.from_paths(provider_path, agents_path, routing_path)
+
+    assert registry.get_provider("local_ornith").base_url == "http://100.64.0.10:8000/v1"
+
+
+def test_model_registry_loads_repo_dotenv_before_expansion(tmp_path, monkeypatch) -> None:
+    monkeypatch.delenv("LOCAL_ORNITH_BASE_URL", raising=False)
+    config_root = tmp_path / "repo"
+    configs = config_root / "configs"
+    configs.mkdir(parents=True)
+    (config_root / ".env").write_text(
+        "LOCAL_ORNITH_BASE_URL=https://msi.tail5c01da.ts.net/v1\n",
+        encoding="utf-8",
+    )
+    providers = _base_provider_config()
+    providers["providers"]["local_ornith"]["base_url"] = "${LOCAL_ORNITH_BASE_URL:-http://localhost:8000/v1}"
+    provider_path, agents_path, routing_path = _write_configs(
+        configs,
+        providers=providers,
+        agents=_base_agents_config(),
+        routing=_base_routing_config(),
+    )
+
+    registry = ModelRegistry.from_paths(provider_path, agents_path, routing_path)
+
+    assert registry.get_provider("local_ornith").base_url == "https://msi.tail5c01da.ts.net/v1"
+
+
 def test_model_registry_rejects_missing_provider_reference(tmp_path) -> None:
     providers = _base_provider_config()
-    providers["models"]["qwen_35b"]["provider"] = "missing_provider"
+    providers["models"]["ornith_35b_q4"]["provider"] = "missing_provider"
     provider_path, agents_path, routing_path = _write_configs(
         tmp_path,
         providers=providers,
@@ -236,3 +282,21 @@ def test_mock_adapter_can_generate_without_external_api() -> None:
     assert result.tool_calls[0]["name"] == "memory_server.write_memory"
     assert result.model == "mock/model"
     assert result.provider == "mock"
+
+
+def test_mock_adapter_synthesizes_schema_aware_defaults() -> None:
+    adapter = MockAdapter()
+
+    result = adapter.generate(
+        messages=[{"role": "user", "content": "hello"}],
+        tools=None,
+        temperature=0.0,
+        top_p=None,
+        max_tokens=256,
+        response_schema=build_response_schema(PRD),
+        metadata={"role": "pm", "model_name": "mock/model", "provider_name": "mock"},
+    )
+
+    parsed = PRD.model_validate_json(result.content)
+    assert parsed.title == "mock title"
+    assert parsed.problem_statement == "mock problem statement"

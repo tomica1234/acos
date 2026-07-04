@@ -53,9 +53,16 @@ class ContextPacket(BaseModel):
                     f"- id: {self.task.id}",
                     f"- title: {self.task.title}",
                     f"- description: {self.task.description}",
+                    f"- role: {self.task.role}",
                     f"- complexity: {self.task.complexity.value}",
+                    f"- depends_on: {', '.join(self.task.depends_on) if self.task.depends_on else 'none'}",
                 ]
             )
+            if self.task.acceptance_criteria:
+                lines.extend(
+                    ["- acceptance_criteria:"]
+                    + [f"  - {item}" for item in self.task.acceptance_criteria]
+                )
         if self.relevant_files:
             lines.append("files:")
             for path, content in self.relevant_files.items():

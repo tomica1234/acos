@@ -1,0 +1,30 @@
+title: "split-python-notes-test-only"
+repo_path: "/Users/tachibanashunta/wip/acos/tmp_runs/split-python-notes-generation-smallctx-20260630"
+workspace_root: "/Users/tachibanashunta/wip/acos/tmp_runs/split-python-notes-generation-smallctx-20260630"
+target_branch: "acos/split-python-notes-test-only"
+
+requester_input: |
+  Add pytest coverage for the existing Python notes library in this repository.
+
+  Existing code:
+  - notes.py already defines Note and NotesStore.
+  - README.md already exists.
+
+  Required tests:
+  - NotesStore.add and NotesStore.list_all
+  - NotesStore.mark_done
+  - NotesStore.delete
+  - ValueError for missing IDs in mark_done and delete
+
+  Constraints:
+  - Do not modify notes.py unless tests prove a real bug.
+  - Use pytest only.
+  - Use only the Python standard library in application code.
+
+constraints:
+  allow_dependency_addition: false
+  allow_external_network_during_tests: false
+  skip_review: true
+  skip_release: true
+  test_command_name: pytest
+  test_timeout_seconds: 120

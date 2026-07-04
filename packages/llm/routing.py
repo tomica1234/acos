@@ -173,6 +173,25 @@ class ModelRouter:
                 {"forced_model_key": context.forced_model_key},
             )
         escalated_model = self._maybe_escalate(context)
+        if self._needs_fallback(context):
+            fallback_candidates = [
+                key for key in agent.fallback_models if key not in context.attempted_model_keys
+            ]
+            if context.fallback_index >= len(fallback_candidates):
+                raise RoutingError(f"No fallback model available for role {context.role}")
+            fallback_model = fallback_candidates[context.fallback_index]
+            details = {
+                "last_error": context.last_error,
+                "fallback_index": context.fallback_index,
+                "attempted_model_keys": context.attempted_model_keys,
+            }
+            if escalated_model is not None:
+                details["escalated_model"] = escalated_model
+            return (
+                [fallback_model, *fallback_candidates[context.fallback_index + 1 :]],
+                RoutingReason.FALLBACK,
+                details,
+            )
         if escalated_model is not None:
             return (
                 [escalated_model, *agent.fallback_models],
@@ -183,22 +202,6 @@ class ModelRouter:
                     "changed_files_count": context.changed_files_count,
                     "task_complexity": context.task_complexity.value,
                     "security_sensitive": context.security_sensitive,
-                },
-            )
-        if self._needs_fallback(context):
-            fallback_candidates = [
-                key for key in agent.fallback_models if key not in context.attempted_model_keys
-            ]
-            if context.fallback_index >= len(fallback_candidates):
-                raise RoutingError(f"No fallback model available for role {context.role}")
-            fallback_model = fallback_candidates[context.fallback_index]
-            return (
-                [fallback_model, *fallback_candidates[context.fallback_index + 1 :]],
-                RoutingReason.FALLBACK,
-                {
-                    "last_error": context.last_error,
-                    "fallback_index": context.fallback_index,
-                    "attempted_model_keys": context.attempted_model_keys,
                 },
             )
         return (

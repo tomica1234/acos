@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from typing import Any
 
 from openai import (
@@ -23,6 +24,8 @@ from packages.schemas.models import ModelConfig, ModelProviderConfig, ModelResul
 class OpenAICompatibleAdapter:
     """Adapter for OpenAI-compatible chat completion APIs."""
 
+    PROMPT_ONLY_STRUCTURED_ROLES = {"implementer", "fixer"}
+
     def __init__(self, provider: ModelProviderConfig, model: ModelConfig) -> None:
         self.provider = provider
         self.model = model
@@ -31,6 +34,7 @@ class OpenAICompatibleAdapter:
             api_key=api_key,
             base_url=provider.base_url,
             timeout=provider.timeout_seconds,
+            max_retries=0,
             default_headers=provider.default_headers,
         )
 
@@ -50,14 +54,51 @@ class OpenAICompatibleAdapter:
             "temperature": temperature,
             "max_tokens": max_tokens,
         }
+        used_json_schema = False
         if top_p is not None:
             kwargs["top_p"] = top_p
         if tools:
             kwargs["tools"] = tools
-        if response_schema and self.provider.supports_json_mode:
-            kwargs["response_format"] = {"type": "json_object"}
+        role = str((metadata or {}).get("role", ""))
+        use_provider_json_mode = (
+            self.provider.supports_json_mode
+            and role not in self.PROMPT_ONLY_STRUCTURED_ROLES
+        )
+        if response_schema:
+            if self.provider.supports_structured_output and self.model.supports_structured_output:
+                used_json_schema = True
+                kwargs["response_format"] = {
+                    "type": "json_schema",
+                    "json_schema": {
+                        "name": self._response_schema_name(response_schema),
+                        "strict": True,
+                        "schema": response_schema,
+                    },
+                }
+            elif use_provider_json_mode:
+                kwargs["response_format"] = {"type": "json_object"}
         try:
             response = self.client.chat.completions.create(**kwargs)
+        except BadRequestError as exc:
+            if (
+                used_json_schema
+                and self.provider.supports_json_mode
+                and self._should_downgrade_structured_output(exc)
+            ):
+                retry_kwargs = dict(kwargs)
+                retry_kwargs["response_format"] = {"type": "json_object"}
+                try:
+                    response = self.client.chat.completions.create(**retry_kwargs)
+                except Exception as retry_exc:  # pragma: no cover - network/provider failure
+                    raise AdapterError(
+                        redact_text(str(retry_exc)),
+                        code=self._classify_error(retry_exc),
+                    ) from retry_exc
+            else:
+                raise AdapterError(
+                    redact_text(str(exc)),
+                    code=self._classify_error(exc),
+                ) from exc
         except Exception as exc:  # pragma: no cover - network/provider failure
             raise AdapterError(
                 redact_text(str(exc)),
@@ -72,15 +113,17 @@ class OpenAICompatibleAdapter:
             tool_calls = [
                 {
                     "id": item.id,
+                    "type": getattr(item, "type", "function"),
                     "name": item.function.name,
                     "arguments": self._coerce_arguments(item.function.arguments),
                 }
                 for item in choice.message.tool_calls
             ]
-        if response_schema and self.provider.supports_json_mode and content:
+        if response_schema and use_provider_json_mode and content:
             try:
-                json.loads(content)
-            except json.JSONDecodeError as exc:
+                parsed_content = self._extract_json_object(content)
+                content = json.dumps(parsed_content, ensure_ascii=False)
+            except (json.JSONDecodeError, ValueError) as exc:
                 raise AdapterError(
                     "Provider returned invalid JSON for a structured response",
                     code="invalid_json",
@@ -92,7 +135,7 @@ class OpenAICompatibleAdapter:
             model=self.model.model_id,
             provider=self.provider.name,
             finish_reason=getattr(choice, "finish_reason", None),
-            usage=response.usage.model_dump() if getattr(response, "usage", None) else None,
+            usage=self._normalize_usage(getattr(response, "usage", None)),
         )
 
     @staticmethod
@@ -108,6 +151,65 @@ class OpenAICompatibleAdapter:
                 return parsed
             return {"value": parsed}
         return {"value": arguments}
+
+    @staticmethod
+    def _response_schema_name(response_schema: dict[str, Any]) -> str:
+        raw_name = str(response_schema.get("title") or "structured_output")
+        normalized = re.sub(r"[^A-Za-z0-9_-]", "_", raw_name).strip("_")
+        if not normalized:
+            normalized = "structured_output"
+        return normalized[:64]
+
+    @staticmethod
+    def _extract_json_object(content: str) -> dict[str, Any]:
+        cleaned = re.sub(r"<think>.*?</think>", "", content, flags=re.IGNORECASE | re.DOTALL)
+        cleaned = re.sub(r"```(?:json)?", "", cleaned, flags=re.IGNORECASE).replace("```", "")
+        decoder = json.JSONDecoder()
+        search_from = 0
+        while True:
+            start = cleaned.find("{", search_from)
+            if start == -1:
+                break
+            try:
+                parsed, _end = decoder.raw_decode(cleaned[start:])
+            except json.JSONDecodeError:
+                search_from = start + 1
+                continue
+            if isinstance(parsed, dict):
+                return parsed
+            search_from = start + 1
+        raise ValueError("No JSON object found in structured response")
+
+    @staticmethod
+    def _should_downgrade_structured_output(exc: BadRequestError) -> bool:
+        message = str(exc).lower()
+        return any(
+            marker in message
+            for marker in (
+                "unexpected empty grammar stack",
+                "failed to initialize samplers",
+                "grammar",
+                "json_schema",
+                "response_format",
+            )
+        )
+
+    @staticmethod
+    def _normalize_usage(usage: Any) -> dict[str, int] | None:
+        if usage is None:
+            return None
+        if hasattr(usage, "model_dump"):
+            payload = usage.model_dump()
+        elif isinstance(usage, dict):
+            payload = usage
+        else:
+            payload = {}
+        normalized: dict[str, int] = {}
+        for key in ("prompt_tokens", "completion_tokens", "total_tokens"):
+            value = payload.get(key, getattr(usage, key, None))
+            if isinstance(value, int):
+                normalized[key] = value
+        return normalized or None
 
     @staticmethod
     def _classify_error(exc: Exception) -> str:

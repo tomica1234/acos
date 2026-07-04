@@ -15,9 +15,18 @@ ALLOWED_TRANSITIONS: dict[JobStatus, set[JobStatus]] = {
     JobStatus.IMPLEMENTING: {JobStatus.WRITING_TESTS, JobStatus.BLOCKED, JobStatus.FAILED},
     JobStatus.WRITING_TESTS: {JobStatus.REVIEWING, JobStatus.BLOCKED, JobStatus.FAILED},
     JobStatus.REVIEWING: {JobStatus.TESTING, JobStatus.FIXING, JobStatus.BLOCKED, JobStatus.FAILED},
-    JobStatus.TESTING: {JobStatus.FINALIZING, JobStatus.FIXING, JobStatus.FAILED},
+    JobStatus.TESTING: {
+        JobStatus.IMPLEMENTING,
+        JobStatus.WRITING_TESTS,
+        JobStatus.REVIEWING,
+        JobStatus.FINALIZING,
+        JobStatus.FIXING,
+        JobStatus.FAILED,
+    },
     JobStatus.FIXING: {JobStatus.REVIEWING, JobStatus.TESTING, JobStatus.STUCK, JobStatus.FAILED},
     JobStatus.FINALIZING: {JobStatus.DONE, JobStatus.FAILED},
+    JobStatus.STUCK: {JobStatus.IMPLEMENTING, JobStatus.WRITING_TESTS, JobStatus.TESTING},
+    JobStatus.FAILED: {JobStatus.IMPLEMENTING, JobStatus.WRITING_TESTS, JobStatus.TESTING},
 }
 
 

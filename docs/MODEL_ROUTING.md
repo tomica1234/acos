@@ -144,10 +144,11 @@ Roles that require strict JSON may only use models that support:
 
 ## Role Examples
 
-- Summarizer can stay on `qwen_small` for low cost memory updates
-- PM and Architect can stay on `qwen_35b` for long-context planning
-- Fixer starts on `qwen_small` and escalates to `qwen_35b` after repeated
-  failures
+- PM and Architect use `ornith_35b_q4` for long-context planning.
+- Implementer, Test Writer, Reviewer, Fixer, Release Manager, and Summarizer all
+  route to the same local Ornith model by default.
+- Repeated-failure escalation still records an escalation decision, even when
+  the configured escalated model is the same local Ornith model.
 
 ## Audit Expectations
 

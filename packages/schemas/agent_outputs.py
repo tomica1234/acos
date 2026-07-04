@@ -11,6 +11,7 @@ from packages.schemas.models import (
     ImplementationStatus,
     ReviewDecision,
     Severity,
+    TestWriterStatus,
 )
 
 
@@ -36,7 +37,13 @@ class PRD(BaseModel):
     goals: list[str] = Field(default_factory=list)
     non_goals: list[str] = Field(default_factory=list)
     constraints: list[str] = Field(default_factory=list)
+    smallest_working_core: list[str] = Field(default_factory=list)
+    small_parts: list[str] = Field(default_factory=list)
+    incremental_milestones: list[str] = Field(default_factory=list)
+    acceptance_tests: list[str] = Field(default_factory=list)
     success_criteria: list[str] = Field(default_factory=list)
+    open_questions: list[str] = Field(default_factory=list)
+    definition_of_done: list[str] = Field(default_factory=list)
 
 
 class ArchitecturePlan(BaseModel):
@@ -68,6 +75,7 @@ class TestWriterResult(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
+    status: TestWriterStatus = TestWriterStatus.TESTS_WRITTEN
     summary: str
     changed_files: list[str] = Field(default_factory=list)
     patches: list[FilePatch] = Field(default_factory=list)
@@ -119,6 +127,7 @@ class TestRunResult(BaseModel):
     failed_tests: list[str] = Field(default_factory=list)
     output_excerpt: str = ""
     exit_code: int = 0
+    executed_test_count: int | None = None
 
 
 TestRunResult.__test__ = False

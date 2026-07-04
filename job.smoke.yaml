@@ -1,0 +1,21 @@
+title: "python-add-helper-smoke"
+repo_path: "/Users/tachibanashunta/wip/acos/tmp_runs/python-add-helper-smoke-20260630"
+workspace_root: "/Users/tachibanashunta/wip/acos/tmp_runs/python-add-helper-smoke-20260630"
+target_branch: "acos/python-add-helper-smoke"
+
+requester_input: |
+  Pythonで小さなadd helperを作成してください。
+
+  要件:
+  - feature.py に add(a, b) を実装する
+  - tests/test_feature.py に pytest のテストを追加する
+  - README.md に実行方法を書く
+
+  完了条件:
+  - pytest が通る
+  - README がある
+
+constraints:
+  allow_dependency_addition: false
+  allow_db_migration: false
+  allow_external_network_during_tests: false

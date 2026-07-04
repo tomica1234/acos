@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from hashlib import sha256
 from typing import Any, TypeVar
 
@@ -32,11 +33,22 @@ T = TypeVar("T", bound=BaseModel)
 
 
 def _extract_json(content: str) -> dict[str, Any]:
-    start = content.find("{")
-    end = content.rfind("}")
-    if start == -1 or end == -1 or end <= start:
-        raise StructuredOutputError("No JSON object found in model response")
-    return json.loads(content[start : end + 1])
+    cleaned = re.sub(r"```(?:json)?", "", content, flags=re.IGNORECASE).replace("```", "")
+    decoder = json.JSONDecoder()
+    search_from = 0
+    while True:
+        start = cleaned.find("{", search_from)
+        if start == -1:
+            break
+        try:
+            parsed, _end = decoder.raw_decode(cleaned[start:])
+        except json.JSONDecodeError:
+            search_from = start + 1
+            continue
+        if isinstance(parsed, dict):
+            return parsed
+        search_from = start + 1
+    raise StructuredOutputError("No JSON object found in model response")
 
 
 def _hash_payload(payload: Any) -> str:
@@ -46,6 +58,10 @@ def _hash_payload(payload: Any) -> str:
 
 class AgentRunner:
     """Run a role and validate the response model."""
+
+    TRANSIENT_ERROR_CODES = {"timeout", "rate_limit"}
+    MAX_TRANSIENT_MODEL_RETRIES = 2
+    MAX_STRUCTURED_REPAIR_ATTEMPTS = 3
 
     def __init__(
         self,
@@ -88,6 +104,8 @@ class AgentRunner:
         tool_manifest = build_tool_manifest(configured_tools) if configured_tools else None
         messages = build_messages(get_role_prompt(role), context_packet)
         response_schema = build_response_schema(response_model) if require_json_schema else None
+        if require_json_schema:
+            messages.append(self._structured_output_instruction(response_model))
         base_context = self._initial_routing_context(
             role=role,
             routing_context=routing_context,
@@ -99,9 +117,10 @@ class AgentRunner:
         last_error: str | None = base_context.last_error
         fallback_index = base_context.fallback_index
         attempted_model_keys: list[str] = list(base_context.attempted_model_keys)
-        repair_attempted = False
+        structured_repair_attempts = 0
         last_selection: ModelSelection | None = None
         last_record: ModelCallRecord | None = None
+        transient_retry_counts: dict[str, int] = {}
 
         for _ in range(max_steps):
             step_context = RoutingContext(
@@ -116,7 +135,7 @@ class AgentRunner:
                 fallback_index=fallback_index,
                 forced_model_key=(
                     last_selection.model_key
-                    if repair_attempted and last_selection is not None
+                    if structured_repair_attempts > 0 and last_selection is not None
                     else None
                 ),
                 attempted_model_keys=list(attempted_model_keys),
@@ -155,18 +174,45 @@ class AgentRunner:
                 if selection.model_key not in attempted_model_keys:
                     attempted_model_keys.append(selection.model_key)
                 if exc.code == "invalid_json" and require_json_schema:
-                    if not repair_attempted:
-                        repair_attempted = True
-                        messages.append(self._repair_message())
+                    if structured_repair_attempts < self.MAX_STRUCTURED_REPAIR_ATTEMPTS:
+                        structured_repair_attempts += 1
+                        messages.append(
+                            self._repair_message(
+                                response_model=response_model,
+                                error_detail="The previous response was not valid JSON.",
+                            )
+                        )
                         continue
+                    if not self._has_available_fallback(agent_config, attempted_model_keys):
+                        raise StructuredOutputError(
+                            f"Agent {role} failed to produce valid JSON after "
+                            f"{structured_repair_attempts + 1} attempts on model "
+                            f"{selection.model_key}"
+                        ) from exc
                     last_error = "invalid_json"
                     fallback_index = self._next_fallback_index(selection, fallback_index)
-                    repair_attempted = False
+                    structured_repair_attempts = 0
+                    continue
+                if self._should_retry_transient_error(
+                    error_code=exc.code,
+                    model_key=selection.model_key,
+                    retry_counts=transient_retry_counts,
+                ):
+                    transient_retry_counts[selection.model_key] = (
+                        transient_retry_counts.get(selection.model_key, 0) + 1
+                    )
+                    last_error = None
+                    structured_repair_attempts = 0
                     continue
                 if exc.code in self.registry.routing.fallback.on_errors:
+                    if not self._has_available_fallback(agent_config, attempted_model_keys):
+                        raise AdapterError(
+                            f"Provider error '{exc.code}' for role {role} and no fallback model available",
+                            code=exc.code,
+                        ) from exc
                     last_error = exc.code
                     fallback_index = self._next_fallback_index(selection, fallback_index)
-                    repair_attempted = False
+                    structured_repair_attempts = 0
                     continue
                 raise
 
@@ -191,22 +237,33 @@ class AgentRunner:
                     tool_calls=result.tool_calls,
                     audit_events=audit_events,
                 )
-                repair_attempted = False
+                structured_repair_attempts = 0
                 last_error = None
                 continue
 
             try:
                 parsed = self._parse_response(result.content, response_model)
-            except (ValidationError, json.JSONDecodeError, StructuredOutputError):
+            except (ValidationError, json.JSONDecodeError, StructuredOutputError) as exc:
                 if not require_json_schema:
                     raise
-                if not repair_attempted:
-                    repair_attempted = True
-                    messages.append(self._repair_message())
+                if structured_repair_attempts < self.MAX_STRUCTURED_REPAIR_ATTEMPTS:
+                    structured_repair_attempts += 1
+                    messages.append(
+                        self._repair_message(
+                            response_model=response_model,
+                            error_detail=self._format_structured_error(exc),
+                        )
+                    )
                     continue
+                if not self._has_available_fallback(agent_config, attempted_model_keys):
+                    raise StructuredOutputError(
+                        f"Agent {role} produced invalid structured output after "
+                        f"{structured_repair_attempts + 1} attempts on model "
+                        f"{selection.model_key}: {self._format_structured_error(exc)}"
+                    ) from exc
                 last_error = "invalid_json"
                 fallback_index = self._next_fallback_index(selection, fallback_index)
-                repair_attempted = False
+                structured_repair_attempts = 0
                 continue
             return parsed, selection, record
 
@@ -217,14 +274,67 @@ class AgentRunner:
         )
 
     @staticmethod
-    def _repair_message() -> dict[str, str]:
+    def _structured_output_instruction(response_model: type[T]) -> dict[str, str]:
         return {
             "role": "user",
             "content": (
-                "The previous response was not valid JSON for the required schema. "
-                "Return only repaired JSON that conforms exactly to the schema."
+                "Structured output contract. "
+                f"Return only one JSON object with exactly these top-level keys: "
+                f"{', '.join(response_model.model_fields.keys())}. "
+                "Do not include markdown, code fences, commentary, or extra keys."
             ),
         }
+
+    @staticmethod
+    def _repair_message(
+        *,
+        response_model: type[T],
+        error_detail: str,
+    ) -> dict[str, str]:
+        return {
+            "role": "user",
+            "content": (
+                "The previous response did not satisfy the structured output contract. "
+                f"{error_detail} "
+                f"Return only repaired JSON with exactly these top-level keys: "
+                f"{', '.join(response_model.model_fields.keys())}. "
+                "Do not include markdown, code fences, commentary, or extra keys."
+            ),
+        }
+
+    @staticmethod
+    def _format_structured_error(exc: Exception) -> str:
+        if isinstance(exc, ValidationError):
+            parts: list[str] = []
+            for error in exc.errors()[:5]:
+                location = ".".join(str(item) for item in error.get("loc", ()))
+                message = error.get("msg", "validation error")
+                parts.append(f"{location or 'root'}: {message}")
+            return "Validation errors: " + "; ".join(parts)
+        return str(exc)
+
+    @classmethod
+    def _should_retry_transient_error(
+        cls,
+        *,
+        error_code: str,
+        model_key: str,
+        retry_counts: dict[str, int],
+    ) -> bool:
+        return (
+            error_code in cls.TRANSIENT_ERROR_CODES
+            and retry_counts.get(model_key, 0) < cls.MAX_TRANSIENT_MODEL_RETRIES
+        )
+
+    @staticmethod
+    def _has_available_fallback(
+        agent_config,
+        attempted_model_keys: list[str],
+    ) -> bool:
+        return any(
+            model_key not in attempted_model_keys
+            for model_key in agent_config.fallback_models
+        )
 
     def _initial_routing_context(
         self,
@@ -334,8 +444,32 @@ class AgentRunner:
     ) -> None:
         if self.mcp_router is None:
             raise RuntimeError("MCP router is not configured for tool calls")
-        messages.append({"role": "assistant", "tool_calls": tool_calls, "content": ""})
-        for tool_call in tool_calls:
+        normalized_tool_calls = [
+            self._normalize_tool_call(tool_call, index=index)
+            for index, tool_call in enumerate(tool_calls, start=1)
+        ]
+        messages.append(
+            {
+                "role": "assistant",
+                "tool_calls": [
+                    {
+                        "id": tool_call["id"],
+                        "type": "function",
+                        "function": {
+                            "name": tool_call["name"],
+                            "arguments": json.dumps(
+                                tool_call["arguments"],
+                                sort_keys=True,
+                                default=str,
+                            ),
+                        },
+                    }
+                    for tool_call in normalized_tool_calls
+                ],
+                "content": "",
+            }
+        )
+        for tool_call in normalized_tool_calls:
             tool_name = str(tool_call["name"])
             self._assert_tools_allowed(role, [tool_name])
             arguments = tool_call.get("arguments", {})
@@ -352,14 +486,49 @@ class AgentRunner:
             if audit_events is not None:
                 audit_events.append(event)
             if not result.ok:
-                raise RuntimeError(result.error or f"tool call failed: {tool_name}")
+                messages.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": tool_call["id"],
+                        "content": json.dumps(
+                            {
+                                "ok": False,
+                                "error": result.error or f"tool call failed: {tool_name}",
+                            },
+                            sort_keys=True,
+                            default=str,
+                        ),
+                    }
+                )
+                continue
             messages.append(
                 {
                     "role": "tool",
-                    "name": tool_name,
+                    "tool_call_id": tool_call["id"],
                     "content": json.dumps(result.data, sort_keys=True, default=str),
                 }
             )
+
+    @staticmethod
+    def _normalize_tool_call(tool_call: dict[str, Any], *, index: int) -> dict[str, Any]:
+        function_payload = tool_call.get("function")
+        name = tool_call.get("name")
+        arguments = tool_call.get("arguments", {})
+        if isinstance(function_payload, dict):
+            name = function_payload.get("name", name)
+            arguments = function_payload.get("arguments", arguments)
+        if isinstance(arguments, str):
+            try:
+                arguments = json.loads(arguments)
+            except json.JSONDecodeError:
+                arguments = {"raw_arguments": arguments}
+        if not isinstance(arguments, dict):
+            arguments = {"value": arguments}
+        return {
+            "id": str(tool_call.get("id") or f"tool_call_{index}"),
+            "name": str(name or ""),
+            "arguments": arguments,
+        }
 
     def _assert_tools_allowed(self, role: str, tool_names: list[str]) -> None:
         if self.policy_engine is None:

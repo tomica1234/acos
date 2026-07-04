@@ -57,7 +57,11 @@ class MockAdapter:
         if queue:
             payload = queue.pop(0)
         else:
-            payload = self.default_payload
+            payload = (
+                _synthesize_payload_from_schema(response_schema)
+                if response_schema is not None
+                else self.default_payload
+            )
         if callable(payload):
             payload = payload(metadata)
         if isinstance(payload, str):
@@ -91,3 +95,74 @@ class MockAdapter:
             provider=provider_name,
             finish_reason="stop",
         )
+
+
+def _synthesize_payload_from_schema(schema: dict[str, Any]) -> dict[str, Any]:
+    defs = schema.get("$defs", {}) if isinstance(schema.get("$defs"), dict) else {}
+    value = _schema_value(schema, defs=defs, field_name="")
+    if isinstance(value, dict):
+        return value
+    return {"value": value}
+
+
+def _schema_value(
+    schema: dict[str, Any] | None,
+    *,
+    defs: dict[str, Any],
+    field_name: str,
+) -> Any:
+    if not isinstance(schema, dict):
+        return "mock"
+    if "$ref" in schema:
+        ref = str(schema["$ref"])
+        if ref.startswith("#/$defs/"):
+            return _schema_value(defs.get(ref.split("/", 2)[-1]), defs=defs, field_name=field_name)
+        return "mock"
+    for key in ("anyOf", "oneOf"):
+        options = schema.get(key)
+        if isinstance(options, list):
+            for option in options:
+                if isinstance(option, dict) and option.get("type") == "null":
+                    continue
+                return _schema_value(option, defs=defs, field_name=field_name)
+    if "enum" in schema and isinstance(schema["enum"], list) and schema["enum"]:
+        return schema["enum"][0]
+    if "const" in schema:
+        return schema["const"]
+
+    schema_type = schema.get("type")
+    if schema_type == "object" or "properties" in schema:
+        properties = schema.get("properties", {})
+        required = schema.get("required", [])
+        result: dict[str, Any] = {}
+        if isinstance(required, list):
+            for key in required:
+                if isinstance(key, str):
+                    result[key] = _schema_value(
+                        properties.get(key, {}),
+                        defs=defs,
+                        field_name=key,
+                    )
+        return result
+    if schema_type == "array":
+        return []
+    if schema_type == "boolean":
+        return False
+    if schema_type == "integer":
+        return 0
+    if schema_type == "number":
+        return 0
+    if schema_type == "string":
+        lowered = field_name.lower()
+        if "title" in lowered:
+            return "mock title"
+        if "problem" in lowered:
+            return "mock problem statement"
+        if "summary" in lowered:
+            return "mock summary"
+        if "description" in lowered:
+            return "mock description"
+        if "path" in lowered:
+            return "mock/path"
+        return "mock"
+    return "mock"

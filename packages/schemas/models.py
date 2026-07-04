@@ -32,6 +32,12 @@ class ImplementationStatus(str, Enum):
     FAILED = "failed"
 
 
+class TestWriterStatus(str, Enum):
+    TESTS_WRITTEN = "tests_written"
+    BLOCKED = "blocked"
+    FAILED = "failed"
+
+
 class FixStatus(str, Enum):
     FIXED = "fixed"
     STUCK = "stuck"
@@ -105,6 +111,7 @@ class ModelProviderConfig(BaseModel):
     default_headers: dict[str, str] = Field(default_factory=dict)
     supports_tools: bool = False
     supports_json_mode: bool = False
+    supports_structured_output: bool = False
     supports_streaming: bool = False
     max_context_tokens: int | None = None
     default_max_output_tokens: int | None = None

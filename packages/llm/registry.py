@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+import re
 from pathlib import Path
 from typing import Callable
 
@@ -25,6 +27,7 @@ from packages.schemas.models import (
 )
 
 AdapterFactory = Callable[[ModelProviderConfig, ModelConfig], object]
+_ENV_PATTERN = re.compile(r"^\$\{([A-Z0-9_]+)(?::-([^}]*))?\}$")
 
 
 class ModelRegistry:
@@ -55,6 +58,7 @@ class ModelRegistry:
         agents_path: str | Path,
         routing_path: str | Path,
     ) -> "ModelRegistry":
+        cls._load_env_file(Path(provider_path).resolve().parents[1] / ".env")
         provider_data = cls._load_yaml(provider_path)
         providers: dict[str, ModelProviderConfig] = {}
         for name, payload in provider_data.get("providers", {}).items():
@@ -88,7 +92,50 @@ class ModelRegistry:
     @staticmethod
     def _load_yaml(path: str | Path) -> dict:
         with Path(path).open("r", encoding="utf-8") as handle:
-            return yaml.safe_load(handle) or {}
+            data = yaml.safe_load(handle) or {}
+        return ModelRegistry._expand_env_placeholders(data)
+
+    @staticmethod
+    def _expand_env_placeholders(value: object) -> object:
+        if isinstance(value, dict):
+            return {
+                key: ModelRegistry._expand_env_placeholders(item)
+                for key, item in value.items()
+            }
+        if isinstance(value, list):
+            return [ModelRegistry._expand_env_placeholders(item) for item in value]
+        if isinstance(value, str):
+            match = _ENV_PATTERN.match(value)
+            if match is None:
+                return value
+            env_name, default = match.groups()
+            resolved = os.environ.get(env_name)
+            if resolved is not None and resolved != "":
+                return resolved
+            if default is not None:
+                return default
+        return value
+
+    @staticmethod
+    def _load_env_file(path: Path) -> None:
+        if not path.exists():
+            return
+        for raw_line in path.read_text(encoding="utf-8").splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, raw_value = line.split("=", 1)
+            key = key.strip()
+            if not key:
+                continue
+            value = raw_value.strip()
+            if (
+                len(value) >= 2
+                and value[0] == value[-1]
+                and value[0] in {'"', "'"}
+            ):
+                value = value[1:-1]
+            os.environ.setdefault(key, value)
 
     def register_adapter_factory(
         self, provider_type: ProviderType, factory: AdapterFactory

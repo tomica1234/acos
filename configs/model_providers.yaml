@@ -1,27 +1,16 @@
 providers:
-  local_qwen:
+  local_ornith:
     type: openai_compatible
-    base_url: "http://localhost:8000/v1"
-    api_key_env: "QWEN_API_KEY"
-    timeout_seconds: 120
+    base_url: "${LOCAL_ORNITH_BASE_URL:-http://localhost:8000/v1}"
+    api_key_env: "ORNITH_API_KEY"
+    timeout_seconds: "${LOCAL_ORNITH_TIMEOUT_SECONDS:-420}"
     default_headers: {}
     supports_tools: true
-    supports_json_mode: false
+    supports_json_mode: true
+    supports_structured_output: false
     supports_streaming: true
-    max_context_tokens: 262144
-    default_max_output_tokens: 32768
-
-  local_small:
-    type: openai_compatible
-    base_url: "http://localhost:8001/v1"
-    api_key_env: "SMALL_MODEL_API_KEY"
-    timeout_seconds: 60
-    default_headers: {}
-    supports_tools: true
-    supports_json_mode: false
-    supports_streaming: true
-    max_context_tokens: 32768
-    default_max_output_tokens: 8192
+    max_context_tokens: 4096
+    default_max_output_tokens: 2048
 
   mock_provider:
     type: mock
@@ -31,30 +20,22 @@ providers:
     default_headers: {}
     supports_tools: true
     supports_json_mode: true
+    supports_structured_output: true
     supports_streaming: false
     max_context_tokens: 262144
     default_max_output_tokens: 8192
 
 models:
-  qwen_35b:
-    provider: local_qwen
-    model: "Qwen/Qwen3.6-35B-A3B"
-    display_name: "Qwen 3.6 35B A3B"
-    max_context_tokens: 262144
-    max_output_tokens: 32768
+  ornith_35b_q4:
+    provider: local_ornith
+    model: "ornith-1.0-35b-Q4_K_M.gguf"
+    display_name: "Ornith 1.0 35B Q4_K_M"
+    max_context_tokens: 4096
+    max_output_tokens: 2048
     supports_tool_calling: true
     supports_structured_output: false
-    tags: ["coding", "long-context", "agentic"]
-
-  qwen_small:
-    provider: local_small
-    model: "Qwen/Qwen2.5-Coder-7B-Instruct"
-    display_name: "Qwen Small Coder"
-    max_context_tokens: 32768
-    max_output_tokens: 8192
-    supports_tool_calling: true
-    supports_structured_output: false
-    tags: ["coding", "cheap", "summarizer"]
+    supports_json_repair: true
+    tags: ["coding", "gguf", "quantized", "agentic"]
 
   mock_structured:
     provider: mock_provider

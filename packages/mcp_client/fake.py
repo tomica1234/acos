@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -25,6 +26,7 @@ FORBIDDEN_PATH_PARTS = {
 }
 
 TEST_COMMAND_ALLOWLIST: dict[str, list[str]] = {
+    "django-test": [sys.executable, "manage.py", "test"],
     "python-compile": [sys.executable, "-m", "compileall", "."],
     "pytest": [sys.executable, "-m", "pytest", "-q"],
     "pytest-unit": [sys.executable, "-m", "pytest", "tests", "-q"],
@@ -195,8 +197,29 @@ class TestServer:
             failed_tests=failed_tests,
             output_excerpt=output[-20000:],
             exit_code=result.returncode,
+            executed_test_count=_parse_executed_test_count(output),
         )
         return payload.model_dump()
+
+
+def _parse_executed_test_count(output: str) -> int | None:
+    lowered = output.lower()
+    if "no tests ran" in lowered or "collected 0 items" in lowered:
+        return 0
+    ran_match = re.search(r"\bran\s+(\d+)\s+tests?\b", lowered)
+    if ran_match:
+        return int(ran_match.group(1))
+    collected_match = re.search(r"\bcollected\s+(\d+)\s+items?\b", lowered)
+    if collected_match and "passed" not in lowered and "failed" not in lowered:
+        return int(collected_match.group(1))
+    counts = [
+        int(match.group(1))
+        for match in re.finditer(
+            r"\b(\d+)\s+(?:passed|failed|errors?|skipped|xfailed|xpassed)\b",
+            lowered,
+        )
+    ]
+    return sum(counts) if counts else None
 
 
 class MemoryServer:
@@ -220,11 +243,11 @@ class MemoryServer:
         return {"scope": memory_scope, "key": memory_key}
 
     def read_memory(self, uri: str | None = None, scope: str | None = None, limit: int = 20) -> dict[str, object]:
-        resolved_scope = self._resolve_scope(uri=uri, scope=scope)[0]
+        resolved_scope = self._resolve_read_scope(uri=uri, scope=scope)
         return {"entries": self.memory_store.read(scope=resolved_scope, limit=limit)}
 
     def search_memory(self, query: str, uri: str | None = None, scope: str | None = None, limit: int = 20) -> dict[str, object]:
-        resolved_scope = self._resolve_scope(uri=uri, scope=scope)[0]
+        resolved_scope = self._resolve_read_scope(uri=uri, scope=scope)
         return {"entries": self.memory_store.search(query=query, scope=resolved_scope, limit=limit)}
 
     def update_task_summary(self, uri: str, summary: str) -> dict[str, object]:
@@ -244,8 +267,22 @@ class MemoryServer:
                 raise ValueError("memory URI must start with memory://")
             remainder = uri[len("memory://") :]
             scope_part, _, key_part = remainder.partition("/")
-            return scope_part or None, key_part or "default"
-        return scope, item_key or "default"
+            return scope_part or "global", key_part or "default"
+        return scope or "global", item_key or "default"
+
+    @staticmethod
+    def _resolve_read_scope(
+        *,
+        uri: str | None = None,
+        scope: str | None = None,
+    ) -> str | None:
+        if uri is None:
+            return scope
+        if not uri.startswith("memory://"):
+            raise ValueError("memory URI must start with memory://")
+        remainder = uri[len("memory://") :]
+        scope_part, _, _key_part = remainder.partition("/")
+        return scope_part or None
 
 
 class NotifyServer:

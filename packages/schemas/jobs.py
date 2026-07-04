@@ -26,6 +26,8 @@ class JobSpec(BaseModel):
     repo_path: str
     target_branch: str = "acos/default"
     metadata: dict[str, Any] = Field(default_factory=dict)
+    workspace_root: str | None = None
+    title: str | None = None
 
 
 class JobRecord(BaseModel):
@@ -39,9 +41,10 @@ class JobRecord(BaseModel):
     history: list[JobStatus] = Field(default_factory=lambda: [JobStatus.SUBMITTED])
     outputs: dict[str, Any] = Field(default_factory=dict)
     audit_events: list[AuditEvent] = Field(default_factory=list)
+    completed_task_ids: list[str] = Field(default_factory=list)
+    checkpoints: list[dict[str, Any]] = Field(default_factory=list)
     failure_count: int = 0
     same_test_failure_count: int = 0
     last_error: str | None = None
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)
-

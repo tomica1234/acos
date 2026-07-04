@@ -3,8 +3,14 @@
 from __future__ import annotations
 
 import argparse
+import json
+import os
+import shlex
 from pathlib import Path
-from typing import Sequence
+from time import monotonic
+from typing import Any, Sequence
+from urllib.error import URLError
+from urllib.request import Request, urlopen
 
 import uvicorn
 import yaml
@@ -14,7 +20,9 @@ from packages.llm.errors import ConfigValidationError
 from packages.llm.registry import ModelRegistry
 from packages.llm.routing import ModelRouter, RoutingContext
 from packages.orchestrator.job_runner import JobRunner, build_default_runner
+from packages.orchestrator.job_store import FileJobStore
 from packages.orchestrator.policy import PolicyEngine
+from packages.orchestrator.progress import summarize_job_progress
 from packages.mcp_client.fake import FakeMCPEnvironment
 from packages.schemas.agent_outputs import (
     ArchitecturePlan,
@@ -27,10 +35,11 @@ from packages.schemas.agent_outputs import (
     SummaryResult,
     TestWriterResult,
 )
-from packages.schemas.jobs import JobSpec
+from packages.schemas.jobs import JobRecord, JobSpec
 from packages.schemas.models import (
     FixStatus,
     ImplementationStatus,
+    JobStatus,
     ReviewDecision,
     Severity,
     TaskComplexity,
@@ -108,7 +117,212 @@ def build_parser() -> argparse.ArgumentParser:
     run_job = subparsers.add_parser("run-job")
     run_job.add_argument("--config-dir", default="configs")
     run_job.add_argument("--file", required=True)
+    run_job.add_argument("--jobs-dir", default=".acos/jobs")
+    run_job.add_argument("--max-autonomous-stages", type=positive_int, default=None)
+    run_job.add_argument("--large-autonomous", action="store_true")
+    run_job.add_argument("--require-prd-quality", action="store_true")
+    run_job.add_argument("--stage-review", action="store_true")
+    run_job.add_argument("--test-timeout-seconds", type=positive_int, default=None)
+
+    plan_job = subparsers.add_parser("plan-job")
+    plan_job.add_argument("--config-dir", default="configs")
+    plan_job_input = plan_job.add_mutually_exclusive_group(required=True)
+    plan_job_input.add_argument("--file")
+    plan_job_input.add_argument("--request")
+    plan_job.add_argument("--repo-path", default=".")
+    plan_job.add_argument("--workspace-root", default=None)
+    plan_job.add_argument("--target-branch", default="acos/default")
+    plan_job.add_argument("--job-id", default=None)
+    plan_job.add_argument("--title", default=None)
+    plan_job.add_argument("--jobs-dir", default=".acos/jobs")
+    plan_job.add_argument("--max-autonomous-stages", type=positive_int, default=None)
+    plan_job.add_argument("--require-prd-quality", action="store_true")
+    plan_job.add_argument("--stage-review", action="store_true")
+    plan_job.add_argument("--test-timeout-seconds", type=positive_int, default=None)
+    plan_job.add_argument("--summary-file", default=None)
+    plan_job.add_argument("--preflight-provider", default=None)
+    plan_job.add_argument("--preflight-timeout", type=float, default=5.0)
+    plan_job.add_argument("--supervise-after-planning", action="store_true")
+    plan_job.add_argument("--supervise-max-cycles", type=positive_int, default=10)
+    plan_job.add_argument("--supervise-steps-per-cycle", type=positive_int, default=1)
+    plan_job.add_argument("--supervise-max-stalled-cycles", type=positive_int, default=3)
+    plan_job.add_argument("--supervise-max-runtime-seconds", type=positive_float, default=None)
+    plan_job.add_argument("--supervise-summary-file", default=None)
+    plan_job.add_argument("--supervise-summary-dir", default=None)
+    plan_job.add_argument("--supervise-preflight-provider", default=None)
+    plan_job.add_argument("--supervise-preflight-timeout", type=float, default=5.0)
+    plan_job.add_argument("--supervise-pm-stall-recovery", action="store_true")
+    plan_job.add_argument(
+        "--supervise-allow-blocked-recovery",
+        dest="supervise_allow_repeated_failure_recovery",
+        action="store_true",
+    )
+
+    run_autonomous = subparsers.add_parser("run-autonomous")
+    run_autonomous.add_argument("--config-dir", default="configs")
+    run_autonomous.add_argument("--file", required=True)
+    run_autonomous.add_argument("--jobs-dir", default=".acos/jobs")
+    run_autonomous.add_argument("--max-autonomous-stages", type=positive_int, default=None)
+    run_autonomous.add_argument("--max-steps", type=positive_int, default=3)
+    run_autonomous.add_argument("--require-prd-quality", action="store_true")
+    run_autonomous.add_argument("--stage-review", action="store_true")
+    run_autonomous.add_argument("--test-timeout-seconds", type=positive_int, default=None)
+    run_autonomous.add_argument(
+        "--allow-blocked-recovery",
+        "--allow-repeated-failure-recovery",
+        dest="allow_repeated_failure_recovery",
+        action="store_true",
+    )
+    run_autonomous.add_argument("--json-summary", action="store_true")
+    run_autonomous.add_argument("--summary-file", default=None)
+
+    run_supervised = subparsers.add_parser("run-supervised")
+    run_supervised.add_argument("--config-dir", default="configs")
+    run_supervised_input = run_supervised.add_mutually_exclusive_group(required=True)
+    run_supervised_input.add_argument("--file")
+    run_supervised_input.add_argument("--request")
+    run_supervised.add_argument("--repo-path", default=".")
+    run_supervised.add_argument("--workspace-root", default=None)
+    run_supervised.add_argument("--target-branch", default="acos/default")
+    run_supervised.add_argument("--job-id", default=None)
+    run_supervised.add_argument("--title", default=None)
+    run_supervised.add_argument("--jobs-dir", default=".acos/jobs")
+    run_supervised.add_argument("--max-autonomous-stages", type=positive_int, default=None)
+    run_supervised.add_argument("--max-cycles", type=positive_int, default=10)
+    run_supervised.add_argument("--steps-per-cycle", type=positive_int, default=1)
+    run_supervised.add_argument("--max-stalled-cycles", type=positive_int, default=3)
+    run_supervised.add_argument("--max-runtime-seconds", type=positive_float, default=None)
+    run_supervised.add_argument("--require-prd-quality", action="store_true")
+    run_supervised.add_argument("--stage-review", action="store_true")
+    run_supervised.add_argument("--test-timeout-seconds", type=positive_int, default=None)
+    run_supervised.add_argument("--summary-file", default=None)
+    run_supervised.add_argument("--summary-dir", default=None)
+    run_supervised.add_argument("--preflight-provider", default=None)
+    run_supervised.add_argument("--preflight-timeout", type=float, default=5.0)
+    run_supervised.add_argument("--plan-first", action="store_true")
+    run_supervised.add_argument("--pm-stall-recovery", action="store_true")
+    run_supervised.add_argument(
+        "--allow-blocked-recovery",
+        "--allow-repeated-failure-recovery",
+        dest="allow_repeated_failure_recovery",
+        action="store_true",
+    )
+
+    resume_job = subparsers.add_parser("resume-job")
+    resume_job.add_argument("--config-dir", default="configs")
+    resume_job.add_argument("--job-id", required=True)
+    resume_job.add_argument("--jobs-dir", default=".acos/jobs")
+    resume_job.add_argument("--workspace", default=None)
+    resume_job.add_argument("--max-autonomous-stages", type=positive_int, default=None)
+    resume_job.add_argument("--bump-stage-limit", action="store_true")
+    resume_job.add_argument("--large-autonomous", action="store_true")
+    resume_job.add_argument("--require-prd-quality", action="store_true")
+    resume_job.add_argument("--stage-review", action="store_true")
+    resume_job.add_argument("--test-timeout-seconds", type=positive_int, default=None)
+
+    continue_job = subparsers.add_parser("continue-job")
+    continue_job.add_argument("--config-dir", default="configs")
+    continue_job.add_argument("--job-id", required=True)
+    continue_job.add_argument("--jobs-dir", default=".acos/jobs")
+    continue_job.add_argument("--workspace", default=None)
+    continue_job.add_argument("--max-autonomous-stages", type=positive_int, default=None)
+    continue_job.add_argument("--max-steps", type=positive_int, default=1)
+    continue_job.add_argument("--large-autonomous", action="store_true")
+    continue_job.add_argument("--require-prd-quality", action="store_true")
+    continue_job.add_argument("--stage-review", action="store_true")
+    continue_job.add_argument("--test-timeout-seconds", type=positive_int, default=None)
+    continue_job.add_argument(
+        "--allow-blocked-recovery",
+        "--allow-repeated-failure-recovery",
+        dest="allow_repeated_failure_recovery",
+        action="store_true",
+    )
+    continue_job.add_argument("--json-summary", action="store_true")
+    continue_job.add_argument("--summary-file", default=None)
+
+    supervise_job = subparsers.add_parser("supervise-job")
+    supervise_job.add_argument("--config-dir", default="configs")
+    supervise_job.add_argument("--job-id", required=True)
+    supervise_job.add_argument("--jobs-dir", default=".acos/jobs")
+    supervise_job.add_argument("--workspace", default=None)
+    supervise_job.add_argument("--max-autonomous-stages", type=positive_int, default=None)
+    supervise_job.add_argument("--max-cycles", type=positive_int, default=10)
+    supervise_job.add_argument("--steps-per-cycle", type=positive_int, default=1)
+    supervise_job.add_argument("--max-stalled-cycles", type=positive_int, default=3)
+    supervise_job.add_argument("--max-runtime-seconds", type=positive_float, default=None)
+    supervise_job.add_argument("--large-autonomous", action="store_true")
+    supervise_job.add_argument("--require-prd-quality", action="store_true")
+    supervise_job.add_argument("--stage-review", action="store_true")
+    supervise_job.add_argument("--test-timeout-seconds", type=positive_int, default=None)
+    supervise_job.add_argument("--summary-file", default=None)
+    supervise_job.add_argument("--summary-dir", default=None)
+    supervise_job.add_argument("--preflight-provider", default=None)
+    supervise_job.add_argument("--preflight-timeout", type=float, default=5.0)
+    supervise_job.add_argument("--pm-stall-recovery", action="store_true")
+    supervise_job.add_argument(
+        "--allow-blocked-recovery",
+        "--allow-repeated-failure-recovery",
+        dest="allow_repeated_failure_recovery",
+        action="store_true",
+    )
+
+    job_status = subparsers.add_parser("job-status")
+    job_status.add_argument("--job-id", required=True)
+    job_status.add_argument("--jobs-dir", default=".acos/jobs")
+    job_status.add_argument("--next-command", action="store_true")
+    job_status.add_argument("--next-continue-command", action="store_true")
+    job_status.add_argument("--next-supervise-command", action="store_true")
+    job_status.add_argument("--next-operator-command", action="store_true")
+    job_status.add_argument("--continue-max-steps", type=positive_int, default=None)
+    job_status.add_argument("--continue-json-summary", action="store_true")
+    job_status.add_argument("--supervise-max-cycles", type=positive_int, default=10)
+    job_status.add_argument("--supervise-steps-per-cycle", type=positive_int, default=1)
+    job_status.add_argument("--supervise-max-stalled-cycles", type=positive_int, default=3)
+    job_status.add_argument("--supervise-max-runtime-seconds", type=positive_float, default=None)
+    job_status.add_argument("--supervise-summary-file", default=None)
+    job_status.add_argument("--supervise-summary-dir", default=None)
+    job_status.add_argument("--supervise-workspace", default=None)
+    job_status.add_argument("--supervise-large-autonomous", action="store_true")
+    job_status.add_argument("--supervise-require-prd-quality", action="store_true")
+    job_status.add_argument("--supervise-stage-review", action="store_true")
+    job_status.add_argument("--supervise-test-timeout-seconds", type=positive_int, default=None)
+    job_status.add_argument("--supervise-max-autonomous-stages", type=positive_int, default=None)
+    job_status.add_argument("--supervise-preflight-provider", default=None)
+    job_status.add_argument("--supervise-preflight-timeout", type=float, default=5.0)
+    job_status.add_argument("--supervise-pm-stall-recovery", action="store_true")
+    job_status.add_argument(
+        "--supervise-allow-blocked-recovery",
+        "--supervise-allow-repeated-failure-recovery",
+        dest="supervise_allow_repeated_failure_recovery",
+        action="store_true",
+    )
+    job_status.add_argument("--json", action="store_true")
+
+    check_provider = subparsers.add_parser("check-provider")
+    check_provider.add_argument("--config-dir", default="configs")
+    check_provider.add_argument("--provider", required=True)
+    check_provider.add_argument("--timeout", type=float, default=5.0)
     return parser
+
+
+def positive_int(value: str) -> int:
+    try:
+        parsed = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("must be a positive integer") from exc
+    if parsed < 1:
+        raise argparse.ArgumentTypeError("must be a positive integer")
+    return parsed
+
+
+def positive_float(value: str) -> float:
+    try:
+        parsed = float(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("must be a positive number") from exc
+    if parsed <= 0:
+        raise argparse.ArgumentTypeError("must be a positive number")
+    return parsed
 
 
 def load_registry_and_policy(
@@ -250,11 +464,7 @@ def build_demo_runner(config_dir: str | Path, workspace: str | Path) -> tuple[Jo
     }
     shared_mock = MockAdapter(scenario=scenario)
     registry.register_adapter_factory(
-        provider_type=registry.get_provider("local_qwen").type,
-        factory=lambda provider, model: shared_mock,
-    )
-    registry.register_adapter_factory(
-        provider_type=registry.get_provider("local_small").type,
+        provider_type=registry.get_provider("local_ornith").type,
         factory=lambda provider, model: shared_mock,
     )
     registry.register_adapter_factory(
@@ -268,6 +478,1571 @@ def build_demo_runner(config_dir: str | Path, workspace: str | Path) -> tuple[Jo
     )
     runner = JobRunner(registry=registry, policy=policy, router=environment.build_router())
     return runner, environment
+
+
+def load_job_spec_from_file(path: str | Path) -> JobSpec:
+    payload = yaml.safe_load(Path(path).read_text(encoding="utf-8")) or {}
+    request_text = payload.get("request_text") or payload.get("requester_input")
+    if not isinstance(request_text, str) or not request_text.strip():
+        raise ValueError("job file requires request_text or requester_input")
+    repo_path = str(Path(payload.get("repo_path", ".")).resolve())
+    workspace_root = str(Path(payload.get("workspace_root", repo_path)).resolve())
+    raw_metadata = payload.get("metadata", {})
+    metadata = dict(raw_metadata) if isinstance(raw_metadata, dict) else {}
+    for key, value in payload.items():
+        if key in {
+            "job_id",
+            "title",
+            "request_text",
+            "requester_input",
+            "repo_path",
+            "target_branch",
+            "metadata",
+            "workspace_root",
+        }:
+            continue
+        metadata[key] = value
+    spec_payload = {
+        "request_text": request_text.strip(),
+        "repo_path": repo_path,
+        "target_branch": payload.get("target_branch", "acos/default"),
+        "metadata": metadata,
+        "workspace_root": workspace_root,
+    }
+    if payload.get("job_id"):
+        spec_payload["job_id"] = payload["job_id"]
+    if payload.get("title"):
+        spec_payload["title"] = payload["title"]
+    return JobSpec.model_validate(spec_payload)
+
+
+def build_job_spec_from_request(
+    *,
+    request_text: str,
+    repo_path: str | Path,
+    workspace_root: str | Path | None = None,
+    target_branch: str = "acos/default",
+    job_id: str | None = None,
+    title: str | None = None,
+) -> JobSpec:
+    if not request_text.strip():
+        raise ValueError("request must not be empty")
+    resolved_repo = str(Path(repo_path).resolve())
+    resolved_workspace = str(Path(workspace_root or resolved_repo).resolve())
+    payload: dict[str, Any] = {
+        "request_text": request_text.strip(),
+        "repo_path": resolved_repo,
+        "workspace_root": resolved_workspace,
+        "target_branch": target_branch,
+        "metadata": {},
+    }
+    if job_id:
+        payload["job_id"] = job_id
+    if title:
+        payload["title"] = title
+    return JobSpec.model_validate(payload)
+
+
+def load_run_supervised_job_spec(args: argparse.Namespace) -> JobSpec:
+    if args.file:
+        return load_job_spec_from_file(args.file)
+    return build_job_spec_from_request(
+        request_text=args.request,
+        repo_path=args.repo_path,
+        workspace_root=args.workspace_root,
+        target_branch=args.target_branch,
+        job_id=args.job_id,
+        title=args.title,
+    )
+
+
+def apply_constraint_overrides(
+    spec_or_record,
+    *,
+    max_autonomous_stages: int | None = None,
+    large_autonomous: bool = False,
+    require_prd_quality: bool = False,
+    stage_review: bool = False,
+    test_timeout_seconds: int | None = None,
+) -> None:
+    if (
+        max_autonomous_stages is None
+        and not large_autonomous
+        and not require_prd_quality
+        and not stage_review
+        and test_timeout_seconds is None
+    ):
+        return
+    spec = getattr(spec_or_record, "spec", spec_or_record)
+    constraints = spec.metadata.setdefault("constraints", {})
+    if not isinstance(constraints, dict):
+        constraints = {}
+        spec.metadata["constraints"] = constraints
+    if large_autonomous:
+        constraints.setdefault("max_autonomous_stages", 1)
+        constraints.setdefault("require_prd_quality", True)
+        constraints.setdefault("require_task_acceptance_criteria", True)
+        constraints.setdefault("require_completion_integrity", True)
+        constraints.setdefault("require_test_evidence", True)
+        constraints.setdefault("require_stage_test_patches", True)
+        constraints.setdefault("stage_review", True)
+        constraints.setdefault("test_timeout_seconds", 1200)
+    if max_autonomous_stages is not None:
+        constraints["max_autonomous_stages"] = max_autonomous_stages
+    if require_prd_quality:
+        constraints["require_prd_quality"] = True
+    if stage_review:
+        constraints["stage_review"] = True
+    if test_timeout_seconds is not None:
+        constraints["test_timeout_seconds"] = test_timeout_seconds
+
+
+def apply_recovery_overrides(record: JobRecord, summary: dict[str, object]) -> dict[str, object] | None:
+    failure_analysis = summary.get("failure_analysis")
+    if not isinstance(failure_analysis, dict):
+        return None
+    recovery = failure_analysis.get("recommended_recovery")
+    if not isinstance(recovery, dict):
+        return None
+    recovery_constraints = recovery.get("constraints")
+    if not isinstance(recovery_constraints, dict):
+        return None
+    constraints = record.spec.metadata.setdefault("constraints", {})
+    if not isinstance(constraints, dict):
+        constraints = {}
+        record.spec.metadata["constraints"] = constraints
+    for key, value in recovery_constraints.items():
+        if isinstance(key, str) and value is not None:
+            constraints[key] = value
+    constraints["recovery_reason"] = recovery.get("reason")
+    failed_task_id = recovery.get("failed_task_id")
+    if failed_task_id is not None:
+        constraints["recovery_failed_task_id"] = failed_task_id
+    failed_stage = recovery.get("failed_stage")
+    if failed_stage is not None:
+        constraints["recovery_failed_stage"] = failed_stage
+    constraints["recovery_attempt"] = int(constraints.get("recovery_attempt", 0)) + 1
+    if (
+        recovery.get("strategy") == "completion_audit"
+        and record.status == JobStatus.BLOCKED
+        and isinstance(record.last_error, str)
+        and record.last_error.startswith("completion_integrity_failed:")
+    ):
+        record.status = JobStatus.TESTING
+        record.history.append(JobStatus.TESTING)
+        record.last_error = None
+    return recovery
+
+
+def apply_planning_repair_overrides(
+    record: JobRecord,
+    summary: dict[str, object],
+) -> dict[str, object] | None:
+    planning_quality = summary.get("planning_quality")
+    if not isinstance(planning_quality, dict):
+        return None
+    planning_repair = planning_quality.get("planning_repair")
+    if not isinstance(planning_repair, dict):
+        return None
+    if planning_repair.get("strategy_change_recommended") is not True:
+        return None
+    constraints = record.spec.metadata.setdefault("constraints", {})
+    if not isinstance(constraints, dict):
+        constraints = {}
+        record.spec.metadata["constraints"] = constraints
+    repeated_prd_missing = [
+        str(item) for item in planning_repair.get("repeated_prd_missing", [])
+    ]
+    repeated_task_graph_error_types = [
+        str(item) for item in planning_repair.get("repeated_task_graph_error_types", [])
+    ]
+    constraints["planning_repair_strategy_change"] = True
+    constraints["planning_repair_consecutive_prd_failures"] = planning_repair.get(
+        "consecutive_prd_failure_count",
+        0,
+    )
+    constraints["planning_repair_consecutive_task_graph_failures"] = planning_repair.get(
+        "consecutive_task_graph_failure_count",
+        0,
+    )
+    constraints["planning_repair_repeated_prd_missing"] = (
+        ",".join(repeated_prd_missing) if repeated_prd_missing else "none"
+    )
+    constraints["planning_repair_repeated_task_graph_error_types"] = (
+        ",".join(repeated_task_graph_error_types)
+        if repeated_task_graph_error_types
+        else "none"
+    )
+    return planning_repair
+
+
+def apply_resume_overrides(
+    record,
+    *,
+    max_autonomous_stages: int | None = None,
+    bump_stage_limit: bool = False,
+    large_autonomous: bool = False,
+    require_prd_quality: bool = False,
+    stage_review: bool = False,
+    test_timeout_seconds: int | None = None,
+) -> None:
+    if max_autonomous_stages is None and bump_stage_limit:
+        max_autonomous_stages = suggested_next_stage_limit(record)
+    apply_constraint_overrides(
+        record,
+        max_autonomous_stages=max_autonomous_stages,
+        large_autonomous=large_autonomous,
+        require_prd_quality=require_prd_quality,
+        stage_review=stage_review,
+        test_timeout_seconds=test_timeout_seconds,
+    )
+    if max_autonomous_stages is None:
+        return
+    if record.last_error == "autonomous_stage_limit_reached":
+        record.status = JobStatus.TESTING
+        record.last_error = None
+
+
+def suggested_next_stage_limit(record) -> int | None:
+    stage_limit = record.outputs.get("autonomous_stage_limit")
+    if not isinstance(stage_limit, dict):
+        return None
+    current = stage_limit.get("max_autonomous_stages")
+    completed = stage_limit.get("completed_stage_count")
+    if not isinstance(current, int) or not isinstance(completed, int):
+        return None
+    return max(current + 1, completed + 1)
+
+
+def continue_persisted_job(
+    *,
+    store: FileJobStore,
+    job_id: str,
+    config_dir: str | Path,
+    workspace: str | Path | None,
+    max_steps: int,
+    max_autonomous_stages: int | None = None,
+    large_autonomous: bool = False,
+    require_prd_quality: bool = False,
+    stage_review: bool = False,
+    test_timeout_seconds: int | None = None,
+    allow_repeated_failure_recovery: bool = False,
+) -> tuple[JobRecord, int, dict[str, object] | None, list[dict[str, Any]]]:
+    steps_run = 0
+    record = store.get(job_id)
+    no_action_summary: dict[str, object] | None = None
+    step_events: list[dict[str, Any]] = []
+    for _ in range(max_steps):
+        record = store.get(job_id)
+        summary = summarize_job_progress(record)
+        resume = summary.get("resume", {})
+        action = resume.get("action") if isinstance(resume, dict) else None
+        can_auto_continue = (
+            resume.get("can_auto_continue", True) if isinstance(resume, dict) else True
+        )
+        if action == "none":
+            no_action_summary = summary if steps_run == 0 else None
+            break
+        if not can_auto_continue and not allow_repeated_failure_recovery:
+            no_action_summary = summary if steps_run == 0 else None
+            break
+        event: dict[str, Any] = {
+            "step": steps_run + 1,
+            "action": action,
+            "task_id": resume.get("task_id") if isinstance(resume, dict) else None,
+            "status_before": record.status.value,
+            "last_error_before": record.last_error,
+        }
+        if action == "improve_planning_quality" and isinstance(resume, dict):
+            blocking_items = resume.get("blocking_items", [])
+            event["planning_blocking_items"] = (
+                blocking_items if isinstance(blocking_items, list) else []
+            )
+        if not bool(can_auto_continue):
+            event["forced_recovery"] = True
+        recovery = apply_recovery_overrides(record, summary)
+        if recovery is not None:
+            event["recovery_strategy"] = recovery.get("strategy")
+            event["recovery_mode"] = record.spec.metadata["constraints"].get("recovery_mode")
+        planning_repair = None
+        if action == "improve_planning_quality":
+            planning_repair = apply_planning_repair_overrides(record, summary)
+        if planning_repair is not None:
+            event["planning_strategy_change_recommended"] = True
+        apply_resume_overrides(
+            record,
+            max_autonomous_stages=max_autonomous_stages,
+            bump_stage_limit=(
+                max_autonomous_stages is None and action == "raise_stage_limit_or_resume"
+            ),
+            large_autonomous=large_autonomous,
+            require_prd_quality=require_prd_quality,
+            stage_review=stage_review,
+            test_timeout_seconds=test_timeout_seconds,
+        )
+        event["max_autonomous_stages"] = (
+            record.spec.metadata.get("constraints", {}).get("max_autonomous_stages")
+            if isinstance(record.spec.metadata.get("constraints"), dict)
+            else None
+        )
+        store.update(record)
+        workspace_root = workspace or record.spec.workspace_root or record.spec.repo_path
+        runner, _ = build_default_runner(
+            config_dir=config_dir,
+            workspace_root=workspace_root,
+            store=store,
+        )
+        record = runner.resume_job(job_id)
+        store.update(record)
+        steps_run += 1
+        event.update(
+            {
+                "status_after": record.status.value,
+                "last_error_after": record.last_error,
+            }
+        )
+        step_events.append(event)
+        if record.status == JobStatus.DONE:
+            break
+    return record, steps_run, no_action_summary, step_events
+
+
+def autonomous_result_payload(
+    record: JobRecord,
+    *,
+    steps_run: int,
+    max_steps: int,
+    started: bool,
+    config_dir: str | Path | None = None,
+    jobs_dir: str | Path | None = None,
+    step_events: list[dict[str, Any]] | None = None,
+    continued: bool | None = None,
+    summary: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    final_summary = summary or summarize_job_progress(record)
+    did_continue = steps_run > 0 if continued is None else continued
+    resume = final_summary.get("resume", {})
+    next_action = resume.get("action") if isinstance(resume, dict) else None
+    can_auto_continue = resume.get("can_auto_continue", True) if isinstance(resume, dict) else True
+    can_continue = (
+        record.status != JobStatus.DONE
+        and next_action != "none"
+        and bool(can_auto_continue)
+    )
+    can_blocked_recovery_continue = (
+        record.status != JobStatus.DONE
+        and next_action != "none"
+        and not bool(can_auto_continue)
+    )
+    next_continue_cli_args = (
+        _next_continue_cli_args(
+            record.job_id,
+            config_dir=config_dir,
+            jobs_dir=jobs_dir,
+            max_steps=max_steps,
+            json_summary=True,
+        )
+        if can_continue
+        else []
+    )
+    blocked_recovery_continue_cli_args = (
+        _next_continue_cli_args(
+            record.job_id,
+            config_dir=config_dir,
+            jobs_dir=jobs_dir,
+            max_steps=max_steps,
+            json_summary=True,
+            allow_blocked_recovery=True,
+        )
+        if can_blocked_recovery_continue
+        else []
+    )
+    terminal_reason = _autonomous_terminal_reason(
+        record=record,
+        next_action=next_action,
+        steps_run=steps_run,
+        max_steps=max_steps,
+    )
+    payload = {
+        "job_id": record.job_id,
+        "status": record.status.value,
+        "done": record.status == JobStatus.DONE,
+        "started": started,
+        "continued": did_continue,
+        "steps_run": steps_run,
+        "max_steps": max_steps,
+        "step_events": step_events or [],
+        "terminal_reason": terminal_reason,
+        "next_action": next_action,
+        "can_continue": can_continue,
+        "next_continue_cli_args": next_continue_cli_args,
+        "next_continue_command": (
+            shlex.join(["acos", *next_continue_cli_args]) if next_continue_cli_args else None
+        ),
+        "can_blocked_recovery_continue": can_blocked_recovery_continue,
+        "blocked_recovery_continue_cli_args": blocked_recovery_continue_cli_args,
+        "blocked_recovery_continue_command": (
+            shlex.join(["acos", *blocked_recovery_continue_cli_args])
+            if blocked_recovery_continue_cli_args
+            else None
+        ),
+        "summary": final_summary,
+    }
+    payload["operator_decision"] = autonomous_operator_decision_payload(payload)
+    return payload
+
+
+def planning_result_payload(
+    record: JobRecord,
+    *,
+    started: bool,
+    config_dir: str | Path | None = None,
+    jobs_dir: str | Path | None = None,
+    next_supervise_cli_args: list[str] | None = None,
+    prefer_supervise: bool = False,
+) -> dict[str, Any]:
+    payload = autonomous_result_payload(
+        record,
+        steps_run=0,
+        max_steps=1,
+        started=started,
+        config_dir=config_dir,
+        jobs_dir=jobs_dir,
+        continued=False,
+    )
+    supervise_args = next_supervise_cli_args or []
+    if supervise_args:
+        payload["can_supervise_continue"] = True
+        payload["next_supervise_cli_args"] = supervise_args
+        payload["next_supervise_command"] = shlex.join(["acos", *supervise_args])
+    planning_only = record.outputs.get("planning_only")
+    planning_complete = (
+        isinstance(planning_only, dict) and planning_only.get("complete") is True
+    )
+    payload["planning_complete"] = planning_complete
+    if planning_complete:
+        payload["terminal_reason"] = "planned"
+        payload["operator_decision"] = autonomous_operator_decision_payload(payload)
+        if prefer_supervise and payload.get("next_supervise_command"):
+            payload["operator_decision"] = planning_supervise_operator_decision(payload)
+    payload["stop_summary"] = stop_summary_payload(payload)
+    return payload
+
+
+def planning_supervise_operator_decision(payload: dict[str, Any]) -> dict[str, Any]:
+    decision = autonomous_operator_decision_payload(payload)
+    decision["action"] = "supervise"
+    decision["command"] = payload.get("next_supervise_command")
+    decision["requires_explicit_override"] = False
+    return decision
+
+
+def _next_continue_cli_args(
+    job_id: str,
+    *,
+    config_dir: str | Path | None,
+    jobs_dir: str | Path | None,
+    max_steps: int,
+    json_summary: bool,
+    allow_blocked_recovery: bool = False,
+) -> list[str]:
+    args = ["continue-job", "--job-id", job_id, "--max-steps", str(max_steps)]
+    if json_summary:
+        args.append("--json-summary")
+    if allow_blocked_recovery:
+        args.append("--allow-blocked-recovery")
+    if config_dir is not None:
+        args.extend(["--config-dir", str(config_dir)])
+    if jobs_dir is not None:
+        args.extend(["--jobs-dir", str(jobs_dir)])
+    return args
+
+
+def _autonomous_terminal_reason(
+    *,
+    record: JobRecord,
+    next_action: object,
+    steps_run: int,
+    max_steps: int,
+) -> str:
+    if record.status == JobStatus.DONE:
+        return "done"
+    if next_action == "none":
+        return "no_resume_action"
+    if steps_run >= max_steps:
+        return "max_steps_reached"
+    return "can_continue"
+
+
+def supervise_persisted_job(
+    *,
+    store: FileJobStore,
+    job_id: str,
+    config_dir: str | Path,
+    workspace: str | Path | None,
+    max_cycles: int,
+    steps_per_cycle: int,
+    max_stalled_cycles: int,
+    max_runtime_seconds: float | None = None,
+    jobs_dir: str | Path | None = None,
+    summary_file: str | Path | None = None,
+    summary_dir: str | Path | None = None,
+    max_autonomous_stages: int | None = None,
+    large_autonomous: bool = False,
+    require_prd_quality: bool = False,
+    stage_review: bool = False,
+    test_timeout_seconds: int | None = None,
+    preflight_provider: str | None = None,
+    preflight_timeout: float | None = None,
+    allow_repeated_failure_recovery: bool = False,
+    pm_stall_recovery: bool = False,
+) -> dict[str, Any]:
+    record = store.get(job_id)
+    cycles_run = 0
+    total_steps_run = 0
+    stalled_cycle_count = 0
+    start_time = monotonic()
+    elapsed_seconds = 0.0
+    previous_progress_marker: tuple[Any, ...] | None = None
+    stopped_for_stall = False
+    stopped_for_runtime = False
+    stopped_for_provider = False
+    provider_preflight: dict[str, object] | None = None
+    provider_events: list[dict[str, Any]] = []
+    all_step_events: list[dict[str, Any]] = []
+    cycle_summaries: list[dict[str, Any]] = []
+    pm_stall_recoveries = 0
+    latest_pm_decision: dict[str, Any] | None = None
+    for cycle_index in range(max_cycles):
+        provider_preflight = maybe_probe_provider(
+            config_dir=config_dir,
+            provider_name=preflight_provider,
+            timeout_seconds=preflight_timeout or 5.0,
+        )
+        if provider_preflight is not None:
+            provider_events.append(
+                _provider_preflight_event(
+                    provider_preflight=provider_preflight,
+                    cycle=cycle_index + 1,
+                    phase="pre_cycle",
+                )
+            )
+        if provider_preflight is not None and not provider_preflight.get("healthy"):
+            stopped_for_provider = True
+            break
+        record, steps_run, no_action_summary, step_events = continue_persisted_job(
+            store=store,
+            job_id=job_id,
+            config_dir=config_dir,
+            workspace=workspace,
+            max_steps=steps_per_cycle,
+            max_autonomous_stages=max_autonomous_stages,
+            large_autonomous=large_autonomous,
+            require_prd_quality=require_prd_quality,
+            stage_review=stage_review,
+            test_timeout_seconds=test_timeout_seconds,
+            allow_repeated_failure_recovery=allow_repeated_failure_recovery,
+        )
+        if steps_run == 0 and no_action_summary is not None:
+            cycle_payload = autonomous_result_payload(
+                record,
+                steps_run=0,
+                max_steps=steps_per_cycle,
+                started=False,
+                config_dir=config_dir,
+                jobs_dir=jobs_dir,
+                continued=False,
+                summary=no_action_summary,
+            )
+        else:
+            normalized_events = _normalize_cycle_step_events(
+                step_events,
+                cycle=cycle_index + 1,
+                total_steps_before=total_steps_run,
+            )
+            all_step_events.extend(normalized_events)
+            cycle_payload = autonomous_result_payload(
+                record,
+                steps_run=steps_run,
+                max_steps=steps_per_cycle,
+                started=False,
+                config_dir=config_dir,
+                jobs_dir=jobs_dir,
+                step_events=normalized_events,
+            )
+        cycles_run += 1
+        total_steps_run += steps_run
+        elapsed_seconds = monotonic() - start_time
+        progress_marker_detail = _supervision_progress_marker_detail(cycle_payload)
+        progress_marker = _supervision_progress_marker(progress_marker_detail)
+        if cycle_payload["terminal_reason"] in {"done", "no_resume_action"}:
+            stalled_cycle_count = 0
+        elif progress_marker == previous_progress_marker:
+            stalled_cycle_count += 1
+        else:
+            stalled_cycle_count = 0
+        previous_progress_marker = progress_marker
+        cycle_payload["cycle"] = cycles_run
+        cycle_payload["steps_per_cycle"] = steps_per_cycle
+        cycle_payload["stalled_cycle_count"] = stalled_cycle_count
+        cycle_payload["max_stalled_cycles"] = max_stalled_cycles
+        cycle_payload["progress_marker"] = progress_marker_detail
+        cycle_payload["elapsed_seconds"] = round(elapsed_seconds, 3)
+        cycle_payload["max_runtime_seconds"] = max_runtime_seconds
+        if provider_preflight is not None:
+            cycle_payload["provider_preflight"] = provider_preflight
+        pm_recovery_applied = False
+        if stalled_cycle_count >= max_stalled_cycles:
+            can_apply_pm_recovery = pm_stall_recovery and cycle_index + 1 < max_cycles
+            stall_analysis = _supervision_stall_analysis(
+                cycle_summaries=[*cycle_summaries, cycle_payload],
+                stalled=True,
+                stalled_cycle_count=stalled_cycle_count,
+                max_stalled_cycles=max_stalled_cycles,
+            )
+            pm_decision = _pm_stall_decision(
+                record=record,
+                stall_analysis=stall_analysis,
+                can_apply_automatically=can_apply_pm_recovery,
+            )
+            cycle_payload["terminal_reason"] = "stalled"
+            cycle_payload["can_continue"] = False
+            cycle_payload["next_continue_cli_args"] = []
+            cycle_payload["next_continue_command"] = None
+            cycle_payload["can_blocked_recovery_continue"] = False
+            cycle_payload["blocked_recovery_continue_cli_args"] = []
+            cycle_payload["blocked_recovery_continue_command"] = None
+            cycle_payload["stall_analysis"] = stall_analysis
+            cycle_payload["pm_decision"] = pm_decision
+            latest_pm_decision = pm_decision
+            if can_apply_pm_recovery:
+                latest_pm_decision = _apply_pm_stall_decision(record, pm_decision)
+                store.update(record)
+                pm_stall_recoveries += 1
+                pm_recovery_applied = True
+                cycle_payload["terminal_reason"] = "pm_strategy_change"
+                cycle_payload["pm_decision"] = latest_pm_decision
+                cycle_payload["pm_recovery_applied"] = True
+            cycle_payload["operator_decision"] = autonomous_operator_decision_payload(
+                cycle_payload
+            )
+        if (
+            stalled_cycle_count < max_stalled_cycles
+            and max_runtime_seconds is not None
+            and elapsed_seconds >= max_runtime_seconds
+        ):
+            cycle_payload["terminal_reason"] = "runtime_limit"
+            cycle_payload["can_continue"] = False
+            cycle_payload["next_continue_cli_args"] = []
+            cycle_payload["next_continue_command"] = None
+            cycle_payload["can_blocked_recovery_continue"] = False
+            cycle_payload["blocked_recovery_continue_cli_args"] = []
+            cycle_payload["blocked_recovery_continue_command"] = None
+            cycle_payload["runtime_limited"] = True
+            cycle_payload["runtime_analysis"] = _supervision_runtime_analysis(
+                elapsed_seconds=elapsed_seconds,
+                max_runtime_seconds=max_runtime_seconds,
+            )
+            cycle_payload["operator_decision"] = autonomous_operator_decision_payload(
+                cycle_payload
+            )
+        cycle_summaries.append(cycle_payload)
+        if summary_dir is not None:
+            write_json_summary_file(
+                Path(summary_dir) / f"cycle-{cycles_run:03d}.json",
+                cycle_payload,
+            )
+        if cycle_payload["terminal_reason"] in {"done", "no_resume_action"}:
+            break
+        if pm_recovery_applied:
+            stalled_cycle_count = 0
+            previous_progress_marker = None
+            continue
+        if stalled_cycle_count >= max_stalled_cycles:
+            stopped_for_stall = True
+            break
+        if max_runtime_seconds is not None and elapsed_seconds >= max_runtime_seconds:
+            stopped_for_runtime = True
+            break
+        if steps_run == 0:
+            break
+    final_payload = autonomous_result_payload(
+        record,
+        steps_run=total_steps_run,
+        max_steps=max_cycles * steps_per_cycle,
+        started=False,
+        config_dir=config_dir,
+        jobs_dir=jobs_dir,
+        step_events=all_step_events,
+    )
+    if stopped_for_stall:
+        final_payload["terminal_reason"] = "stalled"
+        final_payload["can_continue"] = False
+        final_payload["next_continue_cli_args"] = []
+        final_payload["next_continue_command"] = None
+        final_payload["can_blocked_recovery_continue"] = False
+        final_payload["blocked_recovery_continue_cli_args"] = []
+        final_payload["blocked_recovery_continue_command"] = None
+    if stopped_for_runtime:
+        final_payload["terminal_reason"] = "runtime_limit"
+        final_payload["can_continue"] = False
+        final_payload["next_continue_cli_args"] = []
+        final_payload["next_continue_command"] = None
+        final_payload["can_blocked_recovery_continue"] = False
+        final_payload["blocked_recovery_continue_cli_args"] = []
+        final_payload["blocked_recovery_continue_command"] = None
+    if stopped_for_provider:
+        final_payload["terminal_reason"] = "provider_unhealthy"
+        final_payload["can_continue"] = False
+        final_payload["next_continue_cli_args"] = []
+        final_payload["next_continue_command"] = None
+        final_payload["can_blocked_recovery_continue"] = False
+        final_payload["blocked_recovery_continue_cli_args"] = []
+        final_payload["blocked_recovery_continue_command"] = None
+    can_supervise_continue = (
+        record.status != JobStatus.DONE
+        and final_payload["terminal_reason"]
+        in {"can_continue", "max_steps_reached", "runtime_limit", "provider_unhealthy"}
+    )
+    final_payload.update(
+        {
+            "cycles_run": cycles_run,
+            "max_cycles": max_cycles,
+            "steps_per_cycle": steps_per_cycle,
+            "stalled": stopped_for_stall,
+            "stalled_cycle_count": stalled_cycle_count,
+            "max_stalled_cycles": max_stalled_cycles,
+            "runtime_limited": stopped_for_runtime,
+            "elapsed_seconds": round(elapsed_seconds, 3),
+            "max_runtime_seconds": max_runtime_seconds,
+            "runtime_analysis": (
+                _supervision_runtime_analysis(
+                    elapsed_seconds=elapsed_seconds,
+                    max_runtime_seconds=max_runtime_seconds,
+                )
+                if stopped_for_runtime and max_runtime_seconds is not None
+                else None
+            ),
+            "provider_unhealthy": stopped_for_provider,
+            "provider_events": provider_events,
+            "pm_stall_recovery": pm_stall_recovery,
+            "pm_stall_recoveries": pm_stall_recoveries,
+            "pm_decision": latest_pm_decision,
+            "pm_interventions": record.outputs.get("pm_interventions", []),
+            "stall_analysis": _supervision_stall_analysis(
+                cycle_summaries=cycle_summaries,
+                stalled=stopped_for_stall,
+                stalled_cycle_count=stalled_cycle_count,
+                max_stalled_cycles=max_stalled_cycles,
+            ),
+            "can_supervise_continue": can_supervise_continue,
+            "next_supervise_cli_args": (
+                _next_supervise_cli_args(
+                    record.job_id,
+                    config_dir=config_dir,
+                    jobs_dir=jobs_dir,
+                    workspace=workspace,
+                    max_cycles=max_cycles,
+                    steps_per_cycle=steps_per_cycle,
+                    max_stalled_cycles=max_stalled_cycles,
+                    max_runtime_seconds=max_runtime_seconds,
+                    summary_file=summary_file,
+                    summary_dir=summary_dir,
+                    max_autonomous_stages=max_autonomous_stages,
+                    large_autonomous=large_autonomous,
+                    require_prd_quality=require_prd_quality,
+                    stage_review=stage_review,
+                    test_timeout_seconds=test_timeout_seconds,
+                    preflight_provider=preflight_provider,
+                    preflight_timeout=preflight_timeout,
+                    allow_repeated_failure_recovery=allow_repeated_failure_recovery,
+                    pm_stall_recovery=pm_stall_recovery,
+                )
+                if can_supervise_continue
+                else []
+            ),
+            "cycle_summaries": cycle_summaries,
+        }
+    )
+    final_payload["next_supervise_command"] = (
+        shlex.join(["acos", *final_payload["next_supervise_cli_args"]])
+        if final_payload["next_supervise_cli_args"]
+        else None
+    )
+    final_payload["operator_decision"] = autonomous_operator_decision_payload(final_payload)
+    if provider_preflight is not None:
+        final_payload["provider_preflight"] = provider_preflight
+    if stopped_for_provider and provider_preflight is not None:
+        final_payload["operator_decision"] = provider_unhealthy_operator_decision(
+            provider_preflight=provider_preflight,
+            next_supervise_command=final_payload.get("next_supervise_command"),
+        )
+    final_payload["stop_summary"] = stop_summary_payload(final_payload)
+    return final_payload
+
+
+def autonomous_operator_decision_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    return _operator_decision_payload(
+        done=bool(payload.get("done")),
+        summary=payload.get("summary", {}),
+        can_continue=bool(payload.get("can_continue")),
+        next_continue_command=payload.get("next_continue_command"),
+        can_blocked_recovery_continue=bool(payload.get("can_blocked_recovery_continue")),
+        blocked_recovery_continue_command=payload.get("blocked_recovery_continue_command"),
+        can_supervise_continue=bool(payload.get("can_supervise_continue")),
+        next_supervise_command=payload.get("next_supervise_command"),
+        stall_analysis=payload.get("stall_analysis"),
+        runtime_analysis=payload.get("runtime_analysis"),
+    )
+
+
+def _operator_decision_payload(
+    *,
+    done: bool,
+    summary: object,
+    can_continue: bool,
+    next_continue_command: object,
+    can_blocked_recovery_continue: bool,
+    blocked_recovery_continue_command: object,
+    can_supervise_continue: bool,
+    next_supervise_command: object,
+    stall_analysis: object,
+    runtime_analysis: object,
+) -> dict[str, Any]:
+    command: object
+    if not isinstance(summary, dict):
+        summary = {}
+    if not isinstance(stall_analysis, dict):
+        stall_analysis = {}
+    if not isinstance(runtime_analysis, dict):
+        runtime_analysis = {}
+    resume = summary.get("resume", {})
+    if not isinstance(resume, dict):
+        resume = {}
+    autonomy_readiness = summary.get("autonomy_readiness", {})
+    if not isinstance(autonomy_readiness, dict):
+        autonomy_readiness = {}
+    planning_quality = summary.get("planning_quality", {})
+    if not isinstance(planning_quality, dict):
+        planning_quality = {}
+    planning_repair = planning_quality.get("planning_repair", {})
+    if not isinstance(planning_repair, dict):
+        planning_repair = {}
+    failure_analysis = summary.get("failure_analysis", {})
+    if not isinstance(failure_analysis, dict):
+        failure_analysis = {}
+
+    if done:
+        action = "done"
+        command = None
+        requires_explicit_override = False
+    elif can_continue:
+        action = "continue"
+        command = next_continue_command
+        requires_explicit_override = False
+    elif can_blocked_recovery_continue:
+        action = "blocked_recovery"
+        command = blocked_recovery_continue_command
+        requires_explicit_override = True
+    elif can_supervise_continue:
+        action = "supervise"
+        command = next_supervise_command
+        requires_explicit_override = False
+    else:
+        action = "inspect"
+        command = None
+        requires_explicit_override = bool(stall_analysis.get("stalled"))
+
+    blocking_items = autonomy_readiness.get("blocking_items", [])
+    if not isinstance(blocking_items, list):
+        blocking_items = []
+    decision = {
+        "action": action,
+        "command": command,
+        "resume_action": resume.get("action"),
+        "reason": resume.get("reason"),
+        "requires_explicit_override": requires_explicit_override,
+        "autonomy_ready": autonomy_readiness.get("ready"),
+        "blocking_items": blocking_items,
+        "planning_strategy_change_recommended": bool(
+            planning_repair.get("strategy_change_recommended")
+        ),
+    }
+    if stall_analysis.get("stalled"):
+        decision["inspection_reason"] = "stalled"
+        decision["stall_analysis"] = stall_analysis
+    if runtime_analysis.get("runtime_limited"):
+        if action == "inspect":
+            decision["inspection_reason"] = "runtime_limit"
+        decision["runtime_analysis"] = runtime_analysis
+    failure_classification = failure_analysis.get("classification")
+    recommended_recovery = failure_analysis.get("recommended_recovery")
+    if failure_classification not in {None, "other"}:
+        decision["failure_classification"] = failure_classification
+    if isinstance(recommended_recovery, dict):
+        decision["recommended_recovery"] = recommended_recovery
+    return decision
+
+
+def _next_supervise_cli_args(
+    job_id: str,
+    *,
+    config_dir: str | Path | None,
+    jobs_dir: str | Path | None,
+    workspace: str | Path | None,
+    max_cycles: int,
+    steps_per_cycle: int,
+    max_stalled_cycles: int,
+    max_runtime_seconds: float | None,
+    summary_file: str | Path | None,
+    summary_dir: str | Path | None,
+    max_autonomous_stages: int | None,
+    large_autonomous: bool,
+    require_prd_quality: bool,
+    stage_review: bool,
+    test_timeout_seconds: int | None,
+    preflight_provider: str | None,
+    preflight_timeout: float | None,
+    allow_repeated_failure_recovery: bool = False,
+    pm_stall_recovery: bool = False,
+) -> list[str]:
+    args = [
+        "supervise-job",
+        "--job-id",
+        job_id,
+        "--max-cycles",
+        str(max_cycles),
+        "--steps-per-cycle",
+        str(steps_per_cycle),
+        "--max-stalled-cycles",
+        str(max_stalled_cycles),
+    ]
+    if max_runtime_seconds is not None:
+        args.extend(["--max-runtime-seconds", str(max_runtime_seconds)])
+    if config_dir is not None:
+        args.extend(["--config-dir", str(config_dir)])
+    if jobs_dir is not None:
+        args.extend(["--jobs-dir", str(jobs_dir)])
+    if workspace is not None:
+        args.extend(["--workspace", str(workspace)])
+    if summary_file is not None:
+        args.extend(["--summary-file", str(summary_file)])
+    if summary_dir is not None:
+        args.extend(["--summary-dir", str(summary_dir)])
+    if max_autonomous_stages is not None:
+        args.extend(["--max-autonomous-stages", str(max_autonomous_stages)])
+    if large_autonomous:
+        args.append("--large-autonomous")
+    if require_prd_quality:
+        args.append("--require-prd-quality")
+    if stage_review:
+        args.append("--stage-review")
+    if test_timeout_seconds is not None:
+        args.extend(["--test-timeout-seconds", str(test_timeout_seconds)])
+    if preflight_provider is not None:
+        args.extend(["--preflight-provider", preflight_provider])
+        if preflight_timeout is not None:
+            args.extend(["--preflight-timeout", str(preflight_timeout)])
+    if allow_repeated_failure_recovery:
+        args.append("--allow-blocked-recovery")
+    if pm_stall_recovery:
+        args.append("--pm-stall-recovery")
+    return args
+
+
+def job_status_supervision_payload(
+    record: JobRecord,
+    args: argparse.Namespace,
+) -> dict[str, Any]:
+    can_supervise = record.status != JobStatus.DONE
+    supervise_args = (
+        _next_supervise_cli_args(
+            record.job_id,
+            config_dir=None,
+            jobs_dir=args.jobs_dir,
+            workspace=args.supervise_workspace,
+            max_cycles=args.supervise_max_cycles,
+            steps_per_cycle=args.supervise_steps_per_cycle,
+            max_stalled_cycles=args.supervise_max_stalled_cycles,
+            max_runtime_seconds=args.supervise_max_runtime_seconds,
+            summary_file=args.supervise_summary_file,
+            summary_dir=args.supervise_summary_dir,
+            max_autonomous_stages=args.supervise_max_autonomous_stages,
+            large_autonomous=args.supervise_large_autonomous,
+            require_prd_quality=args.supervise_require_prd_quality,
+            stage_review=args.supervise_stage_review,
+            test_timeout_seconds=args.supervise_test_timeout_seconds,
+            preflight_provider=args.supervise_preflight_provider,
+            preflight_timeout=args.supervise_preflight_timeout,
+            allow_repeated_failure_recovery=args.supervise_allow_repeated_failure_recovery,
+            pm_stall_recovery=args.supervise_pm_stall_recovery,
+        )
+        if can_supervise
+        else []
+    )
+    return {
+        "can_supervise_continue": can_supervise,
+        "next_supervise_cli_args": supervise_args,
+        "next_supervise_command": (
+            shlex.join(["acos", *supervise_args]) if supervise_args else None
+        ),
+    }
+
+
+def job_status_continuation_payload(
+    record: JobRecord,
+    args: argparse.Namespace,
+    summary: dict[str, Any],
+) -> dict[str, Any]:
+    resume = summary.get("resume", {})
+    next_action = resume.get("action") if isinstance(resume, dict) else None
+    can_auto_continue = resume.get("can_auto_continue", True) if isinstance(resume, dict) else True
+    max_steps = args.continue_max_steps or 1
+    can_continue = (
+        record.status != JobStatus.DONE
+        and next_action != "none"
+        and bool(can_auto_continue)
+    )
+    can_blocked_recovery_continue = (
+        record.status != JobStatus.DONE
+        and next_action != "none"
+        and not bool(can_auto_continue)
+    )
+    next_continue_cli_args = (
+        _next_continue_cli_args(
+            record.job_id,
+            config_dir=None,
+            jobs_dir=args.jobs_dir,
+            max_steps=max_steps,
+            json_summary=args.continue_json_summary,
+        )
+        if can_continue
+        else []
+    )
+    blocked_recovery_continue_cli_args = (
+        _next_continue_cli_args(
+            record.job_id,
+            config_dir=None,
+            jobs_dir=args.jobs_dir,
+            max_steps=max_steps,
+            json_summary=args.continue_json_summary,
+            allow_blocked_recovery=True,
+        )
+        if can_blocked_recovery_continue
+        else []
+    )
+    return {
+        "can_continue": can_continue,
+        "next_continue_cli_args": next_continue_cli_args,
+        "next_continue_command": (
+            shlex.join(["acos", *next_continue_cli_args]) if next_continue_cli_args else None
+        ),
+        "can_blocked_recovery_continue": can_blocked_recovery_continue,
+        "blocked_recovery_continue_cli_args": blocked_recovery_continue_cli_args,
+        "blocked_recovery_continue_command": (
+            shlex.join(["acos", *blocked_recovery_continue_cli_args])
+            if blocked_recovery_continue_cli_args
+            else None
+        ),
+    }
+
+
+def job_status_operator_decision_payload(
+    record: JobRecord,
+    summary: dict[str, Any],
+    continuation: dict[str, Any],
+    supervision: dict[str, Any],
+) -> dict[str, Any]:
+    return _operator_decision_payload(
+        done=record.status == JobStatus.DONE,
+        summary=summary,
+        can_continue=bool(continuation.get("can_continue")),
+        next_continue_command=continuation.get("next_continue_command"),
+        can_blocked_recovery_continue=bool(
+            continuation.get("can_blocked_recovery_continue")
+        ),
+        blocked_recovery_continue_command=continuation.get(
+            "blocked_recovery_continue_command"
+        ),
+        can_supervise_continue=bool(supervision.get("can_supervise_continue")),
+        next_supervise_command=supervision.get("next_supervise_command"),
+        stall_analysis=None,
+        runtime_analysis=None,
+    )
+
+
+def operator_summary_payload(
+    *,
+    decision: dict[str, Any],
+    continuation: dict[str, Any],
+    supervision: dict[str, Any],
+) -> dict[str, Any]:
+    summary: dict[str, Any] = {
+        "operator_action": decision.get("action"),
+        "operator_command": decision.get("command"),
+        "resume_action": decision.get("resume_action"),
+        "can_continue": bool(continuation.get("can_continue")),
+        "can_blocked_recovery_continue": bool(
+            continuation.get("can_blocked_recovery_continue")
+        ),
+        "can_supervise_continue": bool(supervision.get("can_supervise_continue")),
+        "requires_explicit_override": decision.get("requires_explicit_override"),
+        "autonomy_ready": decision.get("autonomy_ready"),
+        "planning_strategy_change_recommended": bool(
+            decision.get("planning_strategy_change_recommended")
+        ),
+    }
+    command_source_by_action = {
+        "continue": "continuation",
+        "blocked_recovery": "blocked_recovery",
+        "supervise": "supervision",
+    }
+    summary["command_source"] = command_source_by_action.get(
+        str(decision.get("action")),
+        None,
+    )
+    for key in ("failure_classification", "recommended_recovery", "inspection_reason"):
+        if key in decision:
+            summary[key] = decision[key]
+    blocking_items = decision.get("blocking_items")
+    if isinstance(blocking_items, list) and blocking_items:
+        summary["blocking_items"] = blocking_items
+    return summary
+
+
+def _supervision_progress_marker_detail(cycle_payload: dict[str, Any]) -> dict[str, Any]:
+    summary = cycle_payload.get("summary")
+    if not isinstance(summary, dict):
+        return {}
+    change_summary = summary.get("change_summary")
+    if not isinstance(change_summary, dict):
+        change_summary = {}
+    planning_quality = summary.get("planning_quality")
+    if not isinstance(planning_quality, dict):
+        planning_quality = {}
+    autonomy_readiness = summary.get("autonomy_readiness")
+    if not isinstance(autonomy_readiness, dict):
+        autonomy_readiness = {}
+    resume = summary.get("resume")
+    if not isinstance(resume, dict):
+        resume = {}
+    blocking_items = autonomy_readiness.get("blocking_items", [])
+    if not isinstance(blocking_items, list):
+        blocking_items = []
+    return {
+        "status": summary.get("status"),
+        "completed_task_count": summary.get("completed_task_count"),
+        "pending_task_count": summary.get("pending_task_count"),
+        "completed_task_ids": _string_list(summary.get("completed_task_ids")),
+        "failed_stage_task_ids": _string_list(summary.get("failed_stage_task_ids")),
+        "patch_count": change_summary.get("patch_count"),
+        "changed_files": _string_list(change_summary.get("changed_files")),
+        "last_error": summary.get("last_error"),
+        "resume_action": resume.get("action"),
+        "resume_task_id": resume.get("task_id"),
+        "prd_quality_attempt_count": planning_quality.get("prd_quality_attempt_count"),
+        "task_graph_validation_attempt_count": planning_quality.get(
+            "task_graph_validation_attempt_count"
+        ),
+        "autonomy_ready": autonomy_readiness.get("ready"),
+        "blocking_item_types": [
+            item.get("type") for item in blocking_items if isinstance(item, dict)
+        ],
+    }
+
+
+def _supervision_progress_marker(detail: dict[str, Any]) -> tuple[Any, ...]:
+    if not detail:
+        return ()
+    return (
+        detail.get("status"),
+        detail.get("completed_task_count"),
+        detail.get("pending_task_count"),
+        tuple(detail.get("completed_task_ids", [])),
+        tuple(detail.get("failed_stage_task_ids", [])),
+        detail.get("patch_count"),
+        tuple(detail.get("changed_files", [])),
+        detail.get("last_error"),
+        detail.get("resume_action"),
+        detail.get("resume_task_id"),
+        detail.get("prd_quality_attempt_count"),
+        detail.get("task_graph_validation_attempt_count"),
+        detail.get("autonomy_ready"),
+        tuple(detail.get("blocking_item_types", [])),
+    )
+
+
+def _supervision_stall_analysis(
+    *,
+    cycle_summaries: list[dict[str, Any]],
+    stalled: bool,
+    stalled_cycle_count: int,
+    max_stalled_cycles: int,
+) -> dict[str, Any]:
+    repeated_cycle_count = stalled_cycle_count + 1 if stalled_cycle_count else 0
+    repeated_marker: object = None
+    if repeated_cycle_count and cycle_summaries:
+        repeated_marker = cycle_summaries[-1].get("progress_marker")
+    return {
+        "stalled": stalled,
+        "stalled_cycle_count": stalled_cycle_count,
+        "max_stalled_cycles": max_stalled_cycles,
+        "repeated_cycle_count": repeated_cycle_count,
+        "repeated_progress_marker": repeated_marker,
+        "reason": "same_progress_marker_repeated" if stalled else None,
+    }
+
+
+def _pm_stall_decision(
+    *,
+    record: JobRecord,
+    stall_analysis: dict[str, Any],
+    can_apply_automatically: bool,
+) -> dict[str, Any]:
+    marker = stall_analysis.get("repeated_progress_marker")
+    if not isinstance(marker, dict):
+        marker = {}
+    resume_action = marker.get("resume_action")
+    last_error = marker.get("last_error") or record.last_error
+    focus_task_id = marker.get("resume_task_id")
+    if resume_action == "improve_planning_quality":
+        strategy = "planning_repair_strategy_change"
+        summary = (
+            "Planning quality is repeating the same blocker; switch the PM/planner "
+            "strategy before continuing."
+        )
+    elif resume_action == "raise_stage_limit_or_resume" or last_error == "autonomous_stage_limit_reached":
+        strategy = "raise_stage_limit"
+        summary = "The job reached an autonomous stage boundary; raise the limit and resume."
+    else:
+        strategy = "split_or_simplify_next_task"
+        summary = (
+            "The same task-level marker repeated; split the current task or narrow the "
+            "next patch before continuing."
+        )
+    constraints: dict[str, Any] = {
+        "pm_stall_recovery": True,
+        "pm_strategy_change": True,
+        "pm_strategy": strategy,
+        "pm_reason": stall_analysis.get("reason") or "same_progress_marker_repeated",
+        "recovery_mode": "pm_stall_recovery",
+    }
+    if focus_task_id is not None:
+        constraints["pm_focus_task_id"] = focus_task_id
+    if strategy == "planning_repair_strategy_change":
+        constraints["planning_repair_strategy_change"] = True
+    elif strategy == "raise_stage_limit":
+        next_limit = suggested_next_stage_limit(record)
+        if next_limit is not None:
+            constraints["max_autonomous_stages"] = next_limit
+    else:
+        constraints["recovery_strategy"] = "split_or_clarify_task"
+    return {
+        "action": "change_strategy",
+        "reason": constraints["pm_reason"],
+        "strategy": strategy,
+        "summary": summary,
+        "can_apply_automatically": can_apply_automatically,
+        "applied": False,
+        "status": record.status.value,
+        "resume_action": resume_action,
+        "focus_task_id": focus_task_id,
+        "repeated_cycle_count": stall_analysis.get("repeated_cycle_count", 0),
+        "constraints": constraints,
+    }
+
+
+def _apply_pm_stall_decision(
+    record: JobRecord,
+    decision: dict[str, Any],
+) -> dict[str, Any]:
+    constraints = record.spec.metadata.setdefault("constraints", {})
+    if not isinstance(constraints, dict):
+        constraints = {}
+        record.spec.metadata["constraints"] = constraints
+    decision_constraints = decision.get("constraints")
+    if isinstance(decision_constraints, dict):
+        for key, value in decision_constraints.items():
+            if isinstance(key, str) and value is not None:
+                constraints[key] = value
+    interventions = record.outputs.setdefault("pm_interventions", [])
+    if not isinstance(interventions, list):
+        interventions = []
+        record.outputs["pm_interventions"] = interventions
+    applied_decision = dict(decision)
+    applied_decision["applied"] = True
+    applied_decision["intervention_index"] = len(interventions) + 1
+    constraints["pm_intervention_count"] = applied_decision["intervention_index"]
+    interventions.append(applied_decision)
+    return applied_decision
+
+
+def _supervision_runtime_analysis(
+    *,
+    elapsed_seconds: float,
+    max_runtime_seconds: float,
+) -> dict[str, Any]:
+    return {
+        "runtime_limited": True,
+        "elapsed_seconds": round(elapsed_seconds, 3),
+        "max_runtime_seconds": max_runtime_seconds,
+        "reason": "runtime_limit_reached",
+    }
+
+
+def _string_list(value: object) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [item for item in value if isinstance(item, str)]
+
+
+def _normalize_cycle_step_events(
+    step_events: list[dict[str, Any]],
+    *,
+    cycle: int,
+    total_steps_before: int,
+) -> list[dict[str, Any]]:
+    normalized: list[dict[str, Any]] = []
+    for index, event in enumerate(step_events, start=1):
+        normalized_event = dict(event)
+        normalized_event["cycle"] = cycle
+        normalized_event["cycle_step"] = event.get("step")
+        normalized_event["step"] = total_steps_before + index
+        normalized.append(normalized_event)
+    return normalized
+
+
+def json_summary_content(payload: dict[str, Any]) -> str:
+    return json.dumps(payload, indent=2, ensure_ascii=False)
+
+
+def write_json_summary_file(path: str | Path, payload: dict[str, Any]) -> None:
+    summary_path = Path(path)
+    summary_path.parent.mkdir(parents=True, exist_ok=True)
+    summary_path.write_text(json_summary_content(payload) + "\n", encoding="utf-8")
+
+
+def emit_json_summary(payload: dict[str, Any], summary_file: str | Path | None = None) -> None:
+    content = json_summary_content(payload)
+    if summary_file is not None:
+        write_json_summary_file(summary_file, payload)
+    print(content)
+
+
+def maybe_probe_provider(
+    *,
+    config_dir: str | Path,
+    provider_name: str | None,
+    timeout_seconds: float,
+) -> dict[str, object] | None:
+    if not provider_name:
+        return None
+    registry, _ = load_registry_and_policy(config_dir)
+    return probe_provider(
+        registry=registry,
+        provider_name=provider_name,
+        timeout_seconds=timeout_seconds,
+    )
+
+
+def provider_unhealthy_payload(
+    *,
+    provider_preflight: dict[str, object],
+    job_id: str | None = None,
+    started: bool = False,
+    next_supervise_cli_args: list[str] | None = None,
+) -> dict[str, Any]:
+    supervise_args = next_supervise_cli_args or []
+    next_supervise_command = (
+        shlex.join(["acos", *supervise_args]) if supervise_args else None
+    )
+    payload = {
+        "job_id": job_id,
+        "status": "blocked",
+        "done": False,
+        "started": started,
+        "continued": False,
+        "steps_run": 0,
+        "max_steps": 0,
+        "step_events": [],
+        "terminal_reason": "provider_unhealthy",
+        "next_action": "check_provider",
+        "can_continue": False,
+        "next_continue_cli_args": [],
+        "next_continue_command": None,
+        "can_blocked_recovery_continue": False,
+        "blocked_recovery_continue_cli_args": [],
+        "blocked_recovery_continue_command": None,
+        "can_supervise_continue": bool(supervise_args),
+        "next_supervise_cli_args": supervise_args,
+        "next_supervise_command": next_supervise_command,
+        "provider_preflight": provider_preflight,
+        "provider_events": [
+            _provider_preflight_event(
+                provider_preflight=provider_preflight,
+                cycle=None,
+                phase="pre_start",
+            )
+        ],
+        "summary": None,
+    }
+    payload["operator_decision"] = provider_unhealthy_operator_decision(
+        provider_preflight=provider_preflight,
+        next_supervise_command=next_supervise_command,
+    )
+    payload["stop_summary"] = stop_summary_payload(payload)
+    return payload
+
+
+def provider_unhealthy_operator_decision(
+    *,
+    provider_preflight: dict[str, object],
+    next_supervise_command: object,
+) -> dict[str, Any]:
+    can_retry_supervision = isinstance(next_supervise_command, str) and bool(
+        next_supervise_command
+    )
+    provider = provider_preflight.get("provider")
+    return {
+        "action": "supervise" if can_retry_supervision else "inspect",
+        "command": next_supervise_command if can_retry_supervision else None,
+        "resume_action": "check_provider",
+        "reason": "provider_unhealthy",
+        "requires_explicit_override": False,
+        "autonomy_ready": None,
+        "blocking_items": [
+            {
+                "type": "provider_unhealthy",
+                "provider": provider,
+            }
+        ],
+        "planning_strategy_change_recommended": False,
+        "inspection_reason": "provider_unhealthy",
+        "provider_preflight": provider_preflight,
+    }
+
+
+def stop_summary_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    decision = payload.get("operator_decision")
+    if not isinstance(decision, dict):
+        decision = {}
+    stop_summary: dict[str, Any] = {
+        "terminal_reason": payload.get("terminal_reason"),
+        "operator_action": decision.get("action"),
+        "operator_command": decision.get("command"),
+        "resume_action": decision.get("resume_action") or payload.get("next_action"),
+        "can_continue": bool(payload.get("can_continue")),
+        "can_supervise_continue": bool(payload.get("can_supervise_continue")),
+        "requires_explicit_override": decision.get("requires_explicit_override"),
+    }
+    inspection_reason = decision.get("inspection_reason")
+    if inspection_reason is not None:
+        stop_summary["inspection_reason"] = inspection_reason
+    stall_analysis = payload.get("stall_analysis")
+    if isinstance(stall_analysis, dict) and stall_analysis.get("stalled"):
+        stop_summary["stall_analysis"] = stall_analysis
+    pm_decision = payload.get("pm_decision")
+    if isinstance(pm_decision, dict):
+        stop_summary["pm_decision"] = pm_decision
+    pm_interventions = payload.get("pm_interventions")
+    if isinstance(pm_interventions, list) and (pm_interventions or isinstance(pm_decision, dict)):
+        stop_summary["pm_intervention_count"] = len(pm_interventions)
+    summary = payload.get("summary")
+    planning_summary = (
+        summary.get("planning_summary") if isinstance(summary, dict) else None
+    )
+    if isinstance(planning_summary, dict) and (
+        planning_summary.get("complete") is True
+        or payload.get("terminal_reason") == "planned"
+    ):
+        stop_summary["planning_summary"] = planning_summary
+    for key in ("runtime_analysis", "provider_preflight"):
+        value = payload.get(key)
+        if value is not None:
+            stop_summary[key] = value
+    provider_events = payload.get("provider_events")
+    if isinstance(provider_events, list):
+        stop_summary["provider_event_count"] = len(provider_events)
+        stop_summary["last_provider_event"] = (
+            provider_events[-1] if provider_events else None
+        )
+    return stop_summary
+
+
+def _provider_preflight_event(
+    *,
+    provider_preflight: dict[str, object],
+    cycle: int | None,
+    phase: str,
+) -> dict[str, Any]:
+    healthy = bool(provider_preflight.get("healthy"))
+    return {
+        "cycle": cycle,
+        "phase": phase,
+        "healthy": healthy,
+        "terminal": not healthy,
+        "provider_preflight": provider_preflight,
+    }
+
+
+def probe_provider(
+    registry: ModelRegistry,
+    provider_name: str,
+    timeout_seconds: float = 5.0,
+) -> dict[str, object]:
+    provider = registry.get_provider(provider_name)
+    payload: dict[str, object] = {
+        "provider": provider.name,
+        "type": provider.type.value,
+        "base_url": provider.base_url,
+        "api_key_env": provider.api_key_env,
+        "api_key_present": bool(os.environ.get(provider.api_key_env)),
+        "configured_timeout_seconds": provider.timeout_seconds,
+    }
+    if provider.type.value == "mock":
+        payload.update(
+            {
+                "healthy": True,
+                "status": "synthetic",
+                "detail": "mock provider does not expose a network health endpoint",
+            }
+        )
+        return payload
+
+    models_url = f"{provider.base_url.rstrip('/')}/models"
+    headers = dict(provider.default_headers)
+    api_key = os.environ.get(provider.api_key_env)
+    if api_key:
+        headers.setdefault("Authorization", f"Bearer {api_key}")
+    request = Request(models_url, headers=headers)
+    payload["models_url"] = models_url
+    payload["probe_timeout_seconds"] = timeout_seconds
+    try:
+        with urlopen(request, timeout=timeout_seconds) as response:
+            body = response.read().decode("utf-8", errors="replace")
+            parsed = json.loads(body) if body else {}
+            model_ids: list[str] = []
+            if isinstance(parsed, dict) and isinstance(parsed.get("data"), list):
+                model_ids = [
+                    item.get("id")
+                    for item in parsed["data"]
+                    if isinstance(item, dict) and item.get("id")
+                ]
+            payload.update(
+                {
+                    "healthy": 200 <= response.status < 300,
+                    "status": "ok" if 200 <= response.status < 300 else "error",
+                    "http_status": response.status,
+                    "model_ids": model_ids,
+                }
+            )
+            return payload
+    except URLError as exc:
+        payload.update({"healthy": False, "status": "down", "error": str(exc.reason)})
+        return payload
+    except Exception as exc:
+        payload.update({"healthy": False, "status": "error", "error": str(exc)})
+        return payload
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -343,6 +2118,15 @@ def main(argv: Sequence[str] | None = None) -> int:
         _, policy = load_registry_and_policy(args.config_dir)
         print(yaml.safe_dump(policy.list_allowed_tools(role=args.role), sort_keys=False))
         return 0
+    if args.command == "check-provider":
+        registry, _ = load_registry_and_policy(args.config_dir)
+        payload = probe_provider(
+            registry=registry,
+            provider_name=args.provider,
+            timeout_seconds=args.timeout,
+        )
+        print(yaml.safe_dump(payload, sort_keys=False))
+        return 0 if payload["healthy"] else 1
     if args.command == "api":
         uvicorn.run("apps.api.main:app", host=args.host, port=args.port, reload=False)
         return 0
@@ -373,11 +2157,478 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(environment.notify_server.notifications)
         return 0 if record.status.value == "done" else 1
     if args.command == "run-job":
-        payload = yaml.safe_load(Path(args.file).read_text(encoding="utf-8")) or {}
-        repo_path = payload.get("repo_path", ".")
-        runner, _ = build_default_runner(config_dir=args.config_dir, workspace_root=repo_path)
-        spec = JobSpec.model_validate(payload)
+        spec = load_job_spec_from_file(args.file)
+        apply_constraint_overrides(
+            spec,
+            max_autonomous_stages=args.max_autonomous_stages,
+            large_autonomous=args.large_autonomous,
+            require_prd_quality=args.require_prd_quality,
+            stage_review=args.stage_review,
+            test_timeout_seconds=args.test_timeout_seconds,
+        )
+        store = FileJobStore(args.jobs_dir)
+        runner, _ = build_default_runner(
+            config_dir=args.config_dir,
+            workspace_root=spec.workspace_root or spec.repo_path,
+            store=store,
+        )
         record = runner.run_job(spec)
         print(record.model_dump_json(indent=2))
         return 0 if record.status.value == "done" else 1
+    if args.command == "plan-job":
+        spec = load_run_supervised_job_spec(args)
+        provider_preflight = maybe_probe_provider(
+            config_dir=args.config_dir,
+            provider_name=args.preflight_provider,
+            timeout_seconds=args.preflight_timeout,
+        )
+        if provider_preflight is not None and not provider_preflight.get("healthy"):
+            payload = provider_unhealthy_payload(
+                provider_preflight=provider_preflight,
+                job_id=spec.job_id,
+                started=False,
+            )
+            emit_json_summary(payload, args.summary_file)
+            return 1
+        apply_constraint_overrides(
+            spec,
+            max_autonomous_stages=args.max_autonomous_stages,
+            large_autonomous=True,
+            require_prd_quality=args.require_prd_quality,
+            stage_review=args.stage_review,
+            test_timeout_seconds=args.test_timeout_seconds,
+        )
+        store = FileJobStore(args.jobs_dir)
+        runner, _ = build_default_runner(
+            config_dir=args.config_dir,
+            workspace_root=spec.workspace_root or spec.repo_path,
+            store=store,
+        )
+        record = runner.plan_job(spec)
+        next_supervise_cli_args = (
+            _next_supervise_cli_args(
+                record.job_id,
+                config_dir=args.config_dir,
+                jobs_dir=args.jobs_dir,
+                workspace=spec.workspace_root or spec.repo_path,
+                max_cycles=args.supervise_max_cycles,
+                steps_per_cycle=args.supervise_steps_per_cycle,
+                max_stalled_cycles=args.supervise_max_stalled_cycles,
+                max_runtime_seconds=args.supervise_max_runtime_seconds,
+                summary_file=args.supervise_summary_file,
+                summary_dir=args.supervise_summary_dir,
+                max_autonomous_stages=args.max_autonomous_stages,
+                large_autonomous=True,
+                require_prd_quality=args.require_prd_quality,
+                stage_review=args.stage_review,
+                test_timeout_seconds=args.test_timeout_seconds,
+                preflight_provider=args.supervise_preflight_provider,
+                preflight_timeout=args.supervise_preflight_timeout,
+                allow_repeated_failure_recovery=(
+                    args.supervise_allow_repeated_failure_recovery
+                ),
+                pm_stall_recovery=args.supervise_pm_stall_recovery,
+            )
+            if args.supervise_after_planning
+            else None
+        )
+        payload = planning_result_payload(
+            record,
+            started=True,
+            config_dir=args.config_dir,
+            jobs_dir=args.jobs_dir,
+            next_supervise_cli_args=next_supervise_cli_args,
+            prefer_supervise=args.supervise_after_planning,
+        )
+        emit_json_summary(payload, args.summary_file)
+        return 0 if payload["planning_complete"] else 1
+    if args.command == "run-autonomous":
+        spec = load_job_spec_from_file(args.file)
+        apply_constraint_overrides(
+            spec,
+            max_autonomous_stages=args.max_autonomous_stages,
+            large_autonomous=True,
+            require_prd_quality=args.require_prd_quality,
+            stage_review=args.stage_review,
+            test_timeout_seconds=args.test_timeout_seconds,
+        )
+        store = FileJobStore(args.jobs_dir)
+        runner, _ = build_default_runner(
+            config_dir=args.config_dir,
+            workspace_root=spec.workspace_root or spec.repo_path,
+            store=store,
+        )
+        record = runner.run_job(spec)
+        steps_run = 0
+        step_events: list[dict[str, Any]] = []
+        if record.status != JobStatus.DONE and args.max_steps > 0:
+            record, steps_run, _, step_events = continue_persisted_job(
+                store=store,
+                job_id=record.job_id,
+                config_dir=args.config_dir,
+                workspace=spec.workspace_root or spec.repo_path,
+                max_steps=args.max_steps,
+                max_autonomous_stages=args.max_autonomous_stages,
+                large_autonomous=True,
+                require_prd_quality=args.require_prd_quality,
+                stage_review=args.stage_review,
+                test_timeout_seconds=args.test_timeout_seconds,
+                allow_repeated_failure_recovery=args.allow_repeated_failure_recovery,
+            )
+        if args.json_summary:
+            payload = autonomous_result_payload(
+                record,
+                steps_run=steps_run,
+                max_steps=args.max_steps,
+                started=True,
+                config_dir=args.config_dir,
+                jobs_dir=args.jobs_dir,
+                step_events=step_events,
+            )
+            emit_json_summary(payload, args.summary_file)
+            return 0 if record.status.value == "done" else 1
+        print(record.model_dump_json(indent=2))
+        return 0 if record.status.value == "done" else 1
+    if args.command == "run-supervised":
+        spec = load_run_supervised_job_spec(args)
+        provider_preflight = maybe_probe_provider(
+            config_dir=args.config_dir,
+            provider_name=args.preflight_provider,
+            timeout_seconds=args.preflight_timeout,
+        )
+        if provider_preflight is not None and not provider_preflight.get("healthy"):
+            payload = provider_unhealthy_payload(
+                provider_preflight=provider_preflight,
+                job_id=spec.job_id,
+                started=False,
+            )
+            emit_json_summary(payload, args.summary_file)
+            return 1
+        apply_constraint_overrides(
+            spec,
+            max_autonomous_stages=args.max_autonomous_stages,
+            large_autonomous=True,
+            require_prd_quality=args.require_prd_quality,
+            stage_review=args.stage_review,
+            test_timeout_seconds=args.test_timeout_seconds,
+        )
+        store = FileJobStore(args.jobs_dir)
+        runner, _ = build_default_runner(
+            config_dir=args.config_dir,
+            workspace_root=spec.workspace_root or spec.repo_path,
+            store=store,
+        )
+        planning_payload = None
+        if args.plan_first:
+            record = runner.plan_job(spec)
+            planning_payload = planning_result_payload(
+                record,
+                started=True,
+                config_dir=args.config_dir,
+                jobs_dir=args.jobs_dir,
+            )
+            if not planning_payload["planning_complete"]:
+                if provider_preflight is not None:
+                    planning_payload.setdefault("provider_preflight", provider_preflight)
+                    planning_payload["provider_events"] = [
+                        _provider_preflight_event(
+                            provider_preflight=provider_preflight,
+                            cycle=None,
+                            phase="pre_start",
+                        )
+                    ]
+                    planning_payload["stop_summary"] = stop_summary_payload(
+                        planning_payload
+                    )
+                emit_json_summary(planning_payload, args.summary_file)
+                return 1
+        else:
+            record = runner.run_job(spec)
+        if record.status == JobStatus.DONE:
+            payload = autonomous_result_payload(
+                record,
+                steps_run=0,
+                max_steps=args.max_cycles * args.steps_per_cycle,
+                started=True,
+                config_dir=args.config_dir,
+                jobs_dir=args.jobs_dir,
+                continued=False,
+            )
+            payload.update(
+                {
+                    "cycles_run": 0,
+                    "max_cycles": args.max_cycles,
+                    "steps_per_cycle": args.steps_per_cycle,
+                    "stalled": False,
+                    "stalled_cycle_count": 0,
+                    "max_stalled_cycles": args.max_stalled_cycles,
+                    "runtime_limited": False,
+                    "elapsed_seconds": 0.0,
+                    "max_runtime_seconds": args.max_runtime_seconds,
+                    "can_supervise_continue": False,
+                    "next_supervise_cli_args": [],
+                    "next_supervise_command": None,
+                    "provider_events": [],
+                    "cycle_summaries": [],
+                    "initial_status": record.status.value,
+                }
+            )
+        else:
+            initial_status = record.status.value
+            payload = supervise_persisted_job(
+                store=store,
+                job_id=record.job_id,
+                config_dir=args.config_dir,
+                workspace=spec.workspace_root or spec.repo_path,
+                max_cycles=args.max_cycles,
+                steps_per_cycle=args.steps_per_cycle,
+                max_stalled_cycles=args.max_stalled_cycles,
+                max_runtime_seconds=args.max_runtime_seconds,
+                jobs_dir=args.jobs_dir,
+                summary_file=args.summary_file,
+                summary_dir=args.summary_dir,
+                max_autonomous_stages=args.max_autonomous_stages,
+                large_autonomous=True,
+                require_prd_quality=args.require_prd_quality,
+                stage_review=args.stage_review,
+                test_timeout_seconds=args.test_timeout_seconds,
+                preflight_provider=args.preflight_provider,
+                preflight_timeout=args.preflight_timeout,
+                allow_repeated_failure_recovery=args.allow_repeated_failure_recovery,
+                pm_stall_recovery=args.pm_stall_recovery,
+            )
+            payload["started"] = True
+            payload["initial_status"] = initial_status
+        if args.plan_first:
+            payload["planned_first"] = True
+            payload["planning_complete"] = bool(
+                planning_payload and planning_payload.get("planning_complete")
+            )
+            payload["planning_result"] = planning_payload
+        if provider_preflight is not None:
+            payload.setdefault("provider_preflight", provider_preflight)
+            payload["provider_events"] = [
+                _provider_preflight_event(
+                    provider_preflight=provider_preflight,
+                    cycle=None,
+                    phase="pre_start",
+                ),
+                *payload.get("provider_events", []),
+            ]
+            payload["stop_summary"] = stop_summary_payload(payload)
+        else:
+            payload["stop_summary"] = stop_summary_payload(payload)
+        emit_json_summary(payload, args.summary_file)
+        return 0 if payload["done"] else 1
+    if args.command == "resume-job":
+        store = FileJobStore(args.jobs_dir)
+        record = store.get(args.job_id)
+        summary = summarize_job_progress(record)
+        apply_planning_repair_overrides(record, summary)
+        apply_resume_overrides(
+            record,
+            max_autonomous_stages=args.max_autonomous_stages,
+            bump_stage_limit=args.bump_stage_limit,
+            large_autonomous=args.large_autonomous,
+            require_prd_quality=args.require_prd_quality,
+            stage_review=args.stage_review,
+            test_timeout_seconds=args.test_timeout_seconds,
+        )
+        store.update(record)
+        workspace = args.workspace or record.spec.workspace_root or record.spec.repo_path
+        runner, _ = build_default_runner(
+            config_dir=args.config_dir,
+            workspace_root=workspace,
+            store=store,
+        )
+        record = runner.resume_job(args.job_id)
+        print(record.model_dump_json(indent=2))
+        return 0 if record.status.value == "done" else 1
+    if args.command == "continue-job":
+        store = FileJobStore(args.jobs_dir)
+        record, steps_run, no_action_summary, step_events = continue_persisted_job(
+            store=store,
+            job_id=args.job_id,
+            config_dir=args.config_dir,
+            workspace=args.workspace,
+            max_steps=args.max_steps,
+            max_autonomous_stages=args.max_autonomous_stages,
+            large_autonomous=args.large_autonomous,
+            require_prd_quality=args.require_prd_quality,
+            stage_review=args.stage_review,
+            test_timeout_seconds=args.test_timeout_seconds,
+            allow_repeated_failure_recovery=args.allow_repeated_failure_recovery,
+        )
+        if steps_run == 0 and no_action_summary is not None:
+            if args.json_summary:
+                payload = autonomous_result_payload(
+                    record,
+                    steps_run=0,
+                    max_steps=args.max_steps,
+                    started=False,
+                    config_dir=args.config_dir,
+                    jobs_dir=args.jobs_dir,
+                    step_events=step_events,
+                    continued=False,
+                    summary=no_action_summary,
+                )
+                emit_json_summary(payload, args.summary_file)
+                return 0 if record.status == JobStatus.DONE else 1
+            print(yaml.safe_dump({"continued": False, "summary": no_action_summary}, sort_keys=False))
+            return 0 if record.status == JobStatus.DONE else 1
+        if args.json_summary:
+            payload = autonomous_result_payload(
+                record,
+                steps_run=steps_run,
+                max_steps=args.max_steps,
+                started=False,
+                config_dir=args.config_dir,
+                jobs_dir=args.jobs_dir,
+                step_events=step_events,
+            )
+            emit_json_summary(payload, args.summary_file)
+            return 0 if record.status.value == "done" else 1
+        print(record.model_dump_json(indent=2))
+        return 0 if record.status.value == "done" else 1
+    if args.command == "supervise-job":
+        provider_preflight = maybe_probe_provider(
+            config_dir=args.config_dir,
+            provider_name=args.preflight_provider,
+            timeout_seconds=args.preflight_timeout,
+        )
+        if provider_preflight is not None and not provider_preflight.get("healthy"):
+            payload = provider_unhealthy_payload(
+                provider_preflight=provider_preflight,
+                job_id=args.job_id,
+                started=False,
+                next_supervise_cli_args=_next_supervise_cli_args(
+                    args.job_id,
+                    config_dir=args.config_dir,
+                    jobs_dir=args.jobs_dir,
+                    workspace=args.workspace,
+                    max_cycles=args.max_cycles,
+                    steps_per_cycle=args.steps_per_cycle,
+                    max_stalled_cycles=args.max_stalled_cycles,
+                    max_runtime_seconds=args.max_runtime_seconds,
+                    summary_file=args.summary_file,
+                    summary_dir=args.summary_dir,
+                    max_autonomous_stages=args.max_autonomous_stages,
+                    large_autonomous=args.large_autonomous,
+                    require_prd_quality=args.require_prd_quality,
+                    stage_review=args.stage_review,
+                    test_timeout_seconds=args.test_timeout_seconds,
+                    preflight_provider=args.preflight_provider,
+                    preflight_timeout=args.preflight_timeout,
+                    allow_repeated_failure_recovery=args.allow_repeated_failure_recovery,
+                    pm_stall_recovery=args.pm_stall_recovery,
+                ),
+            )
+            emit_json_summary(payload, args.summary_file)
+            return 1
+        store = FileJobStore(args.jobs_dir)
+        payload = supervise_persisted_job(
+            store=store,
+            job_id=args.job_id,
+            config_dir=args.config_dir,
+            workspace=args.workspace,
+            max_cycles=args.max_cycles,
+            steps_per_cycle=args.steps_per_cycle,
+            max_stalled_cycles=args.max_stalled_cycles,
+            max_runtime_seconds=args.max_runtime_seconds,
+            jobs_dir=args.jobs_dir,
+            summary_file=args.summary_file,
+            summary_dir=args.summary_dir,
+            max_autonomous_stages=args.max_autonomous_stages,
+            large_autonomous=args.large_autonomous,
+            require_prd_quality=args.require_prd_quality,
+            stage_review=args.stage_review,
+            test_timeout_seconds=args.test_timeout_seconds,
+            preflight_provider=args.preflight_provider,
+            preflight_timeout=args.preflight_timeout,
+            allow_repeated_failure_recovery=args.allow_repeated_failure_recovery,
+            pm_stall_recovery=args.pm_stall_recovery,
+        )
+        if provider_preflight is not None:
+            payload.setdefault("provider_preflight", provider_preflight)
+            payload["provider_events"] = [
+                _provider_preflight_event(
+                    provider_preflight=provider_preflight,
+                    cycle=None,
+                    phase="pre_start",
+                ),
+                *payload.get("provider_events", []),
+            ]
+            payload["stop_summary"] = stop_summary_payload(payload)
+        emit_json_summary(payload, args.summary_file)
+        return 0 if payload["done"] else 1
+    if args.command == "job-status":
+        record = FileJobStore(args.jobs_dir).get(args.job_id)
+        summary = summarize_job_progress(record)
+        if args.next_command:
+            suggested_args = summary.get("resume", {}).get("suggested_cli_args", [])
+            if suggested_args:
+                command = ["acos", *suggested_args, "--jobs-dir", str(args.jobs_dir)]
+                print(shlex.join(command))
+            else:
+                continuation = job_status_continuation_payload(record, args, summary)
+                supervision = job_status_supervision_payload(record, args)
+                decision = job_status_operator_decision_payload(
+                    record,
+                    summary,
+                    continuation,
+                    supervision,
+                )
+                command = decision.get("command")
+                if command:
+                    print(command)
+            return 0
+        if args.next_continue_command:
+            continuation = job_status_continuation_payload(record, args, summary)
+            command = continuation.get("next_continue_command") or continuation.get(
+                "blocked_recovery_continue_command"
+            )
+            if command:
+                print(command)
+            return 0
+        if args.next_supervise_command:
+            suggested_args = job_status_supervision_payload(record, args)[
+                "next_supervise_cli_args"
+            ]
+            if suggested_args:
+                print(shlex.join(["acos", *suggested_args]))
+            return 0
+        if args.next_operator_command:
+            continuation = job_status_continuation_payload(record, args, summary)
+            supervision = job_status_supervision_payload(record, args)
+            decision = job_status_operator_decision_payload(
+                record,
+                summary,
+                continuation,
+                supervision,
+            )
+            command = decision.get("command")
+            if command:
+                print(command)
+            return 0
+        if args.json:
+            continuation = job_status_continuation_payload(record, args, summary)
+            supervision = job_status_supervision_payload(record, args)
+            summary["continuation"] = continuation
+            summary["supervision"] = supervision
+            operator_decision = job_status_operator_decision_payload(
+                record,
+                summary,
+                continuation,
+                supervision,
+            )
+            summary["operator_decision"] = operator_decision
+            summary["operator_summary"] = operator_summary_payload(
+                decision=operator_decision,
+                continuation=continuation,
+                supervision=supervision,
+            )
+            print(json.dumps(summary, indent=2, ensure_ascii=False))
+            return 0
+        print(yaml.safe_dump(summary, sort_keys=False))
+        return 0
     return 1

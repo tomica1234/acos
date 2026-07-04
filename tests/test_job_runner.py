@@ -3,6 +3,7 @@ from pathlib import Path
 from packages.llm.registry import ModelRegistry
 from packages.mcp_client.fake import FakeMCPEnvironment
 from packages.orchestrator.job_runner import JobRunner
+from packages.orchestrator.job_store import InMemoryJobStore
 from packages.orchestrator.policy import PolicyEngine
 from packages.schemas.agent_outputs import (
     ArchitecturePlan,
@@ -13,10 +14,18 @@ from packages.schemas.agent_outputs import (
     ReviewResult,
     SecurityReviewResult,
     SummaryResult,
+    TestRunResult,
     TestWriterResult as TestWriterOutput,
 )
 from packages.schemas.jobs import JobSpec
-from packages.schemas.models import FixStatus, ImplementationStatus, ReviewDecision, Severity
+from packages.schemas.models import (
+    FixStatus,
+    ImplementationStatus,
+    JobStatus,
+    ReviewDecision,
+    Severity,
+    TestWriterStatus as WriterStatus,
+)
 from packages.schemas.tasks import PlannedTask, TaskGraph
 
 from tests.conftest import attach_mock_adapter, config_dir
@@ -202,3 +211,4798 @@ def test_job_runner_max_attempts_stuck(tmp_path: Path) -> None:
     record = runner.run_job(spec)
 
     assert record.status.value == "stuck"
+
+
+def test_job_runner_fails_without_applying_fixer_patch_when_fixer_reports_failed(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    registry = ModelRegistry.from_paths(
+        provider_path=config_dir() / "model_providers.yaml",
+        agents_path=config_dir() / "agents.yaml",
+        routing_path=config_dir() / "model_routing.yaml",
+    )
+    attach_mock_adapter(
+        registry,
+        {
+            "pm": PRD(title="Feature", problem_statement="Need feature").model_dump(),
+            "architect": ArchitecturePlan(summary="Simple architecture").model_dump(),
+            "planner": TaskGraph(
+                goal="Build feature",
+                tasks=[
+                    PlannedTask(
+                        id="task-1",
+                        title="Write code",
+                        description="Write code",
+                        role="implementer",
+                    )
+                ],
+            ).model_dump(),
+            "implementer": ImplementationResult(
+                status=ImplementationStatus.IMPLEMENTED,
+                summary="Create buggy module",
+                patches=[
+                    {
+                        "path": "feature.py",
+                        "content": "VALUE = 0\n",
+                        "operation": "create",
+                    }
+                ],
+            ).model_dump(),
+            "test_writer": TestWriterOutput(
+                summary="Add tests",
+                patches=[
+                    {
+                        "path": "tests/test_feature.py",
+                        "content": "from feature import VALUE\n\n\ndef test_value() -> None:\n    assert VALUE == 1\n",
+                        "operation": "create",
+                    }
+                ],
+            ).model_dump(),
+            "reviewer": ReviewResult(
+                decision=ReviewDecision.APPROVE,
+                summary="OK",
+            ).model_dump(),
+            "security_reviewer": SecurityReviewResult(
+                decision=ReviewDecision.APPROVE,
+                summary="Safe",
+            ).model_dump(),
+            "fixer": FixResult(
+                status=FixStatus.FAILED,
+                summary="Could not fix the failure safely.",
+                patches=[
+                    {
+                        "path": "feature.py",
+                        "content": "VALUE = 1\n",
+                        "operation": "update",
+                    }
+                ],
+            ).model_dump(),
+        },
+    )
+    policy = PolicyEngine.from_path(config_dir() / "policies.yaml")
+    environment = FakeMCPEnvironment(
+        workspace_root=workspace,
+        memory_db_path=workspace / ".memory.sqlite3",
+    )
+    runner = JobRunner(registry=registry, policy=policy, router=environment.build_router())
+    spec = JobSpec(
+        request_text="Create feature with tests",
+        repo_path=str(workspace),
+        target_branch="acos/fixer-failed",
+    )
+
+    record = runner.run_job(spec)
+
+    assert record.status == JobStatus.FAILED
+    assert record.last_error == "fixer_failed:task-1"
+    assert (workspace / "feature.py").read_text(encoding="utf-8") == "VALUE = 0\n"
+
+
+def test_job_runner_pm_uses_context_without_live_tool_calls(tmp_path: Path, monkeypatch) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "README.md").write_text("hello\n", encoding="utf-8")
+    registry = ModelRegistry.from_paths(
+        provider_path=config_dir() / "model_providers.yaml",
+        agents_path=config_dir() / "agents.yaml",
+        routing_path=config_dir() / "model_routing.yaml",
+    )
+    attach_mock_adapter(
+        registry,
+        {
+            "pm": PRD(title="Feature", problem_statement="Need feature").model_dump(),
+            "architect": ArchitecturePlan(summary="Simple architecture").model_dump(),
+            "planner": TaskGraph(goal="Build feature").model_dump(),
+            "implementer": ImplementationResult(
+                status=ImplementationStatus.IMPLEMENTED,
+                summary="noop",
+                patches=[],
+            ).model_dump(),
+            "test_writer": TestWriterOutput(summary="noop", patches=[]).model_dump(),
+            "reviewer": ReviewResult(decision=ReviewDecision.APPROVE, summary="ok").model_dump(),
+            "security_reviewer": SecurityReviewResult(
+                decision=ReviewDecision.APPROVE,
+                summary="ok",
+            ).model_dump(),
+            "summarizer": SummaryResult(summary="done", memory_entries=[]).model_dump(),
+            "release_manager": ReleaseResult(
+                summary="ready",
+                commit_message="acos: ready",
+                notify_message="done",
+            ).model_dump(),
+        },
+    )
+    policy = PolicyEngine.from_path(config_dir() / "policies.yaml")
+    environment = FakeMCPEnvironment(
+        workspace_root=workspace,
+        memory_db_path=workspace / ".memory.sqlite3",
+    )
+    runner = JobRunner(registry=registry, policy=policy, router=environment.build_router())
+
+    captured: dict[str, object] = {}
+    original_run = runner.agent_runner.run
+
+    def capture_run(*args, **kwargs):
+        if kwargs.get("role") == "pm":
+            captured["allowed_tools"] = kwargs.get("allowed_tools")
+            captured["relevant_files"] = dict(kwargs["context_packet"].relevant_files)
+        return original_run(*args, **kwargs)
+
+    monkeypatch.setattr(runner.agent_runner, "run", capture_run)
+
+    spec = JobSpec(
+        request_text="Create feature with tests",
+        repo_path=str(workspace),
+        target_branch="acos/context-only-pm",
+    )
+    record = runner.submit(spec)
+    runner._prepare_branch(record)
+    runner._run_structured_role(record, "pm", PRD, "Produce the product requirements")
+
+    assert captured["allowed_tools"] == []
+    assert "__repo_tree__.txt" in captured["relevant_files"]
+
+
+def test_job_runner_can_skip_review_and_release_for_generation_test(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    registry = ModelRegistry.from_paths(
+        provider_path=config_dir() / "model_providers.yaml",
+        agents_path=config_dir() / "agents.yaml",
+        routing_path=config_dir() / "model_routing.yaml",
+    )
+    attach_mock_adapter(
+        registry,
+        {
+            "pm": PRD(title="Feature", problem_statement="Need feature").model_dump(),
+            "architect": ArchitecturePlan(summary="Simple architecture").model_dump(),
+            "planner": TaskGraph(
+                goal="Build feature",
+                tasks=[
+                    PlannedTask(
+                        id="task-1",
+                        title="Write code",
+                        description="Write code",
+                        role="implementer",
+                    )
+                ],
+            ).model_dump(),
+            "implementer": ImplementationResult(
+                status=ImplementationStatus.IMPLEMENTED,
+                summary="Create module",
+                patches=[
+                    {
+                        "path": "feature.py",
+                        "content": "VALUE = 1\n",
+                        "operation": "create",
+                    }
+                ],
+            ).model_dump(),
+            "test_writer": TestWriterOutput(
+                summary="Add tests",
+                patches=[
+                    {
+                        "path": "tests/test_feature.py",
+                        "content": "from feature import VALUE\n\n\ndef test_value() -> None:\n    assert VALUE == 1\n",
+                        "operation": "create",
+                    }
+                ],
+            ).model_dump(),
+        },
+    )
+    policy = PolicyEngine.from_path(config_dir() / "policies.yaml")
+    environment = FakeMCPEnvironment(
+        workspace_root=workspace,
+        memory_db_path=workspace / ".memory.sqlite3",
+    )
+    runner = JobRunner(registry=registry, policy=policy, router=environment.build_router())
+    spec = JobSpec(
+        request_text="Create feature with tests",
+        repo_path=str(workspace),
+        target_branch="acos/generation-test",
+        metadata={"constraints": {"skip_review": True, "skip_release": True}},
+    )
+
+    record = runner.run_job(spec)
+
+    assert record.status.value == "done"
+    assert record.outputs["test_run"]["success"] is True
+    assert "summary" not in record.outputs
+    assert environment.git_server.commits == []
+
+
+def test_job_runner_runs_planned_tasks_in_dependency_order(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    registry = ModelRegistry.from_paths(
+        provider_path=config_dir() / "model_providers.yaml",
+        agents_path=config_dir() / "agents.yaml",
+        routing_path=config_dir() / "model_routing.yaml",
+    )
+    attach_mock_adapter(
+        registry,
+        {
+            "pm": PRD(title="Feature", problem_statement="Need feature").model_dump(),
+            "architect": ArchitecturePlan(summary="Simple architecture").model_dump(),
+            "planner": TaskGraph(
+                goal="Build feature",
+                tasks=[
+                    PlannedTask(
+                        id="task-2",
+                        title="Add multiplication",
+                        description="Add a multiplication helper after the base module exists.",
+                        role="implementer",
+                        depends_on=["task-1"],
+                    ),
+                    PlannedTask(
+                        id="task-1",
+                        title="Create base module",
+                        description="Create the first feature module.",
+                        role="implementer",
+                    ),
+                    PlannedTask(
+                        id="task-3",
+                        title="Cover helpers",
+                        description="Add tests for the helpers.",
+                        role="test_writer",
+                        depends_on=["task-2"],
+                    ),
+                ],
+            ).model_dump(),
+            "implementer": [
+                ImplementationResult(
+                    status=ImplementationStatus.IMPLEMENTED,
+                    summary="Created base module",
+                    patches=[
+                        {
+                            "path": "feature.py",
+                            "content": "def add_one(value: int) -> int:\n    return value + 1\n",
+                            "operation": "create",
+                        }
+                    ],
+                ).model_dump(),
+                ImplementationResult(
+                    status=ImplementationStatus.IMPLEMENTED,
+                    summary="Added multiplication helper",
+                    patches=[
+                        {
+                            "path": "feature.py",
+                            "content": (
+                                "def add_one(value: int) -> int:\n"
+                                "    return value + 1\n\n\n"
+                                "def double(value: int) -> int:\n"
+                                "    return value * 2\n"
+                            ),
+                            "operation": "update",
+                        }
+                    ],
+                ).model_dump(),
+            ],
+            "test_writer": [
+                TestWriterOutput(
+                    summary="Add base tests",
+                    patches=[
+                        {
+                            "path": "tests/test_feature.py",
+                            "content": (
+                                "from feature import add_one\n\n\n"
+                                "def test_add_one() -> None:\n"
+                                "    assert add_one(2) == 3\n"
+                            ),
+                            "operation": "create",
+                        }
+                    ],
+                ).model_dump(),
+                TestWriterOutput(
+                    summary="Add helper tests",
+                    patches=[
+                        {
+                            "path": "tests/test_feature.py",
+                            "content": (
+                                "from feature import add_one, double\n\n\n"
+                                "def test_add_one() -> None:\n"
+                                "    assert add_one(2) == 3\n\n\n"
+                                "def test_double() -> None:\n"
+                                "    assert double(4) == 8\n"
+                            ),
+                            "operation": "update",
+                        }
+                    ],
+                ).model_dump(),
+            ],
+        },
+    )
+    policy = PolicyEngine.from_path(config_dir() / "policies.yaml")
+    environment = FakeMCPEnvironment(
+        workspace_root=workspace,
+        memory_db_path=workspace / ".memory.sqlite3",
+    )
+    runner = JobRunner(registry=registry, policy=policy, router=environment.build_router())
+    spec = JobSpec(
+        request_text="Create feature with tests",
+        repo_path=str(workspace),
+        target_branch="acos/split-generation-test",
+        metadata={"constraints": {"skip_review": True, "skip_release": True}},
+    )
+
+    record = runner.run_job(spec)
+
+    assert record.status.value == "done"
+    assert record.outputs["test_run"]["success"] is True
+    assert record.outputs["implementation_task_count"] == 2
+    assert record.outputs["test_writer_task_count"] == 2
+    assert [item["task"]["id"] for item in record.outputs["implementation_tasks"]] == [
+        "task-1",
+        "task-2",
+    ]
+    assert record.outputs["implementation"]["changed_files"] == ["feature.py"]
+    assert "def double" in (workspace / "feature.py").read_text(encoding="utf-8")
+
+
+def test_job_runner_tests_each_autonomous_stage(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    registry = ModelRegistry.from_paths(
+        provider_path=config_dir() / "model_providers.yaml",
+        agents_path=config_dir() / "agents.yaml",
+        routing_path=config_dir() / "model_routing.yaml",
+    )
+    attach_mock_adapter(
+        registry,
+        {
+            "pm": PRD(title="Feature", problem_statement="Need feature").model_dump(),
+            "architect": ArchitecturePlan(summary="Simple architecture").model_dump(),
+            "planner": TaskGraph(
+                goal="Build feature incrementally",
+                tasks=[
+                    PlannedTask(
+                        id="core",
+                        title="Create core helper",
+                        description="Create the smallest working helper.",
+                        role="implementer",
+                    ),
+                    PlannedTask(
+                        id="core-tests",
+                        title="Test core helper",
+                        description="Test the smallest working helper.",
+                        role="test_writer",
+                        depends_on=["core"],
+                    ),
+                    PlannedTask(
+                        id="extra",
+                        title="Add extra helper",
+                        description="Add one more helper after the core passes.",
+                        role="implementer",
+                        depends_on=["core-tests"],
+                    ),
+                    PlannedTask(
+                        id="extra-tests",
+                        title="Test extra helper",
+                        description="Test the added helper.",
+                        role="test_writer",
+                        depends_on=["extra"],
+                    ),
+                ],
+            ).model_dump(),
+            "implementer": [
+                ImplementationResult(
+                    status=ImplementationStatus.IMPLEMENTED,
+                    summary="Created core helper",
+                    patches=[
+                        {
+                            "path": "feature.py",
+                            "content": "def add_one(value: int) -> int:\n    return value + 1\n",
+                            "operation": "create",
+                        }
+                    ],
+                ).model_dump(),
+                ImplementationResult(
+                    status=ImplementationStatus.IMPLEMENTED,
+                    summary="Added extra helper",
+                    patches=[
+                        {
+                            "path": "feature.py",
+                            "content": (
+                                "def add_one(value: int) -> int:\n"
+                                "    return value + 1\n\n\n"
+                                "def double(value: int) -> int:\n"
+                                "    return value * 2\n"
+                            ),
+                            "operation": "update",
+                        }
+                    ],
+                ).model_dump(),
+            ],
+            "test_writer": [
+                TestWriterOutput(
+                    summary="Add core tests",
+                    patches=[
+                        {
+                            "path": "tests/test_feature.py",
+                            "content": (
+                                "from feature import add_one\n\n\n"
+                                "def test_add_one() -> None:\n"
+                                "    assert add_one(2) == 3\n"
+                            ),
+                            "operation": "create",
+                        }
+                    ],
+                ).model_dump(),
+                TestWriterOutput(
+                    summary="Add extra tests",
+                    patches=[
+                        {
+                            "path": "tests/test_feature.py",
+                            "content": (
+                                "from feature import add_one, double\n\n\n"
+                                "def test_add_one() -> None:\n"
+                                "    assert add_one(2) == 3\n\n\n"
+                                "def test_double() -> None:\n"
+                                "    assert double(4) == 8\n"
+                            ),
+                            "operation": "update",
+                        }
+                    ],
+                ).model_dump(),
+            ],
+        },
+    )
+    policy = PolicyEngine.from_path(config_dir() / "policies.yaml")
+    environment = FakeMCPEnvironment(
+        workspace_root=workspace,
+        memory_db_path=workspace / ".memory.sqlite3",
+    )
+    runner = JobRunner(registry=registry, policy=policy, router=environment.build_router())
+    spec = JobSpec(
+        request_text="Create feature with tests",
+        repo_path=str(workspace),
+        target_branch="acos/autonomous-stage-test",
+        metadata={"constraints": {"skip_review": True, "skip_release": True}},
+    )
+
+    record = runner.run_job(spec)
+
+    assert record.status.value == "done"
+    assert record.outputs["implementation_task_count"] == 2
+    assert record.outputs["test_writer_task_count"] == 2
+    assert record.outputs["autonomous_stages"][0]["change_summary"]["changed_files"] == [
+        "feature.py",
+        "tests/test_feature.py",
+    ]
+    assert record.outputs["autonomous_stages"][0]["change_summary"]["patch_count"] == 2
+    stage_test_runs = [
+        stage["test_run"]
+        for stage in record.outputs["autonomous_stages"]
+        if stage["test_run"] is not None
+    ]
+    assert len(stage_test_runs) == 2
+    assert all(stage["success"] for stage in stage_test_runs)
+
+
+def test_job_runner_synthesizes_stage_tests_when_planner_omits_test_tasks(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    registry = ModelRegistry.from_paths(
+        provider_path=config_dir() / "model_providers.yaml",
+        agents_path=config_dir() / "agents.yaml",
+        routing_path=config_dir() / "model_routing.yaml",
+    )
+    attach_mock_adapter(
+        registry,
+        {
+            "pm": PRD(title="Feature", problem_statement="Need feature").model_dump(),
+            "architect": ArchitecturePlan(summary="Simple architecture").model_dump(),
+            "planner": TaskGraph(
+                goal="Build feature incrementally",
+                tasks=[
+                    PlannedTask(
+                        id="core",
+                        title="Create core helper",
+                        description="Create the smallest working helper.",
+                        role="implementer",
+                    ),
+                    PlannedTask(
+                        id="extra",
+                        title="Add extra helper",
+                        description="Add one more helper after the core passes.",
+                        role="implementer",
+                        depends_on=["core"],
+                    ),
+                ],
+            ).model_dump(),
+            "implementer": [
+                ImplementationResult(
+                    status=ImplementationStatus.IMPLEMENTED,
+                    summary="Created core helper",
+                    patches=[
+                        {
+                            "path": "feature.py",
+                            "content": "def add_one(value: int) -> int:\n    return value + 1\n",
+                            "operation": "create",
+                        }
+                    ],
+                ).model_dump(),
+                ImplementationResult(
+                    status=ImplementationStatus.IMPLEMENTED,
+                    summary="Added extra helper",
+                    patches=[
+                        {
+                            "path": "feature.py",
+                            "content": (
+                                "def add_one(value: int) -> int:\n"
+                                "    return value + 1\n\n\n"
+                                "def double(value: int) -> int:\n"
+                                "    return value * 2\n"
+                            ),
+                            "operation": "update",
+                        }
+                    ],
+                ).model_dump(),
+            ],
+            "test_writer": [
+                TestWriterOutput(
+                    summary="Add synthesized core tests",
+                    patches=[
+                        {
+                            "path": "tests/test_feature.py",
+                            "content": (
+                                "from feature import add_one\n\n\n"
+                                "def test_add_one() -> None:\n"
+                                "    assert add_one(2) == 3\n"
+                            ),
+                            "operation": "create",
+                        }
+                    ],
+                ).model_dump(),
+                TestWriterOutput(
+                    summary="Add synthesized extra tests",
+                    patches=[
+                        {
+                            "path": "tests/test_feature.py",
+                            "content": (
+                                "from feature import add_one, double\n\n\n"
+                                "def test_add_one() -> None:\n"
+                                "    assert add_one(2) == 3\n\n\n"
+                                "def test_double() -> None:\n"
+                                "    assert double(4) == 8\n"
+                            ),
+                            "operation": "update",
+                        }
+                    ],
+                ).model_dump(),
+            ],
+        },
+    )
+    policy = PolicyEngine.from_path(config_dir() / "policies.yaml")
+    environment = FakeMCPEnvironment(
+        workspace_root=workspace,
+        memory_db_path=workspace / ".memory.sqlite3",
+    )
+    runner = JobRunner(registry=registry, policy=policy, router=environment.build_router())
+    spec = JobSpec(
+        request_text="Create feature with tests",
+        repo_path=str(workspace),
+        target_branch="acos/synthesized-stage-tests",
+        metadata={"constraints": {"skip_review": True, "skip_release": True}},
+    )
+
+    record = runner.run_job(spec)
+
+    assert record.status.value == "done"
+    assert record.outputs["implementation_task_count"] == 2
+    assert record.outputs["test_writer_task_count"] == 2
+    assert [stage["test_run"]["success"] for stage in record.outputs["autonomous_stages"]] == [
+        True,
+        True,
+    ]
+    assert [
+        item["task"]["id"] for item in record.outputs["test_writer_tasks"]
+    ] == ["core", "extra"]
+
+
+def test_job_runner_refines_coarse_task_graph_from_pm_small_parts(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    registry = ModelRegistry.from_paths(
+        provider_path=config_dir() / "model_providers.yaml",
+        agents_path=config_dir() / "agents.yaml",
+        routing_path=config_dir() / "model_routing.yaml",
+    )
+    attach_mock_adapter(
+        registry,
+        {
+            "pm": PRD(
+                title="Feature",
+                problem_statement="Need feature",
+                small_parts=["Create add_one helper", "Create double helper"],
+                acceptance_tests=[
+                    "add_one(2) returns 3",
+                    "double(4) returns 8",
+                ],
+            ).model_dump(),
+            "architect": ArchitecturePlan(summary="Simple architecture").model_dump(),
+            "planner": TaskGraph(
+                goal="Build all helpers",
+                tasks=[
+                    PlannedTask(
+                        id="build-everything",
+                        title="Build all helpers",
+                        description="Implement all helpers in one pass.",
+                        role="implementer",
+                        complexity="high",
+                    )
+                ],
+            ).model_dump(),
+            "implementer": [
+                ImplementationResult(
+                    status=ImplementationStatus.IMPLEMENTED,
+                    summary="Created add_one helper",
+                    patches=[
+                        {
+                            "path": "feature.py",
+                            "content": "def add_one(value: int) -> int:\n    return value + 1\n",
+                            "operation": "create",
+                        }
+                    ],
+                ).model_dump(),
+                ImplementationResult(
+                    status=ImplementationStatus.IMPLEMENTED,
+                    summary="Created double helper",
+                    patches=[
+                        {
+                            "path": "feature.py",
+                            "content": (
+                                "def add_one(value: int) -> int:\n"
+                                "    return value + 1\n\n\n"
+                                "def double(value: int) -> int:\n"
+                                "    return value * 2\n"
+                            ),
+                            "operation": "update",
+                        }
+                    ],
+                ).model_dump(),
+            ],
+            "test_writer": [
+                TestWriterOutput(
+                    summary="Add add_one tests",
+                    patches=[
+                        {
+                            "path": "tests/test_feature.py",
+                            "content": (
+                                "from feature import add_one\n\n\n"
+                                "def test_add_one() -> None:\n"
+                                "    assert add_one(2) == 3\n"
+                            ),
+                            "operation": "create",
+                        }
+                    ],
+                ).model_dump(),
+                TestWriterOutput(
+                    summary="Add double tests",
+                    patches=[
+                        {
+                            "path": "tests/test_feature.py",
+                            "content": (
+                                "from feature import add_one, double\n\n\n"
+                                "def test_add_one() -> None:\n"
+                                "    assert add_one(2) == 3\n\n\n"
+                                "def test_double() -> None:\n"
+                                "    assert double(4) == 8\n"
+                            ),
+                            "operation": "update",
+                        }
+                    ],
+                ).model_dump(),
+            ],
+        },
+    )
+    policy = PolicyEngine.from_path(config_dir() / "policies.yaml")
+    environment = FakeMCPEnvironment(
+        workspace_root=workspace,
+        memory_db_path=workspace / ".memory.sqlite3",
+    )
+    runner = JobRunner(registry=registry, policy=policy, router=environment.build_router())
+    spec = JobSpec(
+        request_text="Create feature with tests",
+        repo_path=str(workspace),
+        target_branch="acos/refined-coarse-task-graph",
+        metadata={"constraints": {"skip_review": True, "skip_release": True}},
+    )
+
+    record = runner.run_job(spec)
+
+    assert record.status.value == "done"
+    assert record.outputs["task_graph_refinement"]["applied"] is True
+    assert record.outputs["task_graph_refinement"]["original_task_count"] == 1
+    assert record.outputs["implementation_task_count"] == 2
+    assert record.outputs["task_graph_validation"]["small_part_coverage"] == [
+        {
+            "small_part_index": 1,
+            "small_part": "Create add_one helper",
+            "task_id": "part-01",
+            "covered": True,
+        },
+        {
+            "small_part_index": 2,
+            "small_part": "Create double helper",
+            "task_id": "part-02",
+            "covered": True,
+        },
+    ]
+    assert record.outputs["task_graph_validation"]["acceptance_test_coverage"] == [
+        {
+            "acceptance_test_index": 1,
+            "acceptance_test": "add_one(2) returns 3",
+            "task_id": "part-01",
+            "covered": True,
+        },
+        {
+            "acceptance_test_index": 2,
+            "acceptance_test": "double(4) returns 8",
+            "task_id": "part-02",
+            "covered": True,
+        },
+    ]
+    assert [item["task"]["id"] for item in record.outputs["implementation_tasks"]] == [
+        "part-01",
+        "part-02",
+    ]
+    assert [stage["test_run"]["success"] for stage in record.outputs["autonomous_stages"]] == [
+        True,
+        True,
+    ]
+
+
+def test_job_runner_plan_job_stops_after_validated_task_graph(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    registry = ModelRegistry.from_paths(
+        provider_path=config_dir() / "model_providers.yaml",
+        agents_path=config_dir() / "agents.yaml",
+        routing_path=config_dir() / "model_routing.yaml",
+    )
+    attach_mock_adapter(
+        registry,
+        {
+            "pm": PRD(
+                title="Feature",
+                problem_statement="Need two helpers",
+                smallest_working_core=["Create add_one helper"],
+                small_parts=["Create add_one helper", "Create double helper"],
+                incremental_milestones=[
+                    "add_one works",
+                    "double works",
+                ],
+                acceptance_tests=[
+                    "add_one(2) returns 3",
+                    "double(4) returns 8",
+                ],
+                definition_of_done=["All generated tests pass"],
+            ).model_dump(),
+            "architect": ArchitecturePlan(summary="Simple architecture").model_dump(),
+            "planner": TaskGraph(
+                goal="Build helpers",
+                tasks=[
+                    PlannedTask(
+                        id="add-one",
+                        title="Create add_one helper",
+                        description="Implement add_one.",
+                        role="implementer",
+                        acceptance_criteria=["add_one(2) returns 3"],
+                    ),
+                    PlannedTask(
+                        id="double",
+                        title="Create double helper",
+                        description="Implement double.",
+                        role="implementer",
+                        depends_on=["add-one"],
+                        acceptance_criteria=["double(4) returns 8"],
+                    ),
+                ],
+            ).model_dump(),
+            "implementer": ImplementationResult(
+                status=ImplementationStatus.IMPLEMENTED,
+                summary="Should not run during planning only.",
+                patches=[
+                    {
+                        "path": "feature.py",
+                        "content": "SHOULD_NOT_EXIST = True\n",
+                        "operation": "create",
+                    }
+                ],
+            ).model_dump(),
+        },
+    )
+    policy = PolicyEngine.from_path(config_dir() / "policies.yaml")
+    environment = FakeMCPEnvironment(
+        workspace_root=workspace,
+        memory_db_path=workspace / ".memory.sqlite3",
+    )
+    runner = JobRunner(registry=registry, policy=policy, router=environment.build_router())
+    spec = JobSpec(
+        request_text="Create feature with tests",
+        repo_path=str(workspace),
+        target_branch="acos/plan-only",
+        metadata={
+            "constraints": {
+                "require_prd_quality": True,
+                "require_task_acceptance_criteria": True,
+            }
+        },
+    )
+
+    record = runner.plan_job(spec)
+
+    assert record.status == JobStatus.PLANNING
+    assert record.last_error is None
+    assert record.outputs["planning_only"] == {
+        "complete": True,
+        "ready_for_implementation": True,
+    }
+    assert record.outputs["prd"]["small_parts"] == [
+        "Create add_one helper",
+        "Create double helper",
+    ]
+    assert record.outputs["task_graph_validation"]["valid"] is True
+    assert "implementation" not in record.outputs
+    assert "implementation_tasks" not in record.outputs
+    assert not (workspace / "feature.py").exists()
+
+
+def test_job_runner_resume_after_plan_job_uses_existing_planning_outputs(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    registry = ModelRegistry.from_paths(
+        provider_path=config_dir() / "model_providers.yaml",
+        agents_path=config_dir() / "agents.yaml",
+        routing_path=config_dir() / "model_routing.yaml",
+    )
+    role_calls = {"pm": 0, "architect": 0, "planner": 0}
+
+    def pm_response(metadata):
+        role_calls["pm"] += 1
+        return PRD(
+            title="Feature",
+            problem_statement="Need feature",
+            smallest_working_core=["Expose a VALUE constant and test it"],
+            small_parts=["Create feature module"],
+            incremental_milestones=["Module exists"],
+            acceptance_tests=["VALUE equals 1"],
+            definition_of_done=["All tests pass"],
+        ).model_dump()
+
+    def architect_response(metadata):
+        role_calls["architect"] += 1
+        return ArchitecturePlan(summary="Simple architecture").model_dump()
+
+    def planner_response(metadata):
+        role_calls["planner"] += 1
+        return TaskGraph(
+            goal="Build feature",
+            tasks=[
+                PlannedTask(
+                    id="core",
+                    title="Build core",
+                    description="Build the smallest feature.",
+                    role="implementer",
+                    acceptance_criteria=["VALUE equals 1"],
+                )
+            ],
+        ).model_dump()
+
+    attach_mock_adapter(
+        registry,
+        {
+            "pm": pm_response,
+            "architect": architect_response,
+            "planner": planner_response,
+            "implementer": ImplementationResult(
+                status=ImplementationStatus.IMPLEMENTED,
+                summary="Create module",
+                patches=[
+                    {
+                        "path": "feature.py",
+                        "content": "VALUE = 1\n",
+                        "operation": "create",
+                    }
+                ],
+            ).model_dump(),
+            "test_writer": TestWriterOutput(
+                summary="Add tests",
+                patches=[
+                    {
+                        "path": "tests/test_feature.py",
+                        "content": (
+                            "from feature import VALUE\n\n\n"
+                            "def test_value() -> None:\n"
+                            "    assert VALUE == 1\n"
+                        ),
+                        "operation": "create",
+                    }
+                ],
+            ).model_dump(),
+        },
+    )
+    policy = PolicyEngine.from_path(config_dir() / "policies.yaml")
+    environment = FakeMCPEnvironment(
+        workspace_root=workspace,
+        memory_db_path=workspace / ".memory.sqlite3",
+    )
+    runner = JobRunner(registry=registry, policy=policy, router=environment.build_router())
+    spec = JobSpec(
+        request_text="Create feature with tests",
+        repo_path=str(workspace),
+        target_branch="acos/plan-then-resume",
+        metadata={
+            "constraints": {
+                "require_prd_quality": True,
+                "require_task_acceptance_criteria": True,
+                "skip_review": True,
+                "skip_release": True,
+            }
+        },
+    )
+
+    planned = runner.plan_job(spec)
+    assert planned.status == JobStatus.PLANNING
+    assert planned.outputs["planning_only"]["complete"] is True
+    planned_job_id = planned.job_id
+
+    resumed = runner.resume_job(planned_job_id)
+
+    assert role_calls == {"pm": 1, "architect": 1, "planner": 1}
+    assert resumed.status == JobStatus.DONE
+    assert resumed.last_error is None
+    assert resumed.outputs["implementation_task_count"] == 1
+    assert resumed.outputs["task_graph_validation"]["valid"] is True
+    assert resumed.outputs["planning_only"]["ready_for_implementation"] is True
+    assert (workspace / "feature.py").read_text(encoding="utf-8") == "VALUE = 1\n"
+
+
+def test_job_runner_enriches_multi_task_graph_with_prd_acceptance_criteria(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    registry = ModelRegistry.from_paths(
+        provider_path=config_dir() / "model_providers.yaml",
+        agents_path=config_dir() / "agents.yaml",
+        routing_path=config_dir() / "model_routing.yaml",
+    )
+    attach_mock_adapter(
+        registry,
+        {
+            "pm": PRD(
+                title="Feature",
+                problem_statement="Need feature",
+                smallest_working_core=["Create add_one helper"],
+                small_parts=["Create add_one helper", "Create double helper"],
+                incremental_milestones=[
+                    "add_one is implemented and tested",
+                    "double is implemented and tested",
+                ],
+                acceptance_tests=[
+                    "add_one(2) returns 3",
+                    "double(4) returns 8",
+                ],
+                definition_of_done=["All generated tests pass"],
+            ).model_dump(),
+            "architect": ArchitecturePlan(summary="Simple architecture").model_dump(),
+            "planner": TaskGraph(
+                goal="Build helpers",
+                tasks=[
+                    PlannedTask(
+                        id="add-one",
+                        title="Create add_one helper",
+                        description="Implement add_one.",
+                        role="implementer",
+                    ),
+                    PlannedTask(
+                        id="double",
+                        title="Create double helper",
+                        description="Implement double.",
+                        role="implementer",
+                        depends_on=["add-one"],
+                    ),
+                ],
+            ).model_dump(),
+            "implementer": [
+                ImplementationResult(
+                    status=ImplementationStatus.IMPLEMENTED,
+                    summary="Created add_one helper",
+                    patches=[
+                        {
+                            "path": "feature.py",
+                            "content": "def add_one(value: int) -> int:\n    return value + 1\n",
+                            "operation": "create",
+                        }
+                    ],
+                ).model_dump(),
+                ImplementationResult(
+                    status=ImplementationStatus.IMPLEMENTED,
+                    summary="Created double helper",
+                    patches=[
+                        {
+                            "path": "feature.py",
+                            "content": (
+                                "def add_one(value: int) -> int:\n"
+                                "    return value + 1\n\n\n"
+                                "def double(value: int) -> int:\n"
+                                "    return value * 2\n"
+                            ),
+                            "operation": "update",
+                        }
+                    ],
+                ).model_dump(),
+            ],
+            "test_writer": [
+                TestWriterOutput(
+                    summary="Add add_one tests",
+                    patches=[
+                        {
+                            "path": "tests/test_feature.py",
+                            "content": (
+                                "from feature import add_one\n\n\n"
+                                "def test_add_one() -> None:\n"
+                                "    assert add_one(2) == 3\n"
+                            ),
+                            "operation": "create",
+                        }
+                    ],
+                ).model_dump(),
+                TestWriterOutput(
+                    summary="Add double tests",
+                    patches=[
+                        {
+                            "path": "tests/test_feature.py",
+                            "content": (
+                                "from feature import add_one, double\n\n\n"
+                                "def test_add_one() -> None:\n"
+                                "    assert add_one(2) == 3\n\n\n"
+                                "def test_double() -> None:\n"
+                                "    assert double(4) == 8\n"
+                            ),
+                            "operation": "update",
+                        }
+                    ],
+                ).model_dump(),
+            ],
+        },
+    )
+    policy = PolicyEngine.from_path(config_dir() / "policies.yaml")
+    environment = FakeMCPEnvironment(
+        workspace_root=workspace,
+        memory_db_path=workspace / ".memory.sqlite3",
+    )
+    runner = JobRunner(registry=registry, policy=policy, router=environment.build_router())
+    spec = JobSpec(
+        request_text="Create feature with tests",
+        repo_path=str(workspace),
+        target_branch="acos/enriched-task-criteria",
+        metadata={"constraints": {"skip_review": True, "skip_release": True}},
+    )
+
+    record = runner.run_job(spec)
+
+    assert record.status == JobStatus.DONE
+    assert record.outputs["task_graph_acceptance_enrichment"] == {
+        "applied": True,
+        "reason": "filled_missing_task_acceptance_criteria_from_prd",
+        "updated_task_ids": ["add-one", "double"],
+    }
+    tasks = record.outputs["task_graph"]["tasks"]
+    assert tasks[0]["acceptance_criteria"] == ["add_one(2) returns 3"]
+    assert tasks[1]["acceptance_criteria"] == ["double(4) returns 8"]
+    assert record.outputs["implementation_task_count"] == 2
+
+
+def test_job_runner_preserves_existing_acceptance_criteria_when_enriching_later_tasks(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    registry = ModelRegistry.from_paths(
+        provider_path=config_dir() / "model_providers.yaml",
+        agents_path=config_dir() / "agents.yaml",
+        routing_path=config_dir() / "model_routing.yaml",
+    )
+    attach_mock_adapter(
+        registry,
+        {
+            "pm": PRD(
+                title="Feature",
+                problem_statement="Need feature",
+                smallest_working_core=["Create add_one helper"],
+                small_parts=["Create add_one helper", "Create double helper"],
+                incremental_milestones=[
+                    "add_one is implemented and tested",
+                    "double is implemented and tested",
+                ],
+                acceptance_tests=[
+                    "add_one(2) returns 3",
+                    "double(4) returns 8",
+                ],
+                definition_of_done=["All generated tests pass"],
+            ).model_dump(),
+            "architect": ArchitecturePlan(summary="Simple architecture").model_dump(),
+            "planner": TaskGraph(
+                goal="Build helpers",
+                tasks=[
+                    PlannedTask(
+                        id="add-one",
+                        title="Create add_one helper",
+                        description="Implement add_one.",
+                        role="implementer",
+                        acceptance_criteria=["existing add_one criterion"],
+                    ),
+                    PlannedTask(
+                        id="double",
+                        title="Create double helper",
+                        description="Implement double.",
+                        role="implementer",
+                        depends_on=["add-one"],
+                    ),
+                ],
+            ).model_dump(),
+            "implementer": [
+                ImplementationResult(
+                    status=ImplementationStatus.IMPLEMENTED,
+                    summary="Created add_one helper",
+                    patches=[
+                        {
+                            "path": "feature.py",
+                            "content": "def add_one(value: int) -> int:\n    return value + 1\n",
+                            "operation": "create",
+                        }
+                    ],
+                ).model_dump(),
+                ImplementationResult(
+                    status=ImplementationStatus.IMPLEMENTED,
+                    summary="Created double helper",
+                    patches=[
+                        {
+                            "path": "feature.py",
+                            "content": (
+                                "def add_one(value: int) -> int:\n"
+                                "    return value + 1\n\n\n"
+                                "def double(value: int) -> int:\n"
+                                "    return value * 2\n"
+                            ),
+                            "operation": "update",
+                        }
+                    ],
+                ).model_dump(),
+            ],
+            "test_writer": [
+                TestWriterOutput(
+                    summary="Add add_one tests",
+                    patches=[
+                        {
+                            "path": "tests/test_feature.py",
+                            "content": (
+                                "from feature import add_one\n\n\n"
+                                "def test_add_one() -> None:\n"
+                                "    assert add_one(2) == 3\n"
+                            ),
+                            "operation": "create",
+                        }
+                    ],
+                ).model_dump(),
+                TestWriterOutput(
+                    summary="Add double tests",
+                    patches=[
+                        {
+                            "path": "tests/test_feature.py",
+                            "content": (
+                                "from feature import add_one, double\n\n\n"
+                                "def test_add_one() -> None:\n"
+                                "    assert add_one(2) == 3\n\n\n"
+                                "def test_double() -> None:\n"
+                                "    assert double(4) == 8\n"
+                            ),
+                            "operation": "update",
+                        }
+                    ],
+                ).model_dump(),
+            ],
+        },
+    )
+    policy = PolicyEngine.from_path(config_dir() / "policies.yaml")
+    environment = FakeMCPEnvironment(
+        workspace_root=workspace,
+        memory_db_path=workspace / ".memory.sqlite3",
+    )
+    runner = JobRunner(registry=registry, policy=policy, router=environment.build_router())
+    spec = JobSpec(
+        request_text="Create feature with tests",
+        repo_path=str(workspace),
+        target_branch="acos/enriched-mixed-task-criteria",
+        metadata={"constraints": {"skip_review": True, "skip_release": True}},
+    )
+
+    record = runner.run_job(spec)
+
+    assert record.status == JobStatus.DONE
+    assert record.outputs["task_graph_acceptance_enrichment"]["updated_task_ids"] == ["double"]
+    tasks = record.outputs["task_graph"]["tasks"]
+    assert tasks[0]["acceptance_criteria"] == ["existing add_one criterion"]
+    assert tasks[1]["acceptance_criteria"] == ["double(4) returns 8"]
+
+
+def test_job_runner_strict_task_acceptance_criteria_uses_prd_sources(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    registry = ModelRegistry.from_paths(
+        provider_path=config_dir() / "model_providers.yaml",
+        agents_path=config_dir() / "agents.yaml",
+        routing_path=config_dir() / "model_routing.yaml",
+    )
+    attach_mock_adapter(
+        registry,
+        {
+            "pm": PRD(
+                title="Feature",
+                problem_statement="Need feature",
+                small_parts=["Create feature module"],
+                acceptance_tests=["VALUE equals 1"],
+            ).model_dump(),
+            "architect": ArchitecturePlan(summary="Simple architecture").model_dump(),
+            "planner": TaskGraph(
+                goal="Build feature",
+                tasks=[
+                    PlannedTask(
+                        id="core",
+                        title="Build core",
+                        description="Build the smallest feature.",
+                        role="implementer",
+                    )
+                ],
+            ).model_dump(),
+            "implementer": ImplementationResult(
+                status=ImplementationStatus.IMPLEMENTED,
+                summary="Create module",
+                patches=[
+                    {
+                        "path": "feature.py",
+                        "content": "VALUE = 1\n",
+                        "operation": "create",
+                    }
+                ],
+            ).model_dump(),
+            "test_writer": TestWriterOutput(
+                summary="Add tests",
+                patches=[
+                    {
+                        "path": "tests/test_feature.py",
+                        "content": (
+                            "from feature import VALUE\n\n\n"
+                            "def test_value() -> None:\n"
+                            "    assert VALUE == 1\n"
+                        ),
+                        "operation": "create",
+                    }
+                ],
+            ).model_dump(),
+        },
+    )
+    policy = PolicyEngine.from_path(config_dir() / "policies.yaml")
+    environment = FakeMCPEnvironment(
+        workspace_root=workspace,
+        memory_db_path=workspace / ".memory.sqlite3",
+    )
+    runner = JobRunner(registry=registry, policy=policy, router=environment.build_router())
+    spec = JobSpec(
+        request_text="Create feature with tests",
+        repo_path=str(workspace),
+        target_branch="acos/strict-task-criteria-from-prd",
+        metadata={
+            "constraints": {
+                "require_task_acceptance_criteria": True,
+                "skip_review": True,
+                "skip_release": True,
+            }
+        },
+    )
+
+    record = runner.run_job(spec)
+
+    assert record.status == JobStatus.DONE
+    assert record.outputs["task_graph_validation"]["valid"] is True
+    assert record.outputs["task_graph_validation"]["require_acceptance_criteria"] is True
+    assert record.outputs["task_graph_validation"][
+        "implementation_task_acceptance_criteria_count"
+    ] == 1
+    assert record.outputs["task_graph"]["tasks"][0]["acceptance_criteria"] == ["VALUE equals 1"]
+    assert (workspace / "feature.py").exists()
+
+
+def test_job_runner_blocks_strict_task_without_acceptance_criteria_before_implementation(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    registry = ModelRegistry.from_paths(
+        provider_path=config_dir() / "model_providers.yaml",
+        agents_path=config_dir() / "agents.yaml",
+        routing_path=config_dir() / "model_routing.yaml",
+    )
+    attach_mock_adapter(
+        registry,
+        {
+            "pm": PRD(
+                title="Feature",
+                problem_statement="Need feature",
+                small_parts=["Create feature module"],
+            ).model_dump(),
+            "architect": ArchitecturePlan(summary="Simple architecture").model_dump(),
+            "planner": TaskGraph(
+                goal="Build feature",
+                tasks=[
+                    PlannedTask(
+                        id="core",
+                        title="Build core",
+                        description="Build the smallest feature.",
+                        role="implementer",
+                    )
+                ],
+            ).model_dump(),
+            "implementer": ImplementationResult(
+                status=ImplementationStatus.IMPLEMENTED,
+                summary="Should not run",
+                patches=[
+                    {
+                        "path": "feature.py",
+                        "content": "SHOULD_NOT_EXIST = True\n",
+                        "operation": "create",
+                    }
+                ],
+            ).model_dump(),
+        },
+    )
+    policy = PolicyEngine.from_path(config_dir() / "policies.yaml")
+    environment = FakeMCPEnvironment(
+        workspace_root=workspace,
+        memory_db_path=workspace / ".memory.sqlite3",
+    )
+    runner = JobRunner(registry=registry, policy=policy, router=environment.build_router())
+    spec = JobSpec(
+        request_text="Create feature with tests",
+        repo_path=str(workspace),
+        target_branch="acos/strict-task-criteria-blocked",
+        metadata={
+            "constraints": {
+                "require_task_acceptance_criteria": True,
+                "skip_review": True,
+                "skip_release": True,
+                "task_graph_validation_refinement_attempts": 0,
+            }
+        },
+    )
+
+    record = runner.run_job(spec)
+
+    assert record.status == JobStatus.BLOCKED
+    assert record.last_error == "invalid_task_graph"
+    validation = record.outputs["task_graph_validation"]
+    assert validation["valid"] is False
+    assert validation["require_acceptance_criteria"] is True
+    assert validation["implementation_task_acceptance_criteria_count"] == 0
+    assert validation["errors"] == [
+        {"type": "missing_acceptance_criteria", "task_ids": ["core"]}
+    ]
+    assert not (workspace / "feature.py").exists()
+
+
+def test_job_runner_stops_when_implementation_reports_blocked(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    registry = ModelRegistry.from_paths(
+        provider_path=config_dir() / "model_providers.yaml",
+        agents_path=config_dir() / "agents.yaml",
+        routing_path=config_dir() / "model_routing.yaml",
+    )
+    attach_mock_adapter(
+        registry,
+        {
+            "pm": PRD(title="Feature", problem_statement="Need feature").model_dump(),
+            "architect": ArchitecturePlan(summary="Simple architecture").model_dump(),
+            "planner": TaskGraph(
+                goal="Build feature",
+                tasks=[
+                    PlannedTask(
+                        id="core",
+                        title="Build core",
+                        description="Build the smallest feature.",
+                        role="implementer",
+                    )
+                ],
+            ).model_dump(),
+            "implementer": ImplementationResult(
+                status=ImplementationStatus.BLOCKED,
+                summary="Need missing credentials before coding.",
+                patches=[
+                    {
+                        "path": "feature.py",
+                        "content": "SHOULD_NOT_EXIST = True\n",
+                        "operation": "create",
+                    }
+                ],
+            ).model_dump(),
+            "test_writer": TestWriterOutput(
+                summary="Should not run",
+                patches=[
+                    {
+                        "path": "tests/test_feature.py",
+                        "content": "def test_placeholder() -> None:\n    assert True\n",
+                        "operation": "create",
+                    }
+                ],
+            ).model_dump(),
+        },
+    )
+    policy = PolicyEngine.from_path(config_dir() / "policies.yaml")
+    environment = FakeMCPEnvironment(
+        workspace_root=workspace,
+        memory_db_path=workspace / ".memory.sqlite3",
+    )
+    runner = JobRunner(registry=registry, policy=policy, router=environment.build_router())
+    spec = JobSpec(
+        request_text="Create feature with tests",
+        repo_path=str(workspace),
+        target_branch="acos/implementation-blocked",
+        metadata={"constraints": {"skip_review": True, "skip_release": True}},
+    )
+
+    record = runner.run_job(spec)
+
+    assert record.status == JobStatus.BLOCKED
+    assert record.last_error == "implementation_blocked:core"
+    assert record.outputs["implementation_tasks"][0]["result"]["status"] == "blocked"
+    assert "test_writer_tasks" not in record.outputs
+    assert "test_run" not in record.outputs
+    assert not (workspace / "feature.py").exists()
+    assert not (workspace / "tests" / "test_feature.py").exists()
+
+
+def test_job_runner_fails_when_implementation_reports_failed(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    registry = ModelRegistry.from_paths(
+        provider_path=config_dir() / "model_providers.yaml",
+        agents_path=config_dir() / "agents.yaml",
+        routing_path=config_dir() / "model_routing.yaml",
+    )
+    attach_mock_adapter(
+        registry,
+        {
+            "pm": PRD(title="Feature", problem_statement="Need feature").model_dump(),
+            "architect": ArchitecturePlan(summary="Simple architecture").model_dump(),
+            "planner": TaskGraph(
+                goal="Build feature",
+                tasks=[
+                    PlannedTask(
+                        id="core",
+                        title="Build core",
+                        description="Build the smallest feature.",
+                        role="implementer",
+                    )
+                ],
+            ).model_dump(),
+            "implementer": ImplementationResult(
+                status=ImplementationStatus.FAILED,
+                summary="Could not produce a coherent patch.",
+                patches=[
+                    {
+                        "path": "feature.py",
+                        "content": "SHOULD_NOT_EXIST = True\n",
+                        "operation": "create",
+                    }
+                ],
+            ).model_dump(),
+            "test_writer": TestWriterOutput(summary="Should not run", patches=[]).model_dump(),
+        },
+    )
+    policy = PolicyEngine.from_path(config_dir() / "policies.yaml")
+    environment = FakeMCPEnvironment(
+        workspace_root=workspace,
+        memory_db_path=workspace / ".memory.sqlite3",
+    )
+    runner = JobRunner(registry=registry, policy=policy, router=environment.build_router())
+    spec = JobSpec(
+        request_text="Create feature with tests",
+        repo_path=str(workspace),
+        target_branch="acos/implementation-failed",
+        metadata={"constraints": {"skip_review": True, "skip_release": True}},
+    )
+
+    record = runner.run_job(spec)
+
+    assert record.status == JobStatus.FAILED
+    assert record.last_error == "implementation_failed:core"
+    assert record.outputs["implementation_tasks"][0]["result"]["status"] == "failed"
+    assert "test_writer_tasks" not in record.outputs
+    assert "test_run" not in record.outputs
+    assert not (workspace / "feature.py").exists()
+
+
+def test_job_runner_stops_when_test_writer_reports_blocked(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    registry = ModelRegistry.from_paths(
+        provider_path=config_dir() / "model_providers.yaml",
+        agents_path=config_dir() / "agents.yaml",
+        routing_path=config_dir() / "model_routing.yaml",
+    )
+    attach_mock_adapter(
+        registry,
+        {
+            "pm": PRD(title="Feature", problem_statement="Need feature").model_dump(),
+            "architect": ArchitecturePlan(summary="Simple architecture").model_dump(),
+            "planner": TaskGraph(
+                goal="Build feature",
+                tasks=[
+                    PlannedTask(
+                        id="core",
+                        title="Build core",
+                        description="Build the smallest feature.",
+                        role="implementer",
+                    )
+                ],
+            ).model_dump(),
+            "implementer": ImplementationResult(
+                status=ImplementationStatus.IMPLEMENTED,
+                summary="Create module",
+                patches=[
+                    {
+                        "path": "feature.py",
+                        "content": "VALUE = 1\n",
+                        "operation": "create",
+                    }
+                ],
+            ).model_dump(),
+            "test_writer": TestWriterOutput(
+                status="blocked",
+                summary="Need acceptance criteria before writing useful tests.",
+                patches=[
+                    {
+                        "path": "tests/test_feature.py",
+                        "content": "SHOULD_NOT_EXIST = True\n",
+                        "operation": "create",
+                    }
+                ],
+            ).model_dump(),
+        },
+    )
+    policy = PolicyEngine.from_path(config_dir() / "policies.yaml")
+    environment = FakeMCPEnvironment(
+        workspace_root=workspace,
+        memory_db_path=workspace / ".memory.sqlite3",
+    )
+    runner = JobRunner(registry=registry, policy=policy, router=environment.build_router())
+    spec = JobSpec(
+        request_text="Create feature with tests",
+        repo_path=str(workspace),
+        target_branch="acos/test-writer-blocked",
+        metadata={"constraints": {"skip_review": True, "skip_release": True}},
+    )
+
+    record = runner.run_job(spec)
+
+    assert record.status == JobStatus.BLOCKED
+    assert record.last_error == "test_writer_blocked:core"
+    assert record.outputs["test_writer_tasks"][0]["result"]["status"] == "blocked"
+    assert (workspace / "feature.py").exists()
+    assert not (workspace / "tests" / "test_feature.py").exists()
+    assert "test_run" not in record.outputs
+
+
+def test_job_runner_fails_when_test_writer_reports_failed(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    registry = ModelRegistry.from_paths(
+        provider_path=config_dir() / "model_providers.yaml",
+        agents_path=config_dir() / "agents.yaml",
+        routing_path=config_dir() / "model_routing.yaml",
+    )
+    attach_mock_adapter(
+        registry,
+        {
+            "pm": PRD(title="Feature", problem_statement="Need feature").model_dump(),
+            "architect": ArchitecturePlan(summary="Simple architecture").model_dump(),
+            "planner": TaskGraph(
+                goal="Build feature",
+                tasks=[
+                    PlannedTask(
+                        id="core",
+                        title="Build core",
+                        description="Build the smallest feature.",
+                        role="implementer",
+                    )
+                ],
+            ).model_dump(),
+            "implementer": ImplementationResult(
+                status=ImplementationStatus.IMPLEMENTED,
+                summary="Create module",
+                patches=[
+                    {
+                        "path": "feature.py",
+                        "content": "VALUE = 1\n",
+                        "operation": "create",
+                    }
+                ],
+            ).model_dump(),
+            "test_writer": TestWriterOutput(
+                status="failed",
+                summary="Could not produce a coherent test patch.",
+                patches=[
+                    {
+                        "path": "tests/test_feature.py",
+                        "content": "SHOULD_NOT_EXIST = True\n",
+                        "operation": "create",
+                    }
+                ],
+            ).model_dump(),
+        },
+    )
+    policy = PolicyEngine.from_path(config_dir() / "policies.yaml")
+    environment = FakeMCPEnvironment(
+        workspace_root=workspace,
+        memory_db_path=workspace / ".memory.sqlite3",
+    )
+    runner = JobRunner(registry=registry, policy=policy, router=environment.build_router())
+    spec = JobSpec(
+        request_text="Create feature with tests",
+        repo_path=str(workspace),
+        target_branch="acos/test-writer-failed",
+        metadata={"constraints": {"skip_review": True, "skip_release": True}},
+    )
+
+    record = runner.run_job(spec)
+
+    assert record.status == JobStatus.FAILED
+    assert record.last_error == "test_writer_failed:core"
+    assert record.outputs["test_writer_tasks"][0]["result"]["status"] == "failed"
+    assert (workspace / "feature.py").exists()
+    assert not (workspace / "tests" / "test_feature.py").exists()
+    assert "test_run" not in record.outputs
+
+
+def test_job_runner_records_completion_integrity_when_all_planned_tasks_finish(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    registry = ModelRegistry.from_paths(
+        provider_path=config_dir() / "model_providers.yaml",
+        agents_path=config_dir() / "agents.yaml",
+        routing_path=config_dir() / "model_routing.yaml",
+    )
+    attach_mock_adapter(
+        registry,
+        {
+            "pm": PRD(title="Feature", problem_statement="Need feature").model_dump(),
+            "architect": ArchitecturePlan(summary="Simple architecture").model_dump(),
+            "planner": TaskGraph(
+                goal="Build feature",
+                tasks=[
+                    PlannedTask(
+                        id="core",
+                        title="Build core",
+                        description="Build the smallest feature.",
+                        role="implementer",
+                        acceptance_criteria=["VALUE equals 1"],
+                    )
+                ],
+            ).model_dump(),
+            "implementer": ImplementationResult(
+                status=ImplementationStatus.IMPLEMENTED,
+                summary="Create module",
+                patches=[
+                    {
+                        "path": "feature.py",
+                        "content": "VALUE = 1\n",
+                        "operation": "create",
+                    }
+                ],
+            ).model_dump(),
+            "test_writer": TestWriterOutput(
+                summary="Add tests",
+                patches=[
+                    {
+                        "path": "tests/test_feature.py",
+                        "content": (
+                            "from feature import VALUE\n\n\n"
+                            "def test_value() -> None:\n"
+                            "    assert VALUE == 1\n"
+                        ),
+                        "operation": "create",
+                    }
+                ],
+            ).model_dump(),
+        },
+    )
+    policy = PolicyEngine.from_path(config_dir() / "policies.yaml")
+    environment = FakeMCPEnvironment(
+        workspace_root=workspace,
+        memory_db_path=workspace / ".memory.sqlite3",
+    )
+    runner = JobRunner(registry=registry, policy=policy, router=environment.build_router())
+    spec = JobSpec(
+        request_text="Create feature with tests",
+        repo_path=str(workspace),
+        target_branch="acos/completion-integrity-pass",
+        metadata={
+            "constraints": {
+                "require_completion_integrity": True,
+                "skip_review": True,
+                "skip_release": True,
+            }
+        },
+    )
+
+    record = runner.run_job(spec)
+
+    assert record.status == JobStatus.DONE
+    assert record.outputs["completion_integrity"] == {
+        "passed": True,
+        "failure_reasons": [],
+        "require_completion_integrity": True,
+        "require_test_evidence": False,
+        "require_stage_test_patches": False,
+        "planned_task_count": 1,
+        "completed_task_count": 1,
+        "planned_task_ids": ["core"],
+        "completed_task_ids": ["core"],
+        "missing_task_ids": [],
+        "test_success": True,
+        "executed_test_count": 1,
+        "stages_missing_test_patches": [],
+    }
+
+
+def test_job_runner_blocks_completion_without_test_evidence(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    registry = ModelRegistry.from_paths(
+        provider_path=config_dir() / "model_providers.yaml",
+        agents_path=config_dir() / "agents.yaml",
+        routing_path=config_dir() / "model_routing.yaml",
+    )
+    attach_mock_adapter(
+        registry,
+        {
+            "pm": PRD(title="Feature", problem_statement="Need feature").model_dump(),
+            "architect": ArchitecturePlan(summary="Simple architecture").model_dump(),
+            "planner": TaskGraph(
+                goal="Build feature",
+                tasks=[
+                    PlannedTask(
+                        id="core",
+                        title="Build core",
+                        description="Build the smallest feature.",
+                        role="implementer",
+                        acceptance_criteria=["VALUE equals 1"],
+                    )
+                ],
+            ).model_dump(),
+            "implementer": ImplementationResult(
+                status=ImplementationStatus.IMPLEMENTED,
+                summary="Create module",
+                patches=[
+                    {
+                        "path": "feature.py",
+                        "content": "VALUE = 1\n",
+                        "operation": "create",
+                    }
+                ],
+            ).model_dump(),
+            "test_writer": TestWriterOutput(summary="No tests added", patches=[]).model_dump(),
+        },
+    )
+    policy = PolicyEngine.from_path(config_dir() / "policies.yaml")
+    environment = FakeMCPEnvironment(
+        workspace_root=workspace,
+        memory_db_path=workspace / ".memory.sqlite3",
+        scripted_test_results=[
+            TestRunResult(
+                success=True,
+                command=["pytest"],
+                output_excerpt="no tests ran in 0.01s",
+                exit_code=0,
+                executed_test_count=0,
+            )
+        ],
+    )
+    runner = JobRunner(registry=registry, policy=policy, router=environment.build_router())
+    spec = JobSpec(
+        request_text="Create feature with tests",
+        repo_path=str(workspace),
+        target_branch="acos/test-evidence-block",
+        metadata={
+            "constraints": {
+                "require_completion_integrity": True,
+                "require_test_evidence": True,
+                "skip_review": True,
+                "skip_release": True,
+            }
+        },
+    )
+
+    record = runner.run_job(spec)
+
+    assert record.status == JobStatus.BLOCKED
+    assert record.last_error == "completion_integrity_failed:missing_test_evidence"
+    assert record.outputs["completion_integrity"]["passed"] is False
+    assert record.outputs["completion_integrity"]["failure_reasons"] == ["missing_test_evidence"]
+    assert record.outputs["completion_integrity"]["executed_test_count"] == 0
+
+
+def test_job_runner_blocks_completion_when_implementation_stage_has_no_test_patch(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    registry = ModelRegistry.from_paths(
+        provider_path=config_dir() / "model_providers.yaml",
+        agents_path=config_dir() / "agents.yaml",
+        routing_path=config_dir() / "model_routing.yaml",
+    )
+    attach_mock_adapter(
+        registry,
+        {
+            "pm": PRD(title="Feature", problem_statement="Need feature").model_dump(),
+            "architect": ArchitecturePlan(summary="Simple architecture").model_dump(),
+            "planner": TaskGraph(
+                goal="Build feature",
+                tasks=[
+                    PlannedTask(
+                        id="core",
+                        title="Build core",
+                        description="Build the smallest feature.",
+                        role="implementer",
+                        acceptance_criteria=["VALUE equals 1"],
+                    )
+                ],
+            ).model_dump(),
+            "implementer": ImplementationResult(
+                status=ImplementationStatus.IMPLEMENTED,
+                summary="Create module",
+                patches=[
+                    {
+                        "path": "feature.py",
+                        "content": "VALUE = 1\n",
+                        "operation": "create",
+                    }
+                ],
+            ).model_dump(),
+            "test_writer": TestWriterOutput(
+                summary="Existing tests are enough",
+                patches=[],
+            ).model_dump(),
+        },
+    )
+    policy = PolicyEngine.from_path(config_dir() / "policies.yaml")
+    environment = FakeMCPEnvironment(
+        workspace_root=workspace,
+        memory_db_path=workspace / ".memory.sqlite3",
+        scripted_test_results=[
+            TestRunResult(
+                success=True,
+                command=["pytest"],
+                output_excerpt="1 passed in 0.01s",
+                exit_code=0,
+                executed_test_count=1,
+            )
+        ],
+    )
+    runner = JobRunner(registry=registry, policy=policy, router=environment.build_router())
+    spec = JobSpec(
+        request_text="Create feature with tests",
+        repo_path=str(workspace),
+        target_branch="acos/stage-test-patch-evidence-block",
+        metadata={
+            "constraints": {
+                "require_completion_integrity": True,
+                "require_test_evidence": True,
+                "require_stage_test_patches": True,
+                "skip_review": True,
+                "skip_release": True,
+            }
+        },
+    )
+
+    record = runner.run_job(spec)
+
+    assert record.status == JobStatus.BLOCKED
+    assert record.last_error == "completion_integrity_failed:missing_stage_test_patches:1"
+    report = record.outputs["completion_integrity"]
+    assert report["passed"] is False
+    assert report["failure_reasons"] == ["missing_stage_test_patches:1"]
+    assert report["executed_test_count"] == 1
+    assert report["stages_missing_test_patches"] == [
+        {
+            "stage": 1,
+            "task_id": "core",
+            "implementation_patch_count": 1,
+            "test_patch_count": 0,
+        }
+    ]
+
+
+def test_job_runner_blocks_unsupported_autonomous_task_role_before_implementation(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    registry = ModelRegistry.from_paths(
+        provider_path=config_dir() / "model_providers.yaml",
+        agents_path=config_dir() / "agents.yaml",
+        routing_path=config_dir() / "model_routing.yaml",
+    )
+    attach_mock_adapter(
+        registry,
+        {
+            "pm": PRD(title="Feature", problem_statement="Need feature").model_dump(),
+            "architect": ArchitecturePlan(summary="Simple architecture").model_dump(),
+            "planner": TaskGraph(
+                goal="Build feature",
+                tasks=[
+                    PlannedTask(
+                        id="core",
+                        title="Build core",
+                        description="Build the smallest feature.",
+                        role="implementer",
+                        acceptance_criteria=["VALUE equals 1"],
+                    ),
+                    PlannedTask(
+                        id="release-notes",
+                        title="Prepare release notes",
+                        description="Document what changed after implementation.",
+                        role="release_manager",
+                        depends_on=["core"],
+                    ),
+                ],
+            ).model_dump(),
+            "implementer": ImplementationResult(
+                status=ImplementationStatus.IMPLEMENTED,
+                summary="Create module",
+                patches=[
+                    {
+                        "path": "feature.py",
+                        "content": "VALUE = 1\n",
+                        "operation": "create",
+                    }
+                ],
+            ).model_dump(),
+            "test_writer": TestWriterOutput(
+                summary="Add tests",
+                patches=[
+                    {
+                        "path": "tests/test_feature.py",
+                        "content": (
+                            "from feature import VALUE\n\n\n"
+                            "def test_value() -> None:\n"
+                            "    assert VALUE == 1\n"
+                        ),
+                        "operation": "create",
+                    }
+                ],
+            ).model_dump(),
+        },
+    )
+    policy = PolicyEngine.from_path(config_dir() / "policies.yaml")
+    environment = FakeMCPEnvironment(
+        workspace_root=workspace,
+        memory_db_path=workspace / ".memory.sqlite3",
+    )
+    runner = JobRunner(registry=registry, policy=policy, router=environment.build_router())
+    spec = JobSpec(
+        request_text="Create feature with tests",
+        repo_path=str(workspace),
+        target_branch="acos/completion-integrity-block",
+        metadata={
+            "constraints": {
+                "require_completion_integrity": True,
+                "skip_review": True,
+                "skip_release": True,
+                "task_graph_validation_refinement_attempts": 0,
+            }
+        },
+    )
+
+    record = runner.run_job(spec)
+
+    assert record.status == JobStatus.BLOCKED
+    assert record.last_error == "invalid_task_graph"
+    validation = record.outputs["task_graph_validation"]
+    assert validation["valid"] is False
+    assert validation["require_executable_task_roles"] is True
+    assert validation["unsupported_task_role_count"] == 1
+    assert validation["errors"] == [
+        {
+            "type": "unsupported_autonomous_task_roles",
+            "items": [{"task_id": "release-notes", "role": "release_manager"}],
+            "allowed_roles": ["architect", "implementer", "test_writer"],
+        }
+    ]
+    assert "completion_integrity" not in record.outputs
+    assert "test_run" not in record.outputs
+    assert not (workspace / "feature.py").exists()
+
+
+def test_job_runner_blocks_invalid_task_graph_before_implementation(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    registry = ModelRegistry.from_paths(
+        provider_path=config_dir() / "model_providers.yaml",
+        agents_path=config_dir() / "agents.yaml",
+        routing_path=config_dir() / "model_routing.yaml",
+    )
+    attach_mock_adapter(
+        registry,
+        {
+            "pm": PRD(title="Feature", problem_statement="Need feature").model_dump(),
+            "architect": ArchitecturePlan(summary="Simple architecture").model_dump(),
+            "planner": TaskGraph(
+                goal="Build invalid graph",
+                tasks=[
+                    PlannedTask(
+                        id="views",
+                        title="Implement views",
+                        description="Build views after models.",
+                        role="implementer",
+                        depends_on=["models"],
+                    )
+                ],
+            ).model_dump(),
+            "implementer": ImplementationResult(
+                status=ImplementationStatus.IMPLEMENTED,
+                summary="Should not run",
+                patches=[
+                    {
+                        "path": "feature.py",
+                        "content": "SHOULD_NOT_EXIST = True\n",
+                        "operation": "create",
+                    }
+                ],
+            ).model_dump(),
+        },
+    )
+    policy = PolicyEngine.from_path(config_dir() / "policies.yaml")
+    environment = FakeMCPEnvironment(
+        workspace_root=workspace,
+        memory_db_path=workspace / ".memory.sqlite3",
+    )
+    runner = JobRunner(registry=registry, policy=policy, router=environment.build_router())
+    spec = JobSpec(
+        request_text="Create feature with tests",
+        repo_path=str(workspace),
+        target_branch="acos/invalid-task-graph",
+        metadata={
+            "constraints": {
+                "skip_review": True,
+                "skip_release": True,
+                "task_graph_validation_refinement_attempts": 0,
+            }
+        },
+    )
+
+    record = runner.run_job(spec)
+
+    assert record.status.value == "blocked"
+    assert record.last_error == "invalid_task_graph"
+    assert record.outputs["task_graph_validation"]["valid"] is False
+    assert record.outputs["task_graph_validation"]["errors"][0]["type"] == "unknown_dependencies"
+    assert not (workspace / "feature.py").exists()
+
+
+def test_job_runner_repairs_invalid_task_graph_before_implementation(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    registry = ModelRegistry.from_paths(
+        provider_path=config_dir() / "model_providers.yaml",
+        agents_path=config_dir() / "agents.yaml",
+        routing_path=config_dir() / "model_routing.yaml",
+    )
+    attach_mock_adapter(
+        registry,
+        {
+            "pm": PRD(title="Feature", problem_statement="Need feature").model_dump(),
+            "architect": ArchitecturePlan(summary="Simple architecture").model_dump(),
+            "planner": [
+                TaskGraph(
+                    goal="Build invalid graph",
+                    tasks=[
+                        PlannedTask(
+                            id="views",
+                            title="Implement views",
+                            description="Build views after models.",
+                            role="implementer",
+                            depends_on=["models"],
+                        )
+                    ],
+                ).model_dump(),
+                TaskGraph(
+                    goal="Build valid graph",
+                    tasks=[
+                        PlannedTask(
+                            id="core",
+                            title="Implement core",
+                            description="Build the smallest working core.",
+                            role="implementer",
+                        )
+                    ],
+                ).model_dump(),
+            ],
+            "implementer": ImplementationResult(
+                status=ImplementationStatus.IMPLEMENTED,
+                summary="Create module",
+                patches=[
+                    {
+                        "path": "feature.py",
+                        "content": "VALUE = 1\n",
+                        "operation": "create",
+                    }
+                ],
+            ).model_dump(),
+            "test_writer": TestWriterOutput(
+                summary="Add tests",
+                patches=[
+                    {
+                        "path": "tests/test_feature.py",
+                        "content": (
+                            "from feature import VALUE\n\n\n"
+                            "def test_value() -> None:\n"
+                            "    assert VALUE == 1\n"
+                        ),
+                        "operation": "create",
+                    }
+                ],
+            ).model_dump(),
+        },
+    )
+    policy = PolicyEngine.from_path(config_dir() / "policies.yaml")
+    environment = FakeMCPEnvironment(
+        workspace_root=workspace,
+        memory_db_path=workspace / ".memory.sqlite3",
+    )
+    runner = JobRunner(registry=registry, policy=policy, router=environment.build_router())
+    spec = JobSpec(
+        request_text="Create feature with tests",
+        repo_path=str(workspace),
+        target_branch="acos/repair-task-graph",
+        metadata={"constraints": {"skip_review": True, "skip_release": True}},
+    )
+
+    record = runner.run_job(spec)
+
+    assert record.status == JobStatus.DONE
+    assert record.outputs["task_graph_validation"]["valid"] is True
+    assert [
+        attempt["valid"] for attempt in record.outputs["task_graph_validation_attempts"]
+    ] == [False, True]
+    assert record.outputs["task_graph_validation_attempts"][0]["errors"][0]["type"] == (
+        "unknown_dependencies"
+    )
+    assert record.outputs["implementation_tasks"][0]["task"]["id"] == "core"
+    assert (workspace / "feature.py").exists()
+
+
+def test_job_runner_resumes_blocked_task_graph_repair(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    registry = ModelRegistry.from_paths(
+        provider_path=config_dir() / "model_providers.yaml",
+        agents_path=config_dir() / "agents.yaml",
+        routing_path=config_dir() / "model_routing.yaml",
+    )
+    invalid_graph = TaskGraph(
+        goal="Build invalid graph",
+        tasks=[
+            PlannedTask(
+                id="views",
+                title="Implement views",
+                description="Build views after models.",
+                role="implementer",
+                depends_on=["models"],
+            )
+        ],
+    ).model_dump()
+    valid_graph = TaskGraph(
+        goal="Build valid graph",
+        tasks=[
+            PlannedTask(
+                id="core",
+                title="Implement core",
+                description="Build the smallest working core.",
+                role="implementer",
+            )
+        ],
+    ).model_dump()
+    attach_mock_adapter(
+        registry,
+        {
+            "pm": PRD(title="Feature", problem_statement="Need feature").model_dump(),
+            "architect": ArchitecturePlan(summary="Simple architecture").model_dump(),
+            "planner": [invalid_graph, invalid_graph, valid_graph],
+            "implementer": ImplementationResult(
+                status=ImplementationStatus.IMPLEMENTED,
+                summary="Create module",
+                patches=[
+                    {
+                        "path": "feature.py",
+                        "content": "VALUE = 1\n",
+                        "operation": "create",
+                    }
+                ],
+            ).model_dump(),
+            "test_writer": TestWriterOutput(
+                summary="Add tests",
+                patches=[
+                    {
+                        "path": "tests/test_feature.py",
+                        "content": (
+                            "from feature import VALUE\n\n\n"
+                            "def test_value() -> None:\n"
+                            "    assert VALUE == 1\n"
+                        ),
+                        "operation": "create",
+                    }
+                ],
+            ).model_dump(),
+        },
+    )
+    policy = PolicyEngine.from_path(config_dir() / "policies.yaml")
+    environment = FakeMCPEnvironment(
+        workspace_root=workspace,
+        memory_db_path=workspace / ".memory.sqlite3",
+    )
+    runner = JobRunner(registry=registry, policy=policy, router=environment.build_router())
+    spec = JobSpec(
+        request_text="Create feature with tests",
+        repo_path=str(workspace),
+        target_branch="acos/resume-task-graph-repair",
+        metadata={"constraints": {"skip_review": True, "skip_release": True}},
+    )
+
+    blocked = runner.run_job(spec)
+
+    assert blocked.status == JobStatus.BLOCKED
+    assert blocked.last_error == "invalid_task_graph"
+    assert blocked.outputs["task_graph_validation"]["valid"] is False
+
+    resumed = runner.resume_job(blocked.job_id)
+
+    assert resumed.status == JobStatus.DONE
+    assert resumed.last_error is None
+    assert resumed.outputs["task_graph_validation"]["valid"] is True
+    assert resumed.outputs["implementation_tasks"][0]["task"]["id"] == "core"
+    assert JobStatus.PLANNING in resumed.history
+    assert (workspace / "feature.py").exists()
+
+
+def test_job_runner_repairs_task_graph_that_under_covers_prd_small_parts(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    registry = ModelRegistry.from_paths(
+        provider_path=config_dir() / "model_providers.yaml",
+        agents_path=config_dir() / "agents.yaml",
+        routing_path=config_dir() / "model_routing.yaml",
+    )
+    attach_mock_adapter(
+        registry,
+        {
+            "pm": PRD(
+                title="Feature",
+                problem_statement="Need three helpers",
+                smallest_working_core=["Create add_one helper"],
+                small_parts=[
+                    "Create add_one helper",
+                    "Create double helper",
+                    "Create triple helper",
+                ],
+                incremental_milestones=[
+                    "add_one works",
+                    "double works",
+                    "triple works",
+                ],
+                acceptance_tests=[
+                    "add_one(2) returns 3",
+                    "double(4) returns 8",
+                    "triple(3) returns 9",
+                ],
+                definition_of_done=["All generated tests pass"],
+            ).model_dump(),
+            "architect": ArchitecturePlan(summary="Simple architecture").model_dump(),
+            "planner": [
+                TaskGraph(
+                    goal="Build only two helpers",
+                    tasks=[
+                        PlannedTask(
+                            id="add-one",
+                            title="Create add_one helper",
+                            description="Implement add_one.",
+                            role="implementer",
+                        ),
+                        PlannedTask(
+                            id="double",
+                            title="Create double helper",
+                            description="Implement double.",
+                            role="implementer",
+                            depends_on=["add-one"],
+                        ),
+                    ],
+                ).model_dump(),
+                TaskGraph(
+                    goal="Build all helpers",
+                    tasks=[
+                        PlannedTask(
+                            id="add-one",
+                            title="Create add_one helper",
+                            description="Implement add_one.",
+                            role="implementer",
+                        ),
+                        PlannedTask(
+                            id="double",
+                            title="Create double helper",
+                            description="Implement double.",
+                            role="implementer",
+                            depends_on=["add-one"],
+                        ),
+                        PlannedTask(
+                            id="triple",
+                            title="Create triple helper",
+                            description="Implement triple.",
+                            role="implementer",
+                            depends_on=["double"],
+                        ),
+                    ],
+                ).model_dump(),
+            ],
+            "implementer": [
+                ImplementationResult(
+                    status=ImplementationStatus.IMPLEMENTED,
+                    summary="Created add_one helper",
+                    patches=[
+                        {
+                            "path": "feature.py",
+                            "content": "def add_one(value: int) -> int:\n    return value + 1\n",
+                            "operation": "create",
+                        }
+                    ],
+                ).model_dump(),
+                ImplementationResult(
+                    status=ImplementationStatus.IMPLEMENTED,
+                    summary="Created double helper",
+                    patches=[
+                        {
+                            "path": "feature.py",
+                            "content": (
+                                "def add_one(value: int) -> int:\n"
+                                "    return value + 1\n\n\n"
+                                "def double(value: int) -> int:\n"
+                                "    return value * 2\n"
+                            ),
+                            "operation": "update",
+                        }
+                    ],
+                ).model_dump(),
+                ImplementationResult(
+                    status=ImplementationStatus.IMPLEMENTED,
+                    summary="Created triple helper",
+                    patches=[
+                        {
+                            "path": "feature.py",
+                            "content": (
+                                "def add_one(value: int) -> int:\n"
+                                "    return value + 1\n\n\n"
+                                "def double(value: int) -> int:\n"
+                                "    return value * 2\n\n\n"
+                                "def triple(value: int) -> int:\n"
+                                "    return value * 3\n"
+                            ),
+                            "operation": "update",
+                        }
+                    ],
+                ).model_dump(),
+            ],
+            "test_writer": [
+                TestWriterOutput(
+                    summary="Add add_one tests",
+                    patches=[
+                        {
+                            "path": "tests/test_feature.py",
+                            "content": (
+                                "from feature import add_one\n\n\n"
+                                "def test_add_one() -> None:\n"
+                                "    assert add_one(2) == 3\n"
+                            ),
+                            "operation": "create",
+                        }
+                    ],
+                ).model_dump(),
+                TestWriterOutput(
+                    summary="Add double tests",
+                    patches=[
+                        {
+                            "path": "tests/test_feature.py",
+                            "content": (
+                                "from feature import add_one, double\n\n\n"
+                                "def test_add_one() -> None:\n"
+                                "    assert add_one(2) == 3\n\n\n"
+                                "def test_double() -> None:\n"
+                                "    assert double(4) == 8\n"
+                            ),
+                            "operation": "update",
+                        }
+                    ],
+                ).model_dump(),
+                TestWriterOutput(
+                    summary="Add triple tests",
+                    patches=[
+                        {
+                            "path": "tests/test_feature.py",
+                            "content": (
+                                "from feature import add_one, double, triple\n\n\n"
+                                "def test_add_one() -> None:\n"
+                                "    assert add_one(2) == 3\n\n\n"
+                                "def test_double() -> None:\n"
+                                "    assert double(4) == 8\n\n\n"
+                                "def test_triple() -> None:\n"
+                                "    assert triple(3) == 9\n"
+                            ),
+                            "operation": "update",
+                        }
+                    ],
+                ).model_dump(),
+            ],
+        },
+    )
+    policy = PolicyEngine.from_path(config_dir() / "policies.yaml")
+    environment = FakeMCPEnvironment(
+        workspace_root=workspace,
+        memory_db_path=workspace / ".memory.sqlite3",
+    )
+    runner = JobRunner(registry=registry, policy=policy, router=environment.build_router())
+    spec = JobSpec(
+        request_text="Create feature with tests",
+        repo_path=str(workspace),
+        target_branch="acos/repair-undercovered-small-parts",
+        metadata={"constraints": {"skip_review": True, "skip_release": True}},
+    )
+
+    record = runner.run_job(spec)
+
+    assert record.status == JobStatus.DONE
+    assert [
+        attempt["valid"] for attempt in record.outputs["task_graph_validation_attempts"]
+    ] == [False, True]
+    assert record.outputs["task_graph_validation_attempts"][0]["errors"][0]["type"] == (
+        "undercovered_small_parts"
+    )
+    assert record.outputs["task_graph_validation_attempts"][0][
+        "uncovered_small_parts"
+    ] == [
+        {
+            "small_part_index": 3,
+            "small_part": "Create triple helper",
+            "task_id": None,
+            "covered": False,
+        }
+    ]
+    assert record.outputs["task_graph_validation"]["small_part_count"] == 3
+    assert record.outputs["task_graph_validation"]["implementation_task_count"] == 3
+    assert record.outputs["task_graph_validation"]["uncovered_small_parts"] == []
+    assert record.outputs["task_graph_validation"]["small_part_coverage"] == [
+        {
+            "small_part_index": 1,
+            "small_part": "Create add_one helper",
+            "task_id": "add-one",
+            "covered": True,
+        },
+        {
+            "small_part_index": 2,
+            "small_part": "Create double helper",
+            "task_id": "double",
+            "covered": True,
+        },
+        {
+            "small_part_index": 3,
+            "small_part": "Create triple helper",
+            "task_id": "triple",
+            "covered": True,
+        },
+    ]
+    assert record.outputs["task_graph_validation"]["uncovered_acceptance_tests"] == []
+    assert record.outputs["task_graph_validation"]["acceptance_test_coverage"] == [
+        {
+            "acceptance_test_index": 1,
+            "acceptance_test": "add_one(2) returns 3",
+            "task_id": "add-one",
+            "covered": True,
+        },
+        {
+            "acceptance_test_index": 2,
+            "acceptance_test": "double(4) returns 8",
+            "task_id": "double",
+            "covered": True,
+        },
+        {
+            "acceptance_test_index": 3,
+            "acceptance_test": "triple(3) returns 9",
+            "task_id": "triple",
+            "covered": True,
+        },
+    ]
+    assert [item["task"]["id"] for item in record.outputs["implementation_tasks"]] == [
+        "add-one",
+        "double",
+        "triple",
+    ]
+
+
+def test_job_runner_blocks_empty_task_graph_before_implementation(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    registry = ModelRegistry.from_paths(
+        provider_path=config_dir() / "model_providers.yaml",
+        agents_path=config_dir() / "agents.yaml",
+        routing_path=config_dir() / "model_routing.yaml",
+    )
+    attach_mock_adapter(
+        registry,
+        {
+            "pm": PRD(title="Feature", problem_statement="Need feature").model_dump(),
+            "architect": ArchitecturePlan(summary="Simple architecture").model_dump(),
+            "planner": TaskGraph(goal="Build nothing", tasks=[]).model_dump(),
+            "implementer": ImplementationResult(
+                status=ImplementationStatus.IMPLEMENTED,
+                summary="Should not run",
+                patches=[
+                    {
+                        "path": "feature.py",
+                        "content": "SHOULD_NOT_EXIST = True\n",
+                        "operation": "create",
+                    }
+                ],
+            ).model_dump(),
+        },
+    )
+    policy = PolicyEngine.from_path(config_dir() / "policies.yaml")
+    environment = FakeMCPEnvironment(
+        workspace_root=workspace,
+        memory_db_path=workspace / ".memory.sqlite3",
+    )
+    runner = JobRunner(registry=registry, policy=policy, router=environment.build_router())
+    spec = JobSpec(
+        request_text="Create feature with tests",
+        repo_path=str(workspace),
+        target_branch="acos/empty-task-graph",
+        metadata={
+            "constraints": {
+                "skip_review": True,
+                "skip_release": True,
+                "task_graph_validation_refinement_attempts": 0,
+            }
+        },
+    )
+
+    record = runner.run_job(spec)
+
+    assert record.status == JobStatus.BLOCKED
+    validation = record.outputs["task_graph_validation"]
+    assert validation["valid"] is False
+    assert validation["implementation_task_count"] == 0
+    assert validation["errors"][0]["type"] == "empty_task_graph"
+    assert not (workspace / "feature.py").exists()
+
+
+def test_job_runner_blocks_task_graph_without_implementation_tasks(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    registry = ModelRegistry.from_paths(
+        provider_path=config_dir() / "model_providers.yaml",
+        agents_path=config_dir() / "agents.yaml",
+        routing_path=config_dir() / "model_routing.yaml",
+    )
+    attach_mock_adapter(
+        registry,
+        {
+            "pm": PRD(title="Feature", problem_statement="Need feature").model_dump(),
+            "architect": ArchitecturePlan(summary="Simple architecture").model_dump(),
+            "planner": TaskGraph(
+                goal="Only test",
+                tasks=[
+                    PlannedTask(
+                        id="tests",
+                        title="Write tests",
+                        description="Write tests without an implementation task.",
+                        role="test_writer",
+                    )
+                ],
+            ).model_dump(),
+            "test_writer": TestWriterOutput(
+                summary="Should not run",
+                patches=[
+                    {
+                        "path": "tests/test_feature.py",
+                        "content": "def test_placeholder() -> None:\n    assert True\n",
+                        "operation": "create",
+                    }
+                ],
+            ).model_dump(),
+        },
+    )
+    policy = PolicyEngine.from_path(config_dir() / "policies.yaml")
+    environment = FakeMCPEnvironment(
+        workspace_root=workspace,
+        memory_db_path=workspace / ".memory.sqlite3",
+    )
+    runner = JobRunner(registry=registry, policy=policy, router=environment.build_router())
+    spec = JobSpec(
+        request_text="Create feature with tests",
+        repo_path=str(workspace),
+        target_branch="acos/no-implementation-task",
+        metadata={
+            "constraints": {
+                "skip_review": True,
+                "skip_release": True,
+                "task_graph_validation_refinement_attempts": 0,
+            }
+        },
+    )
+
+    record = runner.run_job(spec)
+
+    assert record.status == JobStatus.BLOCKED
+    validation = record.outputs["task_graph_validation"]
+    assert validation["valid"] is False
+    assert validation["implementation_task_count"] == 0
+    assert validation["errors"][0]["type"] == "missing_implementation_tasks"
+    assert not (workspace / "tests" / "test_feature.py").exists()
+
+
+def test_job_runner_blocks_dependency_cycle_before_implementation(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    registry = ModelRegistry.from_paths(
+        provider_path=config_dir() / "model_providers.yaml",
+        agents_path=config_dir() / "agents.yaml",
+        routing_path=config_dir() / "model_routing.yaml",
+    )
+    attach_mock_adapter(
+        registry,
+        {
+            "pm": PRD(title="Feature", problem_statement="Need feature").model_dump(),
+            "architect": ArchitecturePlan(summary="Simple architecture").model_dump(),
+            "planner": TaskGraph(
+                goal="Build cyclic graph",
+                tasks=[
+                    PlannedTask(
+                        id="a",
+                        title="A",
+                        description="Build A",
+                        role="implementer",
+                        depends_on=["b"],
+                    ),
+                    PlannedTask(
+                        id="b",
+                        title="B",
+                        description="Build B",
+                        role="implementer",
+                        depends_on=["a"],
+                    ),
+                ],
+            ).model_dump(),
+            "implementer": ImplementationResult(
+                status=ImplementationStatus.IMPLEMENTED,
+                summary="Should not run",
+                patches=[],
+            ).model_dump(),
+        },
+    )
+    policy = PolicyEngine.from_path(config_dir() / "policies.yaml")
+    environment = FakeMCPEnvironment(
+        workspace_root=workspace,
+        memory_db_path=workspace / ".memory.sqlite3",
+    )
+    runner = JobRunner(registry=registry, policy=policy, router=environment.build_router())
+    spec = JobSpec(
+        request_text="Create feature with tests",
+        repo_path=str(workspace),
+        target_branch="acos/cyclic-task-graph",
+        metadata={
+            "constraints": {
+                "skip_review": True,
+                "skip_release": True,
+                "task_graph_validation_refinement_attempts": 0,
+            }
+        },
+    )
+
+    record = runner.run_job(spec)
+
+    assert record.status.value == "blocked"
+    validation = record.outputs["task_graph_validation"]
+    assert validation["valid"] is False
+    assert validation["errors"][0]["type"] == "dependency_cycle"
+    assert validation["errors"][0]["task_ids"] == ["a", "b", "a"]
+
+
+def test_job_runner_blocks_before_exceeding_autonomous_stage_limit(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    registry = ModelRegistry.from_paths(
+        provider_path=config_dir() / "model_providers.yaml",
+        agents_path=config_dir() / "agents.yaml",
+        routing_path=config_dir() / "model_routing.yaml",
+    )
+    attach_mock_adapter(
+        registry,
+        {
+            "pm": PRD(title="Feature", problem_statement="Need feature").model_dump(),
+            "architect": ArchitecturePlan(summary="Simple architecture").model_dump(),
+            "planner": TaskGraph(
+                goal="Build feature incrementally",
+                tasks=[
+                    PlannedTask(
+                        id="core",
+                        title="Create core helper",
+                        description="Create the smallest working helper.",
+                        role="implementer",
+                    ),
+                    PlannedTask(
+                        id="core-tests",
+                        title="Test core helper",
+                        description="Test the smallest working helper.",
+                        role="test_writer",
+                        depends_on=["core"],
+                    ),
+                    PlannedTask(
+                        id="extra",
+                        title="Add extra helper",
+                        description="Add one more helper after the core passes.",
+                        role="implementer",
+                        depends_on=["core-tests"],
+                    ),
+                ],
+            ).model_dump(),
+            "implementer": [
+                ImplementationResult(
+                    status=ImplementationStatus.IMPLEMENTED,
+                    summary="Created core helper",
+                    patches=[
+                        {
+                            "path": "feature.py",
+                            "content": "def add_one(value: int) -> int:\n    return value + 1\n",
+                            "operation": "create",
+                        }
+                    ],
+                ).model_dump(),
+                ImplementationResult(
+                    status=ImplementationStatus.IMPLEMENTED,
+                    summary="Should not run",
+                    patches=[
+                        {
+                            "path": "feature.py",
+                            "content": (
+                                "def add_one(value: int) -> int:\n"
+                                "    return value + 1\n\n\n"
+                                "def double(value: int) -> int:\n"
+                                "    return value * 2\n"
+                            ),
+                            "operation": "update",
+                        }
+                    ],
+                ).model_dump(),
+            ],
+            "test_writer": TestWriterOutput(
+                summary="Add core tests",
+                patches=[
+                    {
+                        "path": "tests/test_feature.py",
+                        "content": (
+                            "from feature import add_one\n\n\n"
+                            "def test_add_one() -> None:\n"
+                            "    assert add_one(2) == 3\n"
+                        ),
+                        "operation": "create",
+                    }
+                ],
+            ).model_dump(),
+        },
+    )
+    policy = PolicyEngine.from_path(config_dir() / "policies.yaml")
+    environment = FakeMCPEnvironment(
+        workspace_root=workspace,
+        memory_db_path=workspace / ".memory.sqlite3",
+    )
+    runner = JobRunner(registry=registry, policy=policy, router=environment.build_router())
+    spec = JobSpec(
+        request_text="Create feature with tests",
+        repo_path=str(workspace),
+        target_branch="acos/stage-limit",
+        metadata={
+            "constraints": {
+                "skip_review": True,
+                "skip_release": True,
+                "max_autonomous_stages": 1,
+            }
+        },
+    )
+
+    record = runner.run_job(spec)
+
+    assert record.status.value == "blocked"
+    assert record.last_error == "autonomous_stage_limit_reached"
+    assert record.outputs["autonomous_stage_limit"]["max_autonomous_stages"] == 1
+    assert len(record.outputs["autonomous_stages"]) == 1
+    assert record.completed_task_ids == ["core", "core-tests"]
+    assert "double" not in (workspace / "feature.py").read_text(encoding="utf-8")
+
+
+def test_job_runner_blocks_oversized_agent_patch_output_before_applying(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    registry = ModelRegistry.from_paths(
+        provider_path=config_dir() / "model_providers.yaml",
+        agents_path=config_dir() / "agents.yaml",
+        routing_path=config_dir() / "model_routing.yaml",
+    )
+    attach_mock_adapter(
+        registry,
+        {
+            "pm": PRD(title="Feature", problem_statement="Need feature").model_dump(),
+            "architect": ArchitecturePlan(summary="Simple architecture").model_dump(),
+            "planner": TaskGraph(
+                goal="Build feature",
+                tasks=[
+                    PlannedTask(
+                        id="core",
+                        title="Create core helper",
+                        description="Create helper files.",
+                        role="implementer",
+                    )
+                ],
+            ).model_dump(),
+            "implementer": ImplementationResult(
+                status=ImplementationStatus.IMPLEMENTED,
+                summary="Create too many files",
+                patches=[
+                    {
+                        "path": "one.py",
+                        "content": "ONE = 1\n",
+                        "operation": "create",
+                    },
+                    {
+                        "path": "two.py",
+                        "content": "TWO = 2\n",
+                        "operation": "create",
+                    },
+                ],
+            ).model_dump(),
+        },
+    )
+    policy = PolicyEngine.from_path(config_dir() / "policies.yaml")
+    environment = FakeMCPEnvironment(
+        workspace_root=workspace,
+        memory_db_path=workspace / ".memory.sqlite3",
+    )
+    runner = JobRunner(registry=registry, policy=policy, router=environment.build_router())
+    spec = JobSpec(
+        request_text="Create feature with tests",
+        repo_path=str(workspace),
+        target_branch="acos/patch-limit",
+        metadata={
+            "constraints": {
+                "skip_review": True,
+                "skip_release": True,
+                "max_patches_per_agent_output": 1,
+            }
+        },
+    )
+
+    record = runner.run_job(spec)
+
+    assert record.status.value == "blocked"
+    assert record.last_error == "patch_limit_exceeded:implementer:2>1"
+    assert not (workspace / "one.py").exists()
+    assert not (workspace / "two.py").exists()
+
+
+def test_job_runner_can_review_and_fix_each_stage_before_completion(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    registry = ModelRegistry.from_paths(
+        provider_path=config_dir() / "model_providers.yaml",
+        agents_path=config_dir() / "agents.yaml",
+        routing_path=config_dir() / "model_routing.yaml",
+    )
+    attach_mock_adapter(
+        registry,
+        {
+            "pm": PRD(title="Feature", problem_statement="Need feature").model_dump(),
+            "architect": ArchitecturePlan(summary="Simple architecture").model_dump(),
+            "planner": TaskGraph(
+                goal="Build feature incrementally",
+                tasks=[
+                    PlannedTask(
+                        id="core",
+                        title="Create core helper",
+                        description="Create the smallest working helper.",
+                        role="implementer",
+                    )
+                ],
+            ).model_dump(),
+            "implementer": ImplementationResult(
+                status=ImplementationStatus.IMPLEMENTED,
+                summary="Created core helper",
+                patches=[
+                    {
+                        "path": "feature.py",
+                        "content": "def add_one(value: int) -> int:\n    return value + 1\n",
+                        "operation": "create",
+                    }
+                ],
+            ).model_dump(),
+            "test_writer": TestWriterOutput(
+                summary="Add core tests",
+                patches=[
+                    {
+                        "path": "tests/test_feature.py",
+                        "content": (
+                            "from feature import add_one\n\n\n"
+                            "def test_add_one() -> None:\n"
+                            "    assert add_one(2) == 3\n"
+                        ),
+                        "operation": "create",
+                    }
+                ],
+            ).model_dump(),
+            "reviewer": [
+                ReviewResult(
+                    decision=ReviewDecision.REQUEST_CHANGES,
+                    summary="Add a docstring before moving on",
+                    findings=[
+                        {
+                            "severity": Severity.LOW,
+                            "title": "Missing docstring",
+                            "description": "Document the helper before the next stage.",
+                        }
+                    ],
+                ).model_dump(),
+                ReviewResult(
+                    decision=ReviewDecision.APPROVE,
+                    summary="Stage is review-clean",
+                ).model_dump(),
+            ],
+            "security_reviewer": [
+                SecurityReviewResult(
+                    decision=ReviewDecision.APPROVE,
+                    summary="Safe",
+                ).model_dump(),
+                SecurityReviewResult(
+                    decision=ReviewDecision.APPROVE,
+                    summary="Still safe",
+                ).model_dump(),
+            ],
+            "fixer": FixResult(
+                status=FixStatus.FIXED,
+                summary="Added docstring",
+                patches=[
+                    {
+                        "path": "feature.py",
+                        "content": (
+                            "def add_one(value: int) -> int:\n"
+                            "    \"\"\"Return value plus one.\"\"\"\n"
+                            "    return value + 1\n"
+                        ),
+                        "operation": "update",
+                    }
+                ],
+            ).model_dump(),
+        },
+    )
+    policy = PolicyEngine.from_path(config_dir() / "policies.yaml")
+    environment = FakeMCPEnvironment(
+        workspace_root=workspace,
+        memory_db_path=workspace / ".memory.sqlite3",
+    )
+    runner = JobRunner(registry=registry, policy=policy, router=environment.build_router())
+    spec = JobSpec(
+        request_text="Create feature with tests",
+        repo_path=str(workspace),
+        target_branch="acos/stage-review-gate",
+        metadata={
+            "constraints": {
+                "skip_review": True,
+                "skip_release": True,
+                "stage_review": True,
+            }
+        },
+    )
+
+    record = runner.run_job(spec)
+
+    assert record.status.value == "done"
+    stage = record.outputs["autonomous_stages"][0]
+    assert stage["stage_review"]["review"]["decision"] == "approve"
+    assert stage["post_review_test_run"]["success"] is True
+    assert record.completed_task_ids == ["core"]
+    assert "Return value plus one." in (workspace / "feature.py").read_text(encoding="utf-8")
+
+
+def test_job_runner_stops_stage_review_when_fixer_reports_failed(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    registry = ModelRegistry.from_paths(
+        provider_path=config_dir() / "model_providers.yaml",
+        agents_path=config_dir() / "agents.yaml",
+        routing_path=config_dir() / "model_routing.yaml",
+    )
+    attach_mock_adapter(
+        registry,
+        {
+            "pm": PRD(title="Feature", problem_statement="Need feature").model_dump(),
+            "architect": ArchitecturePlan(summary="Simple architecture").model_dump(),
+            "planner": TaskGraph(
+                goal="Build feature incrementally",
+                tasks=[
+                    PlannedTask(
+                        id="core",
+                        title="Create core helper",
+                        description="Create the smallest working helper.",
+                        role="implementer",
+                    )
+                ],
+            ).model_dump(),
+            "implementer": ImplementationResult(
+                status=ImplementationStatus.IMPLEMENTED,
+                summary="Created core helper",
+                patches=[
+                    {
+                        "path": "feature.py",
+                        "content": "def add_one(value: int) -> int:\n    return value + 1\n",
+                        "operation": "create",
+                    }
+                ],
+            ).model_dump(),
+            "test_writer": TestWriterOutput(
+                summary="Add core tests",
+                patches=[
+                    {
+                        "path": "tests/test_feature.py",
+                        "content": (
+                            "from feature import add_one\n\n\n"
+                            "def test_add_one() -> None:\n"
+                            "    assert add_one(2) == 3\n"
+                        ),
+                        "operation": "create",
+                    }
+                ],
+            ).model_dump(),
+            "reviewer": ReviewResult(
+                decision=ReviewDecision.REQUEST_CHANGES,
+                summary="Add a docstring before moving on",
+                findings=[
+                    {
+                        "severity": Severity.LOW,
+                        "title": "Missing docstring",
+                        "description": "Document the helper before the next stage.",
+                    }
+                ],
+            ).model_dump(),
+            "security_reviewer": SecurityReviewResult(
+                decision=ReviewDecision.APPROVE,
+                summary="Safe",
+            ).model_dump(),
+            "fixer": FixResult(
+                status=FixStatus.FAILED,
+                summary="Could not address stage review safely.",
+                patches=[
+                    {
+                        "path": "feature.py",
+                        "content": (
+                            "def add_one(value: int) -> int:\n"
+                            "    \"\"\"Return value plus one.\"\"\"\n"
+                            "    return value + 1\n"
+                        ),
+                        "operation": "update",
+                    }
+                ],
+            ).model_dump(),
+        },
+    )
+    policy = PolicyEngine.from_path(config_dir() / "policies.yaml")
+    environment = FakeMCPEnvironment(
+        workspace_root=workspace,
+        memory_db_path=workspace / ".memory.sqlite3",
+    )
+    runner = JobRunner(registry=registry, policy=policy, router=environment.build_router())
+    spec = JobSpec(
+        request_text="Create feature with tests",
+        repo_path=str(workspace),
+        target_branch="acos/stage-review-fixer-failed",
+        metadata={
+            "constraints": {
+                "skip_review": True,
+                "skip_release": True,
+                "stage_review": True,
+            }
+        },
+    )
+
+    record = runner.run_job(spec)
+
+    assert record.status == JobStatus.FAILED
+    assert record.last_error == "fixer_failed:core"
+    stage = record.outputs["autonomous_stages"][0]
+    assert stage["stage_review"]["review"]["decision"] == "request_changes"
+    assert "post_review_test_run" not in stage
+    assert record.completed_task_ids == []
+    assert '"""Return value plus one."""' not in (
+        workspace / "feature.py"
+    ).read_text(encoding="utf-8")
+
+
+def test_job_runner_fails_review_cycle_without_applying_failed_fixer_patch(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    registry = ModelRegistry.from_paths(
+        provider_path=config_dir() / "model_providers.yaml",
+        agents_path=config_dir() / "agents.yaml",
+        routing_path=config_dir() / "model_routing.yaml",
+    )
+    attach_mock_adapter(
+        registry,
+        {
+            "pm": PRD(title="Feature", problem_statement="Need feature").model_dump(),
+            "architect": ArchitecturePlan(summary="Simple architecture").model_dump(),
+            "planner": TaskGraph(
+                goal="Build feature",
+                tasks=[
+                    PlannedTask(
+                        id="core",
+                        title="Create core helper",
+                        description="Create helper.",
+                        role="implementer",
+                    )
+                ],
+            ).model_dump(),
+            "implementer": ImplementationResult(
+                status=ImplementationStatus.IMPLEMENTED,
+                summary="Created core helper",
+                patches=[
+                    {
+                        "path": "feature.py",
+                        "content": "def add_one(value: int) -> int:\n    return value + 1\n",
+                        "operation": "create",
+                    }
+                ],
+            ).model_dump(),
+            "test_writer": TestWriterOutput(
+                summary="Add core tests",
+                patches=[
+                    {
+                        "path": "tests/test_feature.py",
+                        "content": (
+                            "from feature import add_one\n\n\n"
+                            "def test_add_one() -> None:\n"
+                            "    assert add_one(2) == 3\n"
+                        ),
+                        "operation": "create",
+                    }
+                ],
+            ).model_dump(),
+            "reviewer": ReviewResult(
+                decision=ReviewDecision.REQUEST_CHANGES,
+                summary="Add a docstring before release",
+                findings=[
+                    {
+                        "severity": Severity.LOW,
+                        "title": "Missing docstring",
+                        "description": "Document the helper before release.",
+                    }
+                ],
+            ).model_dump(),
+            "security_reviewer": SecurityReviewResult(
+                decision=ReviewDecision.APPROVE,
+                summary="Safe",
+            ).model_dump(),
+            "fixer": FixResult(
+                status=FixStatus.FAILED,
+                summary="Could not address review safely.",
+                patches=[
+                    {
+                        "path": "feature.py",
+                        "content": (
+                            "def add_one(value: int) -> int:\n"
+                            "    \"\"\"Return value plus one.\"\"\"\n"
+                            "    return value + 1\n"
+                        ),
+                        "operation": "update",
+                    }
+                ],
+            ).model_dump(),
+        },
+    )
+    policy = PolicyEngine.from_path(config_dir() / "policies.yaml")
+    environment = FakeMCPEnvironment(
+        workspace_root=workspace,
+        memory_db_path=workspace / ".memory.sqlite3",
+    )
+    runner = JobRunner(registry=registry, policy=policy, router=environment.build_router())
+    spec = JobSpec(
+        request_text="Create feature with tests",
+        repo_path=str(workspace),
+        target_branch="acos/review-fixer-failed",
+    )
+
+    record = runner.run_job(spec)
+
+    assert record.status == JobStatus.FAILED
+    assert record.last_error == "fixer_failed:core"
+    assert '"""Return value plus one."""' not in (
+        workspace / "feature.py"
+    ).read_text(encoding="utf-8")
+
+
+def test_job_runner_persists_autonomous_checkpoints_when_later_stage_gets_stuck(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    registry = ModelRegistry.from_paths(
+        provider_path=config_dir() / "model_providers.yaml",
+        agents_path=config_dir() / "agents.yaml",
+        routing_path=config_dir() / "model_routing.yaml",
+    )
+    attach_mock_adapter(
+        registry,
+        {
+            "pm": PRD(title="Feature", problem_statement="Need feature").model_dump(),
+            "architect": ArchitecturePlan(summary="Simple architecture").model_dump(),
+            "planner": TaskGraph(
+                goal="Build feature incrementally",
+                tasks=[
+                    PlannedTask(
+                        id="core",
+                        title="Create core helper",
+                        description="Create the smallest working helper.",
+                        role="implementer",
+                    ),
+                    PlannedTask(
+                        id="core-tests",
+                        title="Test core helper",
+                        description="Test the smallest working helper.",
+                        role="test_writer",
+                        depends_on=["core"],
+                    ),
+                    PlannedTask(
+                        id="extra",
+                        title="Add extra helper",
+                        description="Add one more helper after the core passes.",
+                        role="implementer",
+                        depends_on=["core-tests"],
+                    ),
+                    PlannedTask(
+                        id="extra-tests",
+                        title="Test extra helper",
+                        description="Test the added helper.",
+                        role="test_writer",
+                        depends_on=["extra"],
+                    ),
+                ],
+            ).model_dump(),
+            "implementer": [
+                ImplementationResult(
+                    status=ImplementationStatus.IMPLEMENTED,
+                    summary="Created core helper",
+                    patches=[
+                        {
+                            "path": "feature.py",
+                            "content": "def add_one(value: int) -> int:\n    return value + 1\n",
+                            "operation": "create",
+                        }
+                    ],
+                ).model_dump(),
+                ImplementationResult(
+                    status=ImplementationStatus.IMPLEMENTED,
+                    summary="Added buggy extra helper",
+                    patches=[
+                        {
+                            "path": "feature.py",
+                            "content": (
+                                "def add_one(value: int) -> int:\n"
+                                "    return value + 1\n\n\n"
+                                "def double(value: int) -> int:\n"
+                                "    return value + 2\n"
+                            ),
+                            "operation": "update",
+                        }
+                    ],
+                ).model_dump(),
+            ],
+            "test_writer": [
+                TestWriterOutput(
+                    summary="Add core tests",
+                    patches=[
+                        {
+                            "path": "tests/test_feature.py",
+                            "content": (
+                                "from feature import add_one\n\n\n"
+                                "def test_add_one() -> None:\n"
+                                "    assert add_one(2) == 3\n"
+                            ),
+                            "operation": "create",
+                        }
+                    ],
+                ).model_dump(),
+                TestWriterOutput(
+                    summary="Add extra tests",
+                    patches=[
+                        {
+                            "path": "tests/test_feature.py",
+                            "content": (
+                                "from feature import add_one, double\n\n\n"
+                                "def test_add_one() -> None:\n"
+                                "    assert add_one(2) == 3\n\n\n"
+                                "def test_double() -> None:\n"
+                                "    assert double(4) == 8\n"
+                            ),
+                            "operation": "update",
+                        }
+                    ],
+                ).model_dump(),
+            ],
+            "fixer": FixResult(
+                status=FixStatus.STUCK,
+                summary="Cannot fix this stage",
+                patches=[],
+            ).model_dump(),
+        },
+    )
+    policy = PolicyEngine.from_path(config_dir() / "policies.yaml")
+    environment = FakeMCPEnvironment(
+        workspace_root=workspace,
+        memory_db_path=workspace / ".memory.sqlite3",
+    )
+    runner = JobRunner(registry=registry, policy=policy, router=environment.build_router())
+    spec = JobSpec(
+        request_text="Create feature with tests",
+        repo_path=str(workspace),
+        target_branch="acos/autonomous-stage-checkpoints",
+        metadata={"constraints": {"skip_review": True, "skip_release": True}},
+    )
+
+    record = runner.run_job(spec)
+
+    assert record.status.value == "stuck"
+    assert record.completed_task_ids == ["core", "core-tests"]
+    assert len(record.outputs["autonomous_stages"]) == 2
+    assert record.outputs["autonomous_stages"][0]["test_run"]["success"] is True
+    assert record.outputs["autonomous_stages"][1]["test_run"]["success"] is False
+    assert [checkpoint["task_id"] for checkpoint in record.checkpoints] == ["core", "extra"]
+    assert [checkpoint["test_success"] for checkpoint in record.checkpoints] == [True, False]
+
+
+def test_job_runner_resume_revalidates_unfinished_failed_stage(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "feature.py").write_text(
+        "def add_one(value: int) -> int:\n"
+        "    return value + 1\n\n\n"
+        "def double(value: int) -> int:\n"
+        "    return value + 2\n",
+        encoding="utf-8",
+    )
+    tests_dir = workspace / "tests"
+    tests_dir.mkdir()
+    (tests_dir / "test_feature.py").write_text(
+        "from feature import add_one, double\n\n\n"
+        "def test_add_one() -> None:\n"
+        "    assert add_one(2) == 3\n\n\n"
+        "def test_double() -> None:\n"
+        "    assert double(4) == 8\n",
+        encoding="utf-8",
+    )
+    registry = ModelRegistry.from_paths(
+        provider_path=config_dir() / "model_providers.yaml",
+        agents_path=config_dir() / "agents.yaml",
+        routing_path=config_dir() / "model_routing.yaml",
+    )
+    task_graph = TaskGraph(
+        goal="Build feature incrementally",
+        tasks=[
+            PlannedTask(
+                id="core",
+                title="Create core helper",
+                description="Create the smallest working helper.",
+                role="implementer",
+            ),
+            PlannedTask(
+                id="core-tests",
+                title="Test core helper",
+                description="Test the smallest working helper.",
+                role="test_writer",
+                depends_on=["core"],
+            ),
+            PlannedTask(
+                id="extra",
+                title="Add extra helper",
+                description="Add one more helper after the core passes.",
+                role="implementer",
+                depends_on=["core-tests"],
+            ),
+            PlannedTask(
+                id="extra-tests",
+                title="Test extra helper",
+                description="Test the added helper.",
+                role="test_writer",
+                depends_on=["extra"],
+            ),
+        ],
+    )
+    attach_mock_adapter(
+        registry,
+        {
+            "test_writer": TestWriterOutput(
+                summary="Refresh extra tests",
+                patches=[
+                    {
+                        "path": "tests/test_feature.py",
+                        "content": (
+                            "from feature import add_one, double\n\n\n"
+                            "def test_add_one() -> None:\n"
+                            "    assert add_one(2) == 3\n\n\n"
+                            "def test_double() -> None:\n"
+                            "    assert double(4) == 8\n"
+                        ),
+                        "operation": "update",
+                    }
+                ],
+            ).model_dump(),
+            "fixer": FixResult(
+                status=FixStatus.FIXED,
+                summary="Fix double helper",
+                patches=[
+                    {
+                        "path": "feature.py",
+                        "content": (
+                            "def add_one(value: int) -> int:\n"
+                            "    return value + 1\n\n\n"
+                            "def double(value: int) -> int:\n"
+                            "    return value * 2\n"
+                        ),
+                        "operation": "update",
+                    }
+                ],
+            ).model_dump(),
+        },
+    )
+    store = InMemoryJobStore()
+    policy = PolicyEngine.from_path(config_dir() / "policies.yaml")
+    environment = FakeMCPEnvironment(
+        workspace_root=workspace,
+        memory_db_path=workspace / ".memory.sqlite3",
+    )
+    runner = JobRunner(
+        registry=registry,
+        policy=policy,
+        router=environment.build_router(),
+        store=store,
+    )
+    spec = JobSpec(
+        job_id="resume-failed-stage",
+        request_text="Create feature with tests",
+        repo_path=str(workspace),
+        target_branch="acos/resume-failed-stage",
+        metadata={"constraints": {"skip_review": True, "skip_release": True}},
+    )
+    record = store.create(spec)
+    record.status = JobStatus.STUCK
+    record.outputs["pm"] = PRD(title="Feature", problem_statement="Need feature").model_dump()
+    record.outputs["architecture"] = ArchitecturePlan(summary="Simple architecture").model_dump()
+    record.outputs["planner"] = task_graph.model_dump()
+    record.outputs["task_graph"] = task_graph.model_dump()
+    record.outputs["implementation_tasks"] = [
+        {
+            "task": task_graph.tasks[0].model_dump(),
+            "result": ImplementationResult(
+                status=ImplementationStatus.IMPLEMENTED,
+                summary="Created core helper",
+            ).model_dump(),
+        },
+        {
+            "task": task_graph.tasks[2].model_dump(),
+            "result": ImplementationResult(
+                status=ImplementationStatus.IMPLEMENTED,
+                summary="Added buggy extra helper",
+            ).model_dump(),
+        },
+    ]
+    record.outputs["test_writer_tasks"] = [
+        {
+            "task": task_graph.tasks[1].model_dump(),
+            "result": TestWriterOutput(summary="Add core tests").model_dump(),
+        },
+        {
+            "task": task_graph.tasks[3].model_dump(),
+            "result": TestWriterOutput(summary="Add extra tests").model_dump(),
+        },
+    ]
+    record.completed_task_ids = ["core", "core-tests"]
+    store.update(record)
+
+    resumed = runner.resume_job("resume-failed-stage")
+
+    assert resumed.status.value == "done"
+    assert resumed.completed_task_ids == ["core", "core-tests", "extra", "extra-tests"]
+    assert resumed.outputs["test_run"]["success"] is True
+    assert "return value * 2" in (workspace / "feature.py").read_text(encoding="utf-8")
+
+
+def test_job_runner_resume_retries_failed_implementation_record(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    registry = ModelRegistry.from_paths(
+        provider_path=config_dir() / "model_providers.yaml",
+        agents_path=config_dir() / "agents.yaml",
+        routing_path=config_dir() / "model_routing.yaml",
+    )
+    task_graph = TaskGraph(
+        goal="Build feature incrementally",
+        tasks=[
+            PlannedTask(
+                id="core",
+                title="Create core helper",
+                description="Create the smallest working helper.",
+                role="implementer",
+            )
+        ],
+    )
+    attach_mock_adapter(
+        registry,
+        {
+            "implementer": ImplementationResult(
+                status=ImplementationStatus.IMPLEMENTED,
+                summary="Created core helper on retry",
+                patches=[
+                    {
+                        "path": "feature.py",
+                        "content": "VALUE = 1\n",
+                        "operation": "create",
+                    }
+                ],
+            ).model_dump(),
+            "test_writer": TestWriterOutput(
+                summary="Add core tests",
+                patches=[
+                    {
+                        "path": "tests/test_feature.py",
+                        "content": (
+                            "from feature import VALUE\n\n\n"
+                            "def test_value() -> None:\n"
+                            "    assert VALUE == 1\n"
+                        ),
+                        "operation": "create",
+                    }
+                ],
+            ).model_dump(),
+        },
+    )
+    store = InMemoryJobStore()
+    policy = PolicyEngine.from_path(config_dir() / "policies.yaml")
+    environment = FakeMCPEnvironment(
+        workspace_root=workspace,
+        memory_db_path=workspace / ".memory.sqlite3",
+    )
+    runner = JobRunner(
+        registry=registry,
+        policy=policy,
+        router=environment.build_router(),
+        store=store,
+    )
+    spec = JobSpec(
+        job_id="resume-failed-implementation",
+        request_text="Create feature with tests",
+        repo_path=str(workspace),
+        target_branch="acos/resume-failed-implementation",
+        metadata={"constraints": {"skip_review": True, "skip_release": True}},
+    )
+    record = store.create(spec)
+    record.status = JobStatus.FAILED
+    record.last_error = "implementation_failed:core"
+    record.outputs["pm"] = PRD(title="Feature", problem_statement="Need feature").model_dump()
+    record.outputs["architecture"] = ArchitecturePlan(summary="Simple architecture").model_dump()
+    record.outputs["planner"] = task_graph.model_dump()
+    record.outputs["task_graph"] = task_graph.model_dump()
+    record.outputs["implementation_tasks"] = [
+        {
+            "task": task_graph.tasks[0].model_dump(),
+            "result": ImplementationResult(
+                status=ImplementationStatus.FAILED,
+                summary="Previous implementation failed",
+            ).model_dump(),
+        }
+    ]
+    store.update(record)
+
+    resumed = runner.resume_job("resume-failed-implementation")
+
+    assert resumed.status == JobStatus.DONE
+    assert resumed.last_error is None
+    assert len(resumed.outputs["implementation_tasks"]) == 2
+    assert resumed.outputs["implementation_tasks"][1]["result"]["status"] == "implemented"
+    assert resumed.outputs["implementation"]["status"] == "implemented"
+    assert resumed.completed_task_ids == ["core"]
+    assert (workspace / "feature.py").read_text(encoding="utf-8") == "VALUE = 1\n"
+
+
+def test_job_runner_resume_retries_failed_test_writer_record(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "feature.py").write_text("VALUE = 1\n", encoding="utf-8")
+    registry = ModelRegistry.from_paths(
+        provider_path=config_dir() / "model_providers.yaml",
+        agents_path=config_dir() / "agents.yaml",
+        routing_path=config_dir() / "model_routing.yaml",
+    )
+    task_graph = TaskGraph(
+        goal="Build feature incrementally",
+        tasks=[
+            PlannedTask(
+                id="core",
+                title="Create core helper",
+                description="Create the smallest working helper.",
+                role="implementer",
+            ),
+            PlannedTask(
+                id="core-tests",
+                title="Test core helper",
+                description="Test the smallest working helper.",
+                role="test_writer",
+                depends_on=["core"],
+            ),
+        ],
+    )
+    attach_mock_adapter(
+        registry,
+        {
+            "test_writer": TestWriterOutput(
+                status=WriterStatus.TESTS_WRITTEN,
+                summary="Added core tests on retry",
+                patches=[
+                    {
+                        "path": "tests/test_feature.py",
+                        "content": (
+                            "from feature import VALUE\n\n\n"
+                            "def test_value() -> None:\n"
+                            "    assert VALUE == 1\n"
+                        ),
+                        "operation": "create",
+                    }
+                ],
+            ).model_dump(),
+        },
+    )
+    store = InMemoryJobStore()
+    policy = PolicyEngine.from_path(config_dir() / "policies.yaml")
+    environment = FakeMCPEnvironment(
+        workspace_root=workspace,
+        memory_db_path=workspace / ".memory.sqlite3",
+    )
+    runner = JobRunner(
+        registry=registry,
+        policy=policy,
+        router=environment.build_router(),
+        store=store,
+    )
+    spec = JobSpec(
+        job_id="resume-failed-test-writer",
+        request_text="Create feature with tests",
+        repo_path=str(workspace),
+        target_branch="acos/resume-failed-test-writer",
+        metadata={"constraints": {"skip_review": True, "skip_release": True}},
+    )
+    record = store.create(spec)
+    record.status = JobStatus.FAILED
+    record.last_error = "test_writer_failed:core-tests"
+    record.outputs["pm"] = PRD(title="Feature", problem_statement="Need feature").model_dump()
+    record.outputs["architecture"] = ArchitecturePlan(summary="Simple architecture").model_dump()
+    record.outputs["planner"] = task_graph.model_dump()
+    record.outputs["task_graph"] = task_graph.model_dump()
+    record.outputs["implementation_tasks"] = [
+        {
+            "task": task_graph.tasks[0].model_dump(),
+            "result": ImplementationResult(
+                status=ImplementationStatus.IMPLEMENTED,
+                summary="Previous implementation succeeded",
+                changed_files=["feature.py"],
+            ).model_dump(),
+        }
+    ]
+    record.outputs["test_writer_tasks"] = [
+        {
+            "task": task_graph.tasks[1].model_dump(),
+            "result": TestWriterOutput(
+                status=WriterStatus.FAILED,
+                summary="Previous test writer failed",
+            ).model_dump(),
+        }
+    ]
+    store.update(record)
+
+    resumed = runner.resume_job("resume-failed-test-writer")
+
+    assert resumed.status == JobStatus.DONE
+    assert resumed.last_error is None
+    assert len(resumed.outputs["test_writer_tasks"]) == 2
+    assert resumed.outputs["test_writer_tasks"][0]["result"]["status"] == "failed"
+    assert resumed.outputs["test_writer_tasks"][1]["result"]["status"] == "tests_written"
+    assert resumed.outputs["test_writer"]["status"] == "tests_written"
+    assert resumed.completed_task_ids == ["core", "core-tests"]
+    assert (workspace / "tests" / "test_feature.py").exists()
+
+
+def test_job_runner_resumes_from_completed_autonomous_tasks(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "feature.py").write_text(
+        "def add_one(value: int) -> int:\n    return value + 1\n",
+        encoding="utf-8",
+    )
+    tests_dir = workspace / "tests"
+    tests_dir.mkdir()
+    (tests_dir / "test_feature.py").write_text(
+        "from feature import add_one\n\n\n"
+        "def test_add_one() -> None:\n"
+        "    assert add_one(2) == 3\n",
+        encoding="utf-8",
+    )
+    registry = ModelRegistry.from_paths(
+        provider_path=config_dir() / "model_providers.yaml",
+        agents_path=config_dir() / "agents.yaml",
+        routing_path=config_dir() / "model_routing.yaml",
+    )
+    task_graph = TaskGraph(
+        goal="Build feature incrementally",
+        tasks=[
+            PlannedTask(
+                id="core",
+                title="Create core helper",
+                description="Create the smallest working helper.",
+                role="implementer",
+            ),
+            PlannedTask(
+                id="core-tests",
+                title="Test core helper",
+                description="Test the smallest working helper.",
+                role="test_writer",
+                depends_on=["core"],
+            ),
+            PlannedTask(
+                id="extra",
+                title="Add extra helper",
+                description="Add one more helper after the core passes.",
+                role="implementer",
+                depends_on=["core-tests"],
+            ),
+            PlannedTask(
+                id="extra-tests",
+                title="Test extra helper",
+                description="Test the added helper.",
+                role="test_writer",
+                depends_on=["extra"],
+            ),
+        ],
+    )
+    attach_mock_adapter(
+        registry,
+        {
+            "implementer": ImplementationResult(
+                status=ImplementationStatus.IMPLEMENTED,
+                summary="Added extra helper",
+                patches=[
+                    {
+                        "path": "feature.py",
+                        "content": (
+                            "def add_one(value: int) -> int:\n"
+                            "    return value + 1\n\n\n"
+                            "def double(value: int) -> int:\n"
+                            "    return value * 2\n"
+                        ),
+                        "operation": "update",
+                    }
+                ],
+            ).model_dump(),
+            "test_writer": TestWriterOutput(
+                summary="Add extra tests",
+                patches=[
+                    {
+                        "path": "tests/test_feature.py",
+                        "content": (
+                            "from feature import add_one, double\n\n\n"
+                            "def test_add_one() -> None:\n"
+                            "    assert add_one(2) == 3\n\n\n"
+                            "def test_double() -> None:\n"
+                            "    assert double(4) == 8\n"
+                        ),
+                        "operation": "update",
+                    }
+                ],
+            ).model_dump(),
+        },
+    )
+    store = InMemoryJobStore()
+    policy = PolicyEngine.from_path(config_dir() / "policies.yaml")
+    environment = FakeMCPEnvironment(
+        workspace_root=workspace,
+        memory_db_path=workspace / ".memory.sqlite3",
+    )
+    runner = JobRunner(
+        registry=registry,
+        policy=policy,
+        router=environment.build_router(),
+        store=store,
+    )
+    spec = JobSpec(
+        job_id="resume-me",
+        request_text="Create feature with tests",
+        repo_path=str(workspace),
+        target_branch="acos/resume-stage-test",
+        metadata={"constraints": {"skip_review": True, "skip_release": True}},
+    )
+    record = store.create(spec)
+    record.status = JobStatus.TESTING
+    record.outputs["pm"] = PRD(title="Feature", problem_statement="Need feature").model_dump()
+    record.outputs["architecture"] = ArchitecturePlan(
+        summary="Simple architecture",
+    ).model_dump()
+    record.outputs["planner"] = task_graph.model_dump()
+    record.outputs["task_graph"] = task_graph.model_dump()
+    record.outputs["implementation_tasks"] = [
+        {
+            "task": task_graph.tasks[0].model_dump(),
+            "result": ImplementationResult(
+                status=ImplementationStatus.IMPLEMENTED,
+                summary="Created core helper",
+            ).model_dump(),
+        }
+    ]
+    record.outputs["test_writer_tasks"] = [
+        {
+            "task": task_graph.tasks[1].model_dump(),
+            "result": TestWriterOutput(summary="Add core tests").model_dump(),
+        }
+    ]
+    record.outputs["autonomous_stages"] = [
+        {
+            "stage": 1,
+            "task": task_graph.tasks[0].model_dump(),
+            "implementation": record.outputs["implementation_tasks"][0]["result"],
+            "test_writer_results": [record.outputs["test_writer_tasks"][0]["result"]],
+            "test_run": {
+                "success": True,
+                "command": ["pytest"],
+                "failed_tests": [],
+                "output_excerpt": "passed",
+                "exit_code": 0,
+            },
+        }
+    ]
+    record.completed_task_ids = ["core", "core-tests"]
+    store.update(record)
+
+    resumed = runner.resume_job("resume-me")
+
+    assert resumed.status.value == "done"
+    assert resumed.completed_task_ids == ["core", "core-tests", "extra", "extra-tests"]
+    assert resumed.outputs["implementation_task_count"] == 2
+    assert resumed.outputs["test_writer_task_count"] == 2
+    assert len(resumed.outputs["autonomous_stages"]) == 2
+    assert "def double" in (workspace / "feature.py").read_text(encoding="utf-8")
+
+
+def test_job_runner_records_prd_quality_report_for_sparse_prd(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    registry = ModelRegistry.from_paths(
+        provider_path=config_dir() / "model_providers.yaml",
+        agents_path=config_dir() / "agents.yaml",
+        routing_path=config_dir() / "model_routing.yaml",
+    )
+    attach_mock_adapter(
+        registry,
+        {
+            "pm": PRD(title="Feature", problem_statement="Need feature").model_dump(),
+            "architect": ArchitecturePlan(summary="Simple architecture").model_dump(),
+            "planner": TaskGraph(
+                goal="Build feature",
+                tasks=[
+                    PlannedTask(
+                        id="core",
+                        title="Build core",
+                        description="Build the smallest feature.",
+                        role="implementer",
+                    )
+                ],
+            ).model_dump(),
+            "implementer": ImplementationResult(
+                status=ImplementationStatus.IMPLEMENTED,
+                summary="Create module",
+                patches=[
+                    {
+                        "path": "feature.py",
+                        "content": "VALUE = 1\n",
+                        "operation": "create",
+                    }
+                ],
+            ).model_dump(),
+            "test_writer": TestWriterOutput(
+                summary="Add tests",
+                patches=[
+                    {
+                        "path": "tests/test_feature.py",
+                        "content": (
+                            "from feature import VALUE\n\n\n"
+                            "def test_value() -> None:\n"
+                            "    assert VALUE == 1\n"
+                        ),
+                        "operation": "create",
+                    }
+                ],
+            ).model_dump(),
+        },
+    )
+    policy = PolicyEngine.from_path(config_dir() / "policies.yaml")
+    environment = FakeMCPEnvironment(
+        workspace_root=workspace,
+        memory_db_path=workspace / ".memory.sqlite3",
+    )
+    runner = JobRunner(registry=registry, policy=policy, router=environment.build_router())
+    spec = JobSpec(
+        request_text="Create feature with tests",
+        repo_path=str(workspace),
+        target_branch="acos/prd-quality-report",
+        metadata={"constraints": {"skip_review": True, "skip_release": True}},
+    )
+
+    record = runner.run_job(spec)
+
+    assert record.status == JobStatus.DONE
+    assert record.outputs["prd_quality"]["passed"] is False
+    assert record.outputs["prd_quality"]["missing"] == [
+        "smallest_working_core",
+        "small_parts",
+        "incremental_milestones",
+        "acceptance_tests",
+        "definition_of_done",
+    ]
+
+
+def test_job_runner_blocks_when_strict_prd_quality_required(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    registry = ModelRegistry.from_paths(
+        provider_path=config_dir() / "model_providers.yaml",
+        agents_path=config_dir() / "agents.yaml",
+        routing_path=config_dir() / "model_routing.yaml",
+    )
+    attach_mock_adapter(
+        registry,
+        {
+            "pm": PRD(title="Feature", problem_statement="Need feature").model_dump(),
+            "architect": ArchitecturePlan(summary="Should not run").model_dump(),
+        },
+    )
+    policy = PolicyEngine.from_path(config_dir() / "policies.yaml")
+    environment = FakeMCPEnvironment(
+        workspace_root=workspace,
+        memory_db_path=workspace / ".memory.sqlite3",
+    )
+    runner = JobRunner(registry=registry, policy=policy, router=environment.build_router())
+    spec = JobSpec(
+        request_text="Create a complex feature",
+        repo_path=str(workspace),
+        target_branch="acos/strict-prd-quality",
+        metadata={"constraints": {"require_prd_quality": True}},
+    )
+
+    record = runner.run_job(spec)
+
+    assert record.status == JobStatus.BLOCKED
+    assert record.last_error == (
+        "prd_quality_gate_failed:"
+        "smallest_working_core,small_parts,incremental_milestones,"
+        "acceptance_tests,definition_of_done"
+    )
+    assert record.outputs["prd_quality"]["passed"] is False
+    assert "architect" not in record.outputs
+
+
+def test_job_runner_refines_sparse_prd_before_implementation_when_required(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    registry = ModelRegistry.from_paths(
+        provider_path=config_dir() / "model_providers.yaml",
+        agents_path=config_dir() / "agents.yaml",
+        routing_path=config_dir() / "model_routing.yaml",
+    )
+    attach_mock_adapter(
+        registry,
+        {
+            "pm": [
+                PRD(title="Feature", problem_statement="Need feature").model_dump(),
+                PRD(
+                    title="Feature",
+                    problem_statement="Need feature",
+                    smallest_working_core=["Expose a VALUE constant and test it"],
+                    small_parts=["Create feature module", "Add focused tests"],
+                    incremental_milestones=[
+                        "Smallest module exists",
+                        "Tests prove observable behavior",
+                    ],
+                    acceptance_tests=[
+                        "VALUE equals 1",
+                        "test_value asserts VALUE equals 1",
+                    ],
+                    definition_of_done=["All tests pass"],
+                ).model_dump(),
+            ],
+            "architect": ArchitecturePlan(summary="Simple architecture").model_dump(),
+            "planner": TaskGraph(
+                goal="Build feature",
+                tasks=[
+                    PlannedTask(
+                        id="core",
+                        title="Build core",
+                        description="Build the smallest feature.",
+                        role="implementer",
+                    )
+                ],
+            ).model_dump(),
+            "implementer": ImplementationResult(
+                status=ImplementationStatus.IMPLEMENTED,
+                summary="Create module",
+                patches=[
+                    {
+                        "path": "feature.py",
+                        "content": "VALUE = 1\n",
+                        "operation": "create",
+                    }
+                ],
+            ).model_dump(),
+            "test_writer": TestWriterOutput(
+                summary="Add tests",
+                patches=[
+                    {
+                        "path": "tests/test_feature.py",
+                        "content": (
+                            "from feature import VALUE\n\n\n"
+                            "def test_value() -> None:\n"
+                            "    assert VALUE == 1\n"
+                        ),
+                        "operation": "create",
+                    }
+                ],
+            ).model_dump(),
+        },
+    )
+    policy = PolicyEngine.from_path(config_dir() / "policies.yaml")
+    environment = FakeMCPEnvironment(
+        workspace_root=workspace,
+        memory_db_path=workspace / ".memory.sqlite3",
+    )
+    runner = JobRunner(registry=registry, policy=policy, router=environment.build_router())
+    spec = JobSpec(
+        request_text="Create a complex feature",
+        repo_path=str(workspace),
+        target_branch="acos/refine-prd-quality",
+        metadata={
+            "constraints": {
+                "require_prd_quality": True,
+                "skip_review": True,
+                "skip_release": True,
+            }
+        },
+    )
+
+    record = runner.run_job(spec)
+
+    assert record.status == JobStatus.DONE
+    assert record.outputs["prd_quality"]["passed"] is True
+    assert [
+        attempt["passed"] for attempt in record.outputs["prd_quality_attempts"]
+    ] == [False, True]
+    assert record.outputs["prd"]["small_parts"] == [
+        "Create feature module",
+        "Add focused tests",
+    ]
+    assert (workspace / "feature.py").exists()
+
+
+def test_job_runner_blocks_prd_quality_when_acceptance_tests_do_not_cover_small_parts(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    registry = ModelRegistry.from_paths(
+        provider_path=config_dir() / "model_providers.yaml",
+        agents_path=config_dir() / "agents.yaml",
+        routing_path=config_dir() / "model_routing.yaml",
+    )
+    attach_mock_adapter(
+        registry,
+        {
+            "pm": PRD(
+                title="Feature",
+                problem_statement="Need feature",
+                smallest_working_core=["Expose a VALUE constant and test it"],
+                small_parts=["Create feature module", "Add focused tests"],
+                incremental_milestones=[
+                    "Smallest module exists",
+                    "Tests prove observable behavior",
+                ],
+                acceptance_tests=["VALUE equals 1"],
+                definition_of_done=["All tests pass"],
+            ).model_dump(),
+            "architect": ArchitecturePlan(summary="Should not run").model_dump(),
+        },
+    )
+    policy = PolicyEngine.from_path(config_dir() / "policies.yaml")
+    environment = FakeMCPEnvironment(
+        workspace_root=workspace,
+        memory_db_path=workspace / ".memory.sqlite3",
+    )
+    runner = JobRunner(registry=registry, policy=policy, router=environment.build_router())
+    spec = JobSpec(
+        request_text="Create a complex feature",
+        repo_path=str(workspace),
+        target_branch="acos/strict-prd-acceptance-coverage",
+        metadata={
+            "constraints": {
+                "require_prd_quality": True,
+                "prd_quality_refinement_attempts": 0,
+            }
+        },
+    )
+
+    record = runner.run_job(spec)
+
+    assert record.status == JobStatus.BLOCKED
+    assert record.last_error == (
+        "prd_quality_gate_failed:acceptance_tests_cover_small_parts"
+    )
+    assert record.outputs["prd_quality"] == {
+        "passed": False,
+        "missing": ["acceptance_tests_cover_small_parts"],
+        "warnings": [],
+        "small_part_count": 2,
+        "acceptance_test_count": 1,
+        "acceptance_tests_cover_small_parts": False,
+        "missing_acceptance_test_count": 1,
+        "definition_of_done_count": 1,
+    }
+    assert "architect" not in record.outputs
+
+
+def test_job_runner_resumes_blocked_prd_quality_repair(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    registry = ModelRegistry.from_paths(
+        provider_path=config_dir() / "model_providers.yaml",
+        agents_path=config_dir() / "agents.yaml",
+        routing_path=config_dir() / "model_routing.yaml",
+    )
+    sparse_prd = PRD(title="Feature", problem_statement="Need feature").model_dump()
+    good_prd = PRD(
+        title="Feature",
+        problem_statement="Need feature",
+        smallest_working_core=["Expose a VALUE constant and test it"],
+        small_parts=["Create feature module", "Add focused tests"],
+        incremental_milestones=[
+            "Smallest module exists",
+            "Tests prove observable behavior",
+        ],
+        acceptance_tests=[
+            "VALUE equals 1",
+            "test_value asserts VALUE equals 1",
+        ],
+        definition_of_done=["All tests pass"],
+    ).model_dump()
+    attach_mock_adapter(
+        registry,
+        {
+            "pm": [sparse_prd, sparse_prd, sparse_prd, good_prd],
+            "architect": ArchitecturePlan(summary="Simple architecture").model_dump(),
+            "planner": TaskGraph(
+                goal="Build feature",
+                tasks=[
+                    PlannedTask(
+                        id="core",
+                        title="Build core",
+                        description="Build the smallest feature.",
+                        role="implementer",
+                    )
+                ],
+            ).model_dump(),
+            "implementer": ImplementationResult(
+                status=ImplementationStatus.IMPLEMENTED,
+                summary="Create module",
+                patches=[
+                    {
+                        "path": "feature.py",
+                        "content": "VALUE = 1\n",
+                        "operation": "create",
+                    }
+                ],
+            ).model_dump(),
+            "test_writer": TestWriterOutput(
+                summary="Add tests",
+                patches=[
+                    {
+                        "path": "tests/test_feature.py",
+                        "content": (
+                            "from feature import VALUE\n\n\n"
+                            "def test_value() -> None:\n"
+                            "    assert VALUE == 1\n"
+                        ),
+                        "operation": "create",
+                    }
+                ],
+            ).model_dump(),
+        },
+    )
+    policy = PolicyEngine.from_path(config_dir() / "policies.yaml")
+    environment = FakeMCPEnvironment(
+        workspace_root=workspace,
+        memory_db_path=workspace / ".memory.sqlite3",
+    )
+    runner = JobRunner(registry=registry, policy=policy, router=environment.build_router())
+    spec = JobSpec(
+        request_text="Create a complex feature",
+        repo_path=str(workspace),
+        target_branch="acos/resume-prd-quality",
+        metadata={
+            "constraints": {
+                "require_prd_quality": True,
+                "skip_review": True,
+                "skip_release": True,
+            }
+        },
+    )
+
+    blocked = runner.run_job(spec)
+
+    assert blocked.status == JobStatus.BLOCKED
+    assert blocked.last_error.startswith("prd_quality_gate_failed:")
+
+    resumed = runner.resume_job(blocked.job_id)
+
+    assert resumed.status == JobStatus.DONE
+    assert resumed.last_error is None
+    assert resumed.outputs["prd_quality"]["passed"] is True
+    assert resumed.outputs["prd"] == good_prd
+    assert JobStatus.ANALYZING in resumed.history
+    assert (workspace / "feature.py").exists()
+
+
+def test_job_runner_includes_job_constraints_in_agent_context(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    registry = ModelRegistry.from_paths(
+        provider_path=config_dir() / "model_providers.yaml",
+        agents_path=config_dir() / "agents.yaml",
+        routing_path=config_dir() / "model_routing.yaml",
+    )
+    policy = PolicyEngine.from_path(config_dir() / "policies.yaml")
+    environment = FakeMCPEnvironment(
+        workspace_root=workspace,
+        memory_db_path=workspace / ".memory.sqlite3",
+    )
+    runner = JobRunner(registry=registry, policy=policy, router=environment.build_router())
+    spec = JobSpec(
+        request_text="Recover a repeated failure",
+        repo_path=str(workspace),
+        metadata={
+            "constraints": {
+                "recovery_mode": "repeated_failure",
+                "recovery_strategy": "escalated_retry",
+                "recovery_attempt": 1,
+                "stage_review": True,
+            }
+        },
+    )
+    record = InMemoryJobStore().create(spec)
+
+    constraints = runner._context_constraints(record)
+
+    assert "job_constraint recovery_mode=repeated_failure" in constraints
+    assert "job_constraint recovery_strategy=escalated_retry" in constraints
+    assert "job_constraint recovery_attempt=1" in constraints
+    assert "job_constraint stage_review=True" in constraints
+
+
+def test_job_runner_clears_planning_repair_constraints_after_prd_passes(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    registry = ModelRegistry.from_paths(
+        provider_path=config_dir() / "model_providers.yaml",
+        agents_path=config_dir() / "agents.yaml",
+        routing_path=config_dir() / "model_routing.yaml",
+    )
+    policy = PolicyEngine.from_path(config_dir() / "policies.yaml")
+    environment = FakeMCPEnvironment(
+        workspace_root=workspace,
+        memory_db_path=workspace / ".memory.sqlite3",
+    )
+    runner = JobRunner(registry=registry, policy=policy, router=environment.build_router())
+    store = InMemoryJobStore()
+    spec = JobSpec(
+        request_text="Build with repaired planning",
+        repo_path=str(workspace),
+        metadata={
+            "constraints": {
+                "require_prd_quality": True,
+                "planning_repair_strategy_change": True,
+                "planning_repair_repeated_prd_missing": "acceptance_tests",
+            }
+        },
+    )
+    record = store.create(spec)
+    runner.store = store
+    prd = PRD(
+        title="Feature",
+        problem_statement="Need feature",
+        smallest_working_core=["Expose VALUE"],
+        small_parts=["Create module"],
+        incremental_milestones=["Module exists"],
+        acceptance_tests=["VALUE equals 1"],
+        definition_of_done=["Tests pass"],
+    )
+
+    result = runner._refine_prd_quality_for_autonomy(record, prd)
+
+    assert result == prd
+    assert "planning_repair_strategy_change" not in record.spec.metadata["constraints"]
+    assert "planning_repair_repeated_prd_missing" not in record.spec.metadata["constraints"]
+
+
+def test_job_runner_clears_planning_repair_constraints_after_task_graph_validates(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    registry = ModelRegistry.from_paths(
+        provider_path=config_dir() / "model_providers.yaml",
+        agents_path=config_dir() / "agents.yaml",
+        routing_path=config_dir() / "model_routing.yaml",
+    )
+    policy = PolicyEngine.from_path(config_dir() / "policies.yaml")
+    environment = FakeMCPEnvironment(
+        workspace_root=workspace,
+        memory_db_path=workspace / ".memory.sqlite3",
+    )
+    runner = JobRunner(registry=registry, policy=policy, router=environment.build_router())
+    store = InMemoryJobStore()
+    spec = JobSpec(
+        request_text="Build with repaired graph",
+        repo_path=str(workspace),
+        metadata={
+            "constraints": {
+                "planning_repair_strategy_change": True,
+                "planning_repair_repeated_task_graph_error_types": "unknown_dependencies",
+            }
+        },
+    )
+    record = store.create(spec)
+    record.outputs["task_graph"] = TaskGraph(
+        goal="Build feature",
+        tasks=[
+            PlannedTask(
+                id="core",
+                title="Core",
+                description="Build core",
+                role="implementer",
+            )
+        ],
+    ).model_dump()
+    runner.store = store
+    prd = PRD(title="Feature", problem_statement="Need feature")
+
+    result = runner._load_or_repair_task_graph_for_autonomy(record, prd)
+
+    assert result is not None
+    assert "planning_repair_strategy_change" not in record.spec.metadata["constraints"]
+    assert (
+        "planning_repair_repeated_task_graph_error_types"
+        not in record.spec.metadata["constraints"]
+    )
+
+
+def test_job_runner_adds_recovery_guidance_to_agent_logs(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    registry = ModelRegistry.from_paths(
+        provider_path=config_dir() / "model_providers.yaml",
+        agents_path=config_dir() / "agents.yaml",
+        routing_path=config_dir() / "model_routing.yaml",
+    )
+    attach_mock_adapter(
+        registry,
+        {
+            "implementer": ImplementationResult(
+                status=ImplementationStatus.IMPLEMENTED,
+                summary="Recovered implementation",
+                patches=[],
+            ).model_dump(),
+        },
+    )
+    policy = PolicyEngine.from_path(config_dir() / "policies.yaml")
+    environment = FakeMCPEnvironment(
+        workspace_root=workspace,
+        memory_db_path=workspace / ".memory.sqlite3",
+    )
+    runner = JobRunner(registry=registry, policy=policy, router=environment.build_router())
+    spec = JobSpec(
+        request_text="Recover a failed implementation",
+        repo_path=str(workspace),
+        metadata={
+            "constraints": {
+                "recovery_mode": "implementation_failure",
+                "recovery_strategy": "replan_current_task",
+                "recovery_reason": "the implementer failed before producing a safe completed change",
+                "recovery_failed_task_id": "core",
+                "recovery_attempt": 2,
+            }
+        },
+    )
+    store = InMemoryJobStore()
+    record = store.create(spec)
+    record.status = JobStatus.PLANNING
+    runner.store = store
+    captured: dict[str, object] = {}
+    original_run = runner.agent_runner.run
+
+    def capture_run(*args, **kwargs):
+        if kwargs.get("role") == "implementer":
+            captured["logs"] = list(kwargs["context_packet"].logs)
+        return original_run(*args, **kwargs)
+
+    monkeypatch.setattr(runner.agent_runner, "run", capture_run)
+
+    runner._run_structured_role(
+        record,
+        "implementer",
+        ImplementationResult,
+        "Recover the failed task",
+        logs=["existing log"],
+    )
+
+    assert captured["logs"][0].startswith(
+        "recovery_context: mode=implementation_failure; strategy=replan_current_task;"
+    )
+    assert "failed_task_id=core" in captured["logs"][0]
+    assert captured["logs"][1] == (
+        "recovery_instruction: re-scope the failed task into a smaller, testable step "
+        "before implementing more code."
+    )
+    assert captured["logs"][2] == "existing log"
+
+
+def test_job_runner_adds_planning_repair_guidance_to_pm_logs(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    registry = ModelRegistry.from_paths(
+        provider_path=config_dir() / "model_providers.yaml",
+        agents_path=config_dir() / "agents.yaml",
+        routing_path=config_dir() / "model_routing.yaml",
+    )
+    attach_mock_adapter(
+        registry,
+        {
+            "pm": PRD(
+                title="Feature",
+                problem_statement="Need feature",
+                smallest_working_core=["Core"],
+                small_parts=["Part"],
+                incremental_milestones=["Milestone"],
+                acceptance_tests=["VALUE equals 1"],
+                definition_of_done=["Tests pass"],
+            ).model_dump(),
+        },
+    )
+    policy = PolicyEngine.from_path(config_dir() / "policies.yaml")
+    environment = FakeMCPEnvironment(
+        workspace_root=workspace,
+        memory_db_path=workspace / ".memory.sqlite3",
+    )
+    runner = JobRunner(registry=registry, policy=policy, router=environment.build_router())
+    spec = JobSpec(request_text="Repair PRD", repo_path=str(workspace))
+    store = InMemoryJobStore()
+    record = store.create(spec)
+    record.status = JobStatus.SUBMITTED
+    record.outputs["prd_quality_attempts"] = [
+        {
+            "attempt": 0,
+            "action": "initial",
+            "passed": False,
+            "missing": ["acceptance_tests"],
+            "warnings": [],
+        },
+        {
+            "attempt": 1,
+            "action": "refine",
+            "passed": False,
+            "missing": ["acceptance_tests"],
+            "warnings": [],
+        },
+        {
+            "attempt": 2,
+            "action": "refine",
+            "passed": False,
+            "missing": ["acceptance_tests"],
+            "warnings": [],
+        },
+    ]
+    runner.store = store
+    captured: dict[str, object] = {}
+    original_run = runner.agent_runner.run
+
+    def capture_run(*args, **kwargs):
+        if kwargs.get("role") == "pm":
+            captured["logs"] = list(kwargs["context_packet"].logs)
+        return original_run(*args, **kwargs)
+
+    monkeypatch.setattr(runner.agent_runner, "run", capture_run)
+
+    runner._run_structured_role(record, "pm", PRD, "Repair product requirements")
+
+    assert captured["logs"] == [
+        (
+            "planning_repair_context: consecutive_prd_failures=3; "
+            "consecutive_task_graph_failures=0; "
+            "repeated_prd_missing=acceptance_tests; "
+            "repeated_task_graph_error_types=none"
+        ),
+        (
+            "planning_repair_instruction: change the requirements strategy; explicitly fill "
+            "the repeated missing PRD fields with concrete, testable details before moving on."
+        ),
+    ]
+
+
+def test_job_runner_adds_planning_repair_guidance_to_planner_logs(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    registry = ModelRegistry.from_paths(
+        provider_path=config_dir() / "model_providers.yaml",
+        agents_path=config_dir() / "agents.yaml",
+        routing_path=config_dir() / "model_routing.yaml",
+    )
+    attach_mock_adapter(
+        registry,
+        {
+            "planner": TaskGraph(
+                goal="Repair graph",
+                tasks=[
+                    PlannedTask(
+                        id="core",
+                        title="Core",
+                        description="Build core",
+                        role="implementer",
+                    )
+                ],
+            ).model_dump(),
+        },
+    )
+    policy = PolicyEngine.from_path(config_dir() / "policies.yaml")
+    environment = FakeMCPEnvironment(
+        workspace_root=workspace,
+        memory_db_path=workspace / ".memory.sqlite3",
+    )
+    runner = JobRunner(registry=registry, policy=policy, router=environment.build_router())
+    spec = JobSpec(request_text="Repair task graph", repo_path=str(workspace))
+    store = InMemoryJobStore()
+    record = store.create(spec)
+    record.status = JobStatus.DESIGNING
+    record.outputs["task_graph_validation_attempts"] = [
+        {
+            "attempt": 0,
+            "action": "initial",
+            "valid": False,
+            "errors": [{"type": "unknown_dependencies"}],
+        },
+        {
+            "attempt": 1,
+            "action": "repair",
+            "valid": False,
+            "errors": [{"type": "unknown_dependencies"}],
+        },
+        {
+            "attempt": 2,
+            "action": "repair",
+            "valid": False,
+            "errors": [{"type": "unknown_dependencies"}],
+        },
+    ]
+    runner.store = store
+    captured: dict[str, object] = {}
+    original_run = runner.agent_runner.run
+
+    def capture_run(*args, **kwargs):
+        if kwargs.get("role") == "planner":
+            captured["logs"] = list(kwargs["context_packet"].logs)
+        return original_run(*args, **kwargs)
+
+    monkeypatch.setattr(runner.agent_runner, "run", capture_run)
+
+    runner._run_structured_role(record, "planner", TaskGraph, "Repair task graph")
+
+    assert captured["logs"] == [
+        (
+            "planning_repair_context: consecutive_prd_failures=0; "
+            "consecutive_task_graph_failures=3; "
+            "repeated_prd_missing=none; "
+            "repeated_task_graph_error_types=unknown_dependencies"
+        ),
+        (
+            "planning_repair_instruction: change the task graph strategy; simplify or split "
+            "the plan so repeated validation errors are removed instead of reusing the same graph."
+        ),
+    ]
+
+
+def test_job_runner_adds_recovery_history_to_agent_logs(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    registry = ModelRegistry.from_paths(
+        provider_path=config_dir() / "model_providers.yaml",
+        agents_path=config_dir() / "agents.yaml",
+        routing_path=config_dir() / "model_routing.yaml",
+    )
+    attach_mock_adapter(
+        registry,
+        {
+            "implementer": ImplementationResult(
+                status=ImplementationStatus.IMPLEMENTED,
+                summary="Next implementation",
+                patches=[],
+            ).model_dump(),
+        },
+    )
+    policy = PolicyEngine.from_path(config_dir() / "policies.yaml")
+    environment = FakeMCPEnvironment(
+        workspace_root=workspace,
+        memory_db_path=workspace / ".memory.sqlite3",
+    )
+    runner = JobRunner(registry=registry, policy=policy, router=environment.build_router())
+    task_graph = TaskGraph(
+        goal="Build after recovery",
+        tasks=[
+            PlannedTask(id="core", title="Core", description="Build core", role="implementer"),
+            PlannedTask(
+                id="extra",
+                title="Extra",
+                description="Build extra",
+                role="implementer",
+                depends_on=["core"],
+            ),
+        ],
+    )
+    spec = JobSpec(
+        request_text="Continue after recovery",
+        repo_path=str(workspace),
+    )
+    store = InMemoryJobStore()
+    record = store.create(spec)
+    record.status = JobStatus.PLANNING
+    record.outputs["task_graph"] = task_graph.model_dump()
+    record.outputs["autonomous_stages"] = [
+        {
+            "stage": 1,
+            "task": task_graph.tasks[0].model_dump(),
+            "change_summary": {"changed_files": ["feature.py"], "patch_count": 1},
+            "test_run": {"success": False},
+        },
+        {
+            "stage": 2,
+            "task": task_graph.tasks[0].model_dump(),
+            "change_summary": {
+                "changed_files": ["feature.py", "tests/test_feature.py"],
+                "patch_count": 2,
+            },
+            "test_run": {"success": True},
+        },
+    ]
+    runner.store = store
+    captured: dict[str, object] = {}
+    original_run = runner.agent_runner.run
+
+    def capture_run(*args, **kwargs):
+        if kwargs.get("role") == "implementer":
+            captured["logs"] = list(kwargs["context_packet"].logs)
+        return original_run(*args, **kwargs)
+
+    monkeypatch.setattr(runner.agent_runner, "run", capture_run)
+
+    runner._run_structured_role(
+        record,
+        "implementer",
+        ImplementationResult,
+        "Continue with the next task",
+        task=task_graph.tasks[1],
+    )
+
+    assert captured["logs"] == [
+        (
+            "recovered_failure: task_id=core; failed_stage=1; resolved_by_stage=2; "
+            "failed_files=feature.py; resolved_files=feature.py,tests/test_feature.py; "
+            "failed_patch_count=1; resolved_patch_count=2"
+        )
+    ]
