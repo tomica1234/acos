@@ -419,7 +419,7 @@ def test_agent_runner_uses_escalated_model_from_failure_history() -> None:
     )
 
     assert result.summary == "Fixed on escalated model"
-    assert selection.model_key == "ornith_35b_q4"
+    assert selection.model_key == "ncmoe40_q4"
     assert selection.reason.value == "escalation"
     assert any(
         event.event_type == "model_call"

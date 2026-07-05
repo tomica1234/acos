@@ -5,7 +5,6 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import shlex
 from pathlib import Path
 from time import monotonic
 from typing import Any, Sequence
@@ -1051,12 +1050,12 @@ def autonomous_result_payload(
         "can_continue": can_continue,
         "next_continue_cli_args": next_continue_cli_args,
         "next_continue_command": (
-            shlex.join(["acos", *next_continue_cli_args]) if next_continue_cli_args else None
+            _acos_command(next_continue_cli_args) if next_continue_cli_args else None
         ),
         "can_blocked_recovery_continue": can_blocked_recovery_continue,
         "blocked_recovery_continue_cli_args": blocked_recovery_continue_cli_args,
         "blocked_recovery_continue_command": (
-            shlex.join(["acos", *blocked_recovery_continue_cli_args])
+            _acos_command(blocked_recovery_continue_cli_args)
             if blocked_recovery_continue_cli_args
             else None
         ),
@@ -1088,7 +1087,7 @@ def planning_result_payload(
     if supervise_args:
         payload["can_supervise_continue"] = True
         payload["next_supervise_cli_args"] = supervise_args
-        payload["next_supervise_command"] = shlex.join(["acos", *supervise_args])
+        payload["next_supervise_command"] = _acos_command(supervise_args)
     planning_only = record.outputs.get("planning_only")
     planning_complete = (
         isinstance(planning_only, dict) and planning_only.get("complete") is True
@@ -1109,6 +1108,10 @@ def planning_supervise_operator_decision(payload: dict[str, Any]) -> dict[str, A
     decision["command"] = payload.get("next_supervise_command")
     decision["requires_explicit_override"] = False
     return decision
+
+
+def _acos_command(args: list[str]) -> str:
+    return "acos " + " ".join(str(arg) for arg in args)
 
 
 def _next_continue_cli_args(
@@ -1451,7 +1454,7 @@ def supervise_persisted_job(
         }
     )
     final_payload["next_supervise_command"] = (
-        shlex.join(["acos", *final_payload["next_supervise_cli_args"]])
+        _acos_command(final_payload["next_supervise_cli_args"])
         if final_payload["next_supervise_cli_args"]
         else None
     )
@@ -1687,7 +1690,7 @@ def job_status_supervision_payload(
         "can_supervise_continue": can_supervise,
         "next_supervise_cli_args": supervise_args,
         "next_supervise_command": (
-            shlex.join(["acos", *supervise_args]) if supervise_args else None
+            _acos_command(supervise_args) if supervise_args else None
         ),
     }
 
@@ -1738,12 +1741,12 @@ def job_status_continuation_payload(
         "can_continue": can_continue,
         "next_continue_cli_args": next_continue_cli_args,
         "next_continue_command": (
-            shlex.join(["acos", *next_continue_cli_args]) if next_continue_cli_args else None
+            _acos_command(next_continue_cli_args) if next_continue_cli_args else None
         ),
         "can_blocked_recovery_continue": can_blocked_recovery_continue,
         "blocked_recovery_continue_cli_args": blocked_recovery_continue_cli_args,
         "blocked_recovery_continue_command": (
-            shlex.join(["acos", *blocked_recovery_continue_cli_args])
+            _acos_command(blocked_recovery_continue_cli_args)
             if blocked_recovery_continue_cli_args
             else None
         ),
@@ -2057,7 +2060,7 @@ def provider_unhealthy_payload(
 ) -> dict[str, Any]:
     supervise_args = next_supervise_cli_args or []
     next_supervise_command = (
-        shlex.join(["acos", *supervise_args]) if supervise_args else None
+        _acos_command(supervise_args) if supervise_args else None
     )
     payload = {
         "job_id": job_id,
@@ -2775,8 +2778,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.next_command:
             suggested_args = summary.get("resume", {}).get("suggested_cli_args", [])
             if suggested_args:
-                command = ["acos", *suggested_args, "--jobs-dir", str(args.jobs_dir)]
-                print(shlex.join(command))
+                command = [*suggested_args, "--jobs-dir", str(args.jobs_dir)]
+                print(_acos_command(command))
             else:
                 continuation = job_status_continuation_payload(record, args, summary)
                 supervision = job_status_supervision_payload(record, args)
@@ -2803,7 +2806,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "next_supervise_cli_args"
             ]
             if suggested_args:
-                print(shlex.join(["acos", *suggested_args]))
+                print(_acos_command(suggested_args))
             return 0
         if args.next_operator_command:
             continuation = job_status_continuation_payload(record, args, summary)

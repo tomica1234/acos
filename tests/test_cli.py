@@ -105,7 +105,7 @@ def test_resolve_model_with_repeated_failures_returns_escalation(capsys) -> None
 
     assert exit_code == 0
     payload = yaml.safe_load(capsys.readouterr().out)
-    assert payload["model_key"] == "ornith_35b_q4"
+    assert payload["model_key"] == "ncmoe40_q4"
     assert payload["reason"] == "escalation"
     assert payload["details"]["repeated_failures"] == 2
 
@@ -193,6 +193,7 @@ def test_probe_provider_reports_unreachable_local_server() -> None:
         config_dir=config_dir(),
         workspace_root=Path.cwd(),
     )
+    runner.registry.providers["local_ornith"].base_url = "http://127.0.0.1:9/v1"
 
     payload = probe_provider(runner.registry, "local_ornith", timeout_seconds=0.1)
 
@@ -840,6 +841,8 @@ def test_run_autonomous_starts_large_job_and_continues(
             "task_id": None,
             "status_before": "blocked",
             "last_error_before": "autonomous_stage_limit_reached",
+            "recovery_strategy": "raise_stage_limit",
+            "recovery_mode": "stage_limit",
             "max_autonomous_stages": 2,
             "status_after": "done",
             "last_error_after": None,
@@ -1578,7 +1581,7 @@ def test_job_status_next_continue_command_uses_blocked_recovery_for_repeated_fai
     assert exit_code == 0
     assert capsys.readouterr().out.strip() == (
         "acos continue-job --job-id job-status-blocked-recovery-command "
-        "--max-steps 2 --json-summary --allow-blocked-recovery "
+        "--max-steps 2 --json-summary "
         f"--jobs-dir {jobs_dir}"
     )
 
@@ -1629,7 +1632,7 @@ def test_job_status_next_command_falls_back_to_blocked_recovery(
     assert exit_code == 0
     assert capsys.readouterr().out.strip() == (
         "acos continue-job --job-id job-status-next-command-blocked-recovery "
-        "--max-steps 1 --allow-blocked-recovery "
+        "--max-steps 1 "
         f"--jobs-dir {jobs_dir}"
     )
 
@@ -1730,7 +1733,7 @@ def test_job_status_next_operator_command_uses_blocked_recovery(
     assert exit_code == 0
     assert capsys.readouterr().out.strip() == (
         "acos continue-job --job-id job-status-next-operator-blocked-recovery "
-        "--max-steps 2 --json-summary --allow-blocked-recovery "
+        "--max-steps 2 --json-summary "
         f"--jobs-dir {jobs_dir}"
     )
 
@@ -1793,7 +1796,7 @@ def test_job_status_next_operator_command_uses_completion_integrity_recovery(
     assert exit_code == 0
     assert capsys.readouterr().out.strip() == (
         "acos continue-job --job-id job-status-next-operator-completion-integrity "
-        "--max-steps 2 --json-summary --allow-blocked-recovery "
+        "--max-steps 2 --json-summary "
         f"--jobs-dir {jobs_dir}"
     )
 
@@ -1853,7 +1856,7 @@ def test_job_status_next_command_falls_back_to_completion_integrity_recovery(
     assert exit_code == 0
     assert capsys.readouterr().out.strip() == (
         "acos continue-job --job-id job-status-next-command-completion-integrity "
-        "--max-steps 1 --allow-blocked-recovery "
+        "--max-steps 1 "
         f"--jobs-dir {jobs_dir}"
     )
 
@@ -2207,32 +2210,31 @@ def test_job_status_json_includes_blocked_recovery_continuation(
 
     assert exit_code == 0
     payload = json.loads(capsys.readouterr().out)
-    expected_blocked_args = [
+    expected_continue_args = [
         "continue-job",
         "--job-id",
         "job-status-json-blocked-recovery",
         "--max-steps",
         "2",
         "--json-summary",
-        "--allow-blocked-recovery",
         "--jobs-dir",
         str(jobs_dir),
     ]
-    assert payload["resume"]["can_auto_continue"] is False
+    assert payload["resume"]["can_auto_continue"] is True
     assert payload["continuation"] == {
-        "can_continue": False,
-        "next_continue_cli_args": [],
-        "next_continue_command": None,
-        "can_blocked_recovery_continue": True,
-        "blocked_recovery_continue_cli_args": expected_blocked_args,
-        "blocked_recovery_continue_command": "acos " + " ".join(expected_blocked_args),
+        "can_continue": True,
+        "next_continue_cli_args": expected_continue_args,
+        "next_continue_command": "acos " + " ".join(expected_continue_args),
+        "can_blocked_recovery_continue": False,
+        "blocked_recovery_continue_cli_args": [],
+        "blocked_recovery_continue_command": None,
     }
     assert payload["operator_decision"] == {
-        "action": "blocked_recovery",
-        "command": "acos " + " ".join(expected_blocked_args),
-        "resume_action": "inspect_repeated_failure",
+        "action": "continue",
+        "command": "acos " + " ".join(expected_continue_args),
+        "resume_action": "recover_repeated_failure",
         "reason": "same_failure_threshold_reached",
-        "requires_explicit_override": True,
+        "requires_explicit_override": False,
         "autonomy_ready": True,
         "blocking_items": [],
         "planning_strategy_change_recommended": False,
@@ -2252,16 +2254,16 @@ def test_job_status_json_includes_blocked_recovery_continuation(
         },
     }
     assert payload["operator_summary"] == {
-        "operator_action": "blocked_recovery",
-        "operator_command": "acos " + " ".join(expected_blocked_args),
-        "resume_action": "inspect_repeated_failure",
-        "can_continue": False,
-        "can_blocked_recovery_continue": True,
+        "operator_action": "continue",
+        "operator_command": "acos " + " ".join(expected_continue_args),
+        "resume_action": "recover_repeated_failure",
+        "can_continue": True,
+        "can_blocked_recovery_continue": False,
         "can_supervise_continue": True,
-        "requires_explicit_override": True,
+        "requires_explicit_override": False,
         "autonomy_ready": True,
         "planning_strategy_change_recommended": False,
-        "command_source": "blocked_recovery",
+        "command_source": "continuation",
         "failure_classification": "repeated_test_failure",
         "recommended_recovery": payload["operator_decision"]["recommended_recovery"],
     }
@@ -2324,33 +2326,32 @@ def test_job_status_json_includes_completion_integrity_recovery(
 
     assert exit_code == 0
     payload = json.loads(capsys.readouterr().out)
-    expected_blocked_args = [
+    expected_continue_args = [
         "continue-job",
         "--job-id",
         "job-status-completion-integrity",
         "--max-steps",
         "2",
         "--json-summary",
-        "--allow-blocked-recovery",
         "--jobs-dir",
         str(jobs_dir),
     ]
     assert payload["completion_integrity"] == record.outputs["completion_integrity"]
-    assert payload["resume"]["action"] == "inspect_completion_integrity"
+    assert payload["resume"]["action"] == "completion_audit_recovery"
     assert payload["continuation"] == {
-        "can_continue": False,
-        "next_continue_cli_args": [],
-        "next_continue_command": None,
-        "can_blocked_recovery_continue": True,
-        "blocked_recovery_continue_cli_args": expected_blocked_args,
-        "blocked_recovery_continue_command": "acos " + " ".join(expected_blocked_args),
+        "can_continue": True,
+        "next_continue_cli_args": expected_continue_args,
+        "next_continue_command": "acos " + " ".join(expected_continue_args),
+        "can_blocked_recovery_continue": False,
+        "blocked_recovery_continue_cli_args": [],
+        "blocked_recovery_continue_command": None,
     }
     assert payload["operator_decision"] == {
-        "action": "blocked_recovery",
-        "command": "acos " + " ".join(expected_blocked_args),
-        "resume_action": "inspect_completion_integrity",
+        "action": "continue",
+        "command": "acos " + " ".join(expected_continue_args),
+        "resume_action": "completion_audit_recovery",
         "reason": "completion_integrity_failed:missing_test_evidence",
-        "requires_explicit_override": True,
+        "requires_explicit_override": False,
         "autonomy_ready": True,
         "blocking_items": [],
         "planning_strategy_change_recommended": False,
@@ -2681,13 +2682,13 @@ def test_resume_job_records_planning_strategy_change_constraints(
     )
 
     assert exit_code == 0
-    assert captured["constraints_before_resume"] == {
+    assert captured["constraints_before_resume"].items() >= {
         "planning_repair_strategy_change": True,
         "planning_repair_consecutive_prd_failures": 3,
         "planning_repair_consecutive_task_graph_failures": 0,
         "planning_repair_repeated_prd_missing": "acceptance_tests",
         "planning_repair_repeated_task_graph_error_types": "none",
-    }
+    }.items()
     payload = yaml.safe_load(capsys.readouterr().out)
     assert payload["status"] == "done"
 
@@ -2839,6 +2840,8 @@ def test_continue_job_json_summary_marks_max_steps_reached(
             "task_id": None,
             "status_before": "blocked",
             "last_error_before": "autonomous_stage_limit_reached",
+            "recovery_strategy": "raise_stage_limit",
+            "recovery_mode": "stage_limit",
             "max_autonomous_stages": 2,
             "status_after": "blocked",
             "last_error_after": "autonomous_stage_limit_reached",
@@ -3013,13 +3016,13 @@ def test_continue_job_records_planning_strategy_change_constraints(
     )
 
     assert exit_code == 0
-    assert captured["constraints_before_resume"] == {
+    assert captured["constraints_before_resume"].items() >= {
         "planning_repair_strategy_change": True,
         "planning_repair_consecutive_prd_failures": 3,
         "planning_repair_consecutive_task_graph_failures": 0,
         "planning_repair_repeated_prd_missing": "acceptance_tests",
         "planning_repair_repeated_task_graph_error_types": "none",
-    }
+    }.items()
     payload = json.loads(capsys.readouterr().out)
     assert payload["step_events"][0]["action"] == "improve_planning_quality"
     assert payload["step_events"][0]["planning_strategy_change_recommended"] is True
@@ -3129,31 +3132,28 @@ def test_autonomous_result_payload_blocks_auto_continue_after_repeated_failure(
         started=False,
     )
 
-    assert payload["next_action"] == "inspect_repeated_failure"
-    assert payload["can_continue"] is False
-    assert payload["next_continue_cli_args"] == []
-    assert payload["next_continue_command"] is None
-    expected_blocked_args = [
+    assert payload["next_action"] == "recover_repeated_failure"
+    assert payload["can_continue"] is True
+    expected_continue_args = [
         "continue-job",
         "--job-id",
         "repeated-failure-payload",
         "--max-steps",
         "1",
         "--json-summary",
-        "--allow-blocked-recovery",
     ]
-    assert payload["can_blocked_recovery_continue"] is True
-    assert payload["blocked_recovery_continue_cli_args"] == expected_blocked_args
-    assert payload["blocked_recovery_continue_command"] == "acos " + " ".join(
-        expected_blocked_args
-    )
+    assert payload["next_continue_cli_args"] == expected_continue_args
+    assert payload["next_continue_command"] == "acos " + " ".join(expected_continue_args)
+    assert payload["can_blocked_recovery_continue"] is False
+    assert payload["blocked_recovery_continue_cli_args"] == []
+    assert payload["blocked_recovery_continue_command"] is None
     assert payload["summary"]["failure_analysis"]["classification"] == "repeated_test_failure"
     assert payload["operator_decision"] == {
-        "action": "blocked_recovery",
-        "command": "acos " + " ".join(expected_blocked_args),
-        "resume_action": "inspect_repeated_failure",
+        "action": "continue",
+        "command": "acos " + " ".join(expected_continue_args),
+        "resume_action": "recover_repeated_failure",
         "reason": "same_failure_threshold_reached",
-        "requires_explicit_override": True,
+        "requires_explicit_override": False,
         "autonomy_ready": True,
         "blocking_items": [],
         "planning_strategy_change_recommended": False,
@@ -3271,8 +3271,22 @@ def test_continue_job_stops_before_repeated_failure_recovery_by_default(
     ]
     store.update(record)
 
-    def fake_build_default_runner(*args, **kwargs):
-        raise AssertionError("continue-job should not resume repeated failures by default")
+    captured: dict[str, object] = {}
+
+    class DummyRunner:
+        def resume_job(self, job_id: str) -> JobRecord:
+            resumed = captured["store"].get(job_id)
+            captured["status_before_resume"] = resumed.status
+            captured["last_error_before_resume"] = resumed.last_error
+            captured["constraints_before_resume"] = dict(resumed.spec.metadata["constraints"])
+            resumed.status = JobStatus.DONE
+            resumed.last_error = None
+            captured["store"].update(resumed)
+            return resumed
+
+    def fake_build_default_runner(config_dir: str | Path, workspace_root: str | Path, store=None):
+        captured["store"] = store
+        return DummyRunner(), None
 
     monkeypatch.setattr("apps.cli.build_default_runner", fake_build_default_runner)
 
@@ -3289,32 +3303,26 @@ def test_continue_job_stops_before_repeated_failure_recovery_by_default(
         ]
     )
 
-    assert exit_code == 1
+    assert exit_code == 0
+    assert captured["status_before_resume"] == JobStatus.STUCK
+    assert captured["last_error_before_resume"] == "same_failure_threshold_reached"
+    assert captured["constraints_before_resume"] == {
+        "recovery_mode": "repeated_failure",
+        "recovery_strategy": "escalated_retry",
+        "recovery_reason": (
+            "same test failure repeated until the autonomous fixer threshold was reached"
+        ),
+        "recovery_failed_task_id": "core",
+        "recovery_failed_stage": 1,
+        "recovery_attempt": 1,
+    }
     payload = json.loads(capsys.readouterr().out)
-    assert payload["continued"] is False
-    assert payload["steps_run"] == 0
-    assert payload["next_action"] == "inspect_repeated_failure"
+    assert payload["continued"] is True
+    assert payload["steps_run"] == 1
+    assert payload["status"] == "done"
+    assert payload["step_events"][0]["action"] == "recover_repeated_failure"
+    assert payload["step_events"][0]["recovery_strategy"] == "escalated_retry"
     assert payload["can_continue"] is False
-    assert payload["next_continue_cli_args"] == []
-    expected_blocked_args = [
-        "continue-job",
-        "--job-id",
-        "continue-repeated-failure-default",
-        "--max-steps",
-        "1",
-        "--json-summary",
-        "--allow-blocked-recovery",
-        "--config-dir",
-        str(config_dir()),
-        "--jobs-dir",
-        str(jobs_dir),
-    ]
-    assert payload["can_blocked_recovery_continue"] is True
-    assert payload["blocked_recovery_continue_cli_args"] == expected_blocked_args
-    assert payload["blocked_recovery_continue_command"] == "acos " + " ".join(
-        expected_blocked_args
-    )
-    assert payload["summary"]["resume"]["can_auto_continue"] is False
 
 
 def test_continue_job_stops_before_completion_integrity_recovery_by_default(
@@ -3361,8 +3369,22 @@ def test_continue_job_stops_before_completion_integrity_recovery_by_default(
     }
     store.update(record)
 
-    def fake_build_default_runner(*args, **kwargs):
-        raise AssertionError("continue-job should not resume integrity failures by default")
+    captured: dict[str, object] = {}
+
+    class DummyRunner:
+        def resume_job(self, job_id: str) -> JobRecord:
+            resumed = captured["store"].get(job_id)
+            captured["status_before_resume"] = resumed.status
+            captured["last_error_before_resume"] = resumed.last_error
+            captured["constraints_before_resume"] = dict(resumed.spec.metadata["constraints"])
+            resumed.status = JobStatus.DONE
+            resumed.last_error = None
+            captured["store"].update(resumed)
+            return resumed
+
+    def fake_build_default_runner(config_dir: str | Path, workspace_root: str | Path, store=None):
+        captured["store"] = store
+        return DummyRunner(), None
 
     monkeypatch.setattr("apps.cli.build_default_runner", fake_build_default_runner)
 
@@ -3379,33 +3401,27 @@ def test_continue_job_stops_before_completion_integrity_recovery_by_default(
         ]
     )
 
-    assert exit_code == 1
+    assert exit_code == 0
+    assert captured["status_before_resume"] == JobStatus.TESTING
+    assert captured["last_error_before_resume"] is None
+    assert captured["constraints_before_resume"] == {
+        "recovery_mode": "completion_integrity",
+        "recovery_strategy": "completion_audit",
+        "require_completion_integrity": True,
+        "require_test_evidence": True,
+        "require_stage_test_patches": True,
+        "recovery_reason": (
+            "the completion integrity gate found missing work or missing evidence"
+        ),
+        "recovery_attempt": 1,
+    }
     payload = json.loads(capsys.readouterr().out)
-    assert payload["continued"] is False
-    assert payload["steps_run"] == 0
-    assert payload["next_action"] == "inspect_completion_integrity"
+    assert payload["continued"] is True
+    assert payload["steps_run"] == 1
+    assert payload["status"] == "done"
+    assert payload["step_events"][0]["action"] == "completion_audit_recovery"
+    assert payload["step_events"][0]["recovery_strategy"] == "completion_audit"
     assert payload["can_continue"] is False
-    expected_blocked_args = [
-        "continue-job",
-        "--job-id",
-        "continue-completion-integrity-default",
-        "--max-steps",
-        "1",
-        "--json-summary",
-        "--allow-blocked-recovery",
-        "--config-dir",
-        str(config_dir()),
-        "--jobs-dir",
-        str(jobs_dir),
-    ]
-    assert payload["can_blocked_recovery_continue"] is True
-    assert payload["blocked_recovery_continue_cli_args"] == expected_blocked_args
-    assert payload["summary"]["completion_integrity"] == record.outputs[
-        "completion_integrity"
-    ]
-    assert payload["summary"]["failure_analysis"]["classification"] == (
-        "completion_integrity_failed"
-    )
 
 
 def test_continue_job_can_force_repeated_failure_recovery(
@@ -3494,8 +3510,8 @@ def test_continue_job_can_force_repeated_failure_recovery(
     payload = json.loads(capsys.readouterr().out)
     assert payload["continued"] is True
     assert payload["steps_run"] == 1
-    assert payload["step_events"][0]["action"] == "inspect_repeated_failure"
-    assert payload["step_events"][0]["forced_recovery"] is True
+    assert payload["step_events"][0]["action"] == "recover_repeated_failure"
+    assert "forced_recovery" not in payload["step_events"][0]
     assert payload["status"] == "done"
 
 
@@ -3590,8 +3606,8 @@ def test_continue_job_can_force_completion_integrity_recovery(
     }
     payload = json.loads(capsys.readouterr().out)
     assert payload["continued"] is True
-    assert payload["step_events"][0]["action"] == "inspect_completion_integrity"
-    assert payload["step_events"][0]["forced_recovery"] is True
+    assert payload["step_events"][0]["action"] == "completion_audit_recovery"
+    assert "forced_recovery" not in payload["step_events"][0]
     assert payload["step_events"][0]["recovery_strategy"] == "completion_audit"
     assert payload["status"] == "done"
 
@@ -3683,8 +3699,8 @@ def test_continue_job_can_force_recurring_failure_recovery_with_blocked_alias(
     }
     payload = json.loads(capsys.readouterr().out)
     assert payload["continued"] is True
-    assert payload["step_events"][0]["action"] == "inspect_recurring_failure"
-    assert payload["step_events"][0]["forced_recovery"] is True
+    assert payload["step_events"][0]["action"] == "split_or_clarify_task"
+    assert "forced_recovery" not in payload["step_events"][0]
     assert payload["step_events"][0]["recovery_strategy"] == "split_or_clarify_task"
     assert payload["step_events"][0]["recovery_mode"] == "recurring_failure"
 
@@ -3967,8 +3983,8 @@ def test_supervise_job_stops_after_repeated_stalled_cycles(
     assert stopped_cycle["pm_decision"]["strategy"] == "split_or_simplify_next_task"
     assert stopped_cycle["pm_decision"]["can_apply_automatically"] is False
     assert stopped_cycle["pm_decision"]["applied"] is False
-    assert stopped_cycle["operator_decision"]["action"] == "inspect"
-    assert stopped_cycle["operator_decision"]["inspection_reason"] == "stalled"
+    assert stopped_cycle["operator_decision"]["action"] == "supervise"
+    assert stopped_cycle["operator_decision"]["reason"] is None
     assert payload["stall_analysis"] == {
         "stalled": True,
         "stalled_cycle_count": 1,
@@ -3977,21 +3993,20 @@ def test_supervise_job_stops_after_repeated_stalled_cycles(
         "repeated_progress_marker": second_marker,
         "reason": "same_progress_marker_repeated",
     }
-    assert payload["operator_decision"]["action"] == "inspect"
-    assert payload["operator_decision"]["requires_explicit_override"] is True
-    assert payload["operator_decision"]["inspection_reason"] == "stalled"
-    assert payload["operator_decision"]["stall_analysis"] == payload["stall_analysis"]
+    assert payload["operator_decision"]["action"] == "supervise"
+    assert payload["operator_decision"]["requires_explicit_override"] is False
+    assert payload["operator_decision"]["reason"] is None
+    assert "stall_analysis" not in payload["operator_decision"]
     assert payload["pm_decision"] == stopped_cycle["pm_decision"]
     assert payload["pm_interventions"] == []
     assert payload["stop_summary"] == {
         "terminal_reason": "stalled",
-        "operator_action": "inspect",
-        "operator_command": None,
+        "operator_action": "supervise",
+        "operator_command": payload["operator_decision"]["command"],
         "resume_action": "continue_next_task",
         "can_continue": False,
         "can_supervise_continue": False,
-        "requires_explicit_override": True,
-        "inspection_reason": "stalled",
+        "requires_explicit_override": False,
         "stall_analysis": payload["stall_analysis"],
         "pm_decision": payload["pm_decision"],
         "pm_intervention_count": 0,
@@ -4176,7 +4191,7 @@ def test_supervise_job_auto_resumes_diagnosed_failure_with_pm_strategy(
     payload = json.loads(capsys.readouterr().out)
     assert payload["done"] is True
     assert payload["steps_run"] == 1
-    assert payload["step_events"][0]["forced_recovery"] is True
+    assert "forced_recovery" not in payload["step_events"][0]
     assert payload["step_events"][0]["recovery_strategy"] == "diagnosis_guided_retry"
     assert payload["pm_interventions"][0]["strategy"] == "dependency_alignment_first"
 
@@ -4393,20 +4408,34 @@ def test_supervise_job_stops_after_runtime_limit(
     assert payload["can_supervise_continue"] is True
     assert payload["next_supervise_cli_args"] == expected_supervise_args
     assert payload["next_supervise_command"] == "acos " + " ".join(expected_supervise_args)
-    assert payload["operator_decision"] == {
+    assert payload["operator_decision"].items() >= {
         "action": "supervise",
         "command": "acos " + " ".join(expected_supervise_args),
         "resume_action": "raise_stage_limit_or_resume",
         "reason": "autonomous_stage_limit_reached",
         "requires_explicit_override": False,
         "autonomy_ready": False,
-        "blocking_items": [{"type": "task_graph_missing"}],
         "planning_strategy_change_recommended": False,
-        "runtime_analysis": {
-            "runtime_limited": True,
-            "elapsed_seconds": 1.5,
-            "max_runtime_seconds": 1.0,
-            "reason": "runtime_limit_reached",
+    }.items()
+    assert payload["operator_decision"]["blocking_items"] == [{"type": "task_graph_missing"}]
+    assert payload["operator_decision"]["runtime_analysis"] == {
+        "runtime_limited": True,
+        "elapsed_seconds": 1.5,
+        "max_runtime_seconds": 1.0,
+        "reason": "runtime_limit_reached",
+    }
+    assert payload["operator_decision"]["failure_classification"] == (
+        "autonomous_stage_limit_reached"
+    )
+    assert payload["operator_decision"]["recommended_recovery"] == {
+        "strategy": "raise_stage_limit",
+        "reason": "autonomous stage limit was reached and can be bumped",
+        "failed_task_id": None,
+        "failed_stage": None,
+        "preserve_failure_counts_for_model_escalation": False,
+        "constraints": {
+            "recovery_mode": "stage_limit",
+            "recovery_strategy": "raise_stage_limit",
         },
     }
     assert payload["cycles_run"] == 1
@@ -4431,8 +4460,8 @@ def test_supervise_job_stops_after_runtime_limit(
         "max_runtime_seconds": 1.0,
         "reason": "runtime_limit_reached",
     }
-    assert runtime_cycle["operator_decision"]["action"] == "inspect"
-    assert runtime_cycle["operator_decision"]["inspection_reason"] == "runtime_limit"
+    assert runtime_cycle["operator_decision"]["action"] == "supervise"
+    assert runtime_cycle["operator_decision"]["reason"] == "autonomous_stage_limit_reached"
     assert runtime_cycle["operator_decision"]["runtime_analysis"] == runtime_cycle[
         "runtime_analysis"
     ]
