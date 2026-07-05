@@ -44,8 +44,10 @@ def test_schema_instantiation() -> None:
         primary_model="test-model",
         max_output_tokens=1024,
         context_budget_tokens=4096,
+        max_tool_steps=24,
         output_schema="ImplementationResult",
     )
+    assert agent.max_tool_steps == 24
     routing = ModelRoutingConfig()
     task = PlannedTask(
         id="t1",
