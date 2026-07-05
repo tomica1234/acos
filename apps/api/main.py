@@ -154,7 +154,21 @@ def create_app(job_runner: JobRunner | None = None) -> FastAPI:
     def _should_continue_background_batch(result: dict[str, Any]) -> bool:
         if result.get("done") is True or result.get("status") == "done":
             return False
-        return result.get("terminal_reason") in {"max_steps_reached", "runtime_limit"}
+        if result.get("status") in {
+            "blocked",
+            "stuck",
+            "failed",
+            "recovering",
+            "diagnosing",
+            "replanning",
+            "strategy_change",
+        }:
+            return True
+        return result.get("terminal_reason") in {
+            "max_steps_reached",
+            "runtime_limit",
+            "provider_unhealthy",
+        }
 
     def _background_terminal_status(
         result: dict[str, Any],

@@ -22,6 +22,8 @@ class PlannedTask(BaseModel):
     complexity: TaskComplexity = TaskComplexity.MEDIUM
     depends_on: list[str] = Field(default_factory=list)
     acceptance_criteria: list[str] = Field(default_factory=list)
+    target_files: list[str] = Field(default_factory=list)
+    required_artifacts: list[str] = Field(default_factory=list)
 
     @model_validator(mode="before")
     @classmethod
@@ -48,6 +50,16 @@ class PlannedTask(BaseModel):
                 if key in normalized:
                     normalized["acceptance_criteria"] = normalized.get(key)
                     break
+        if "target_files" not in normalized:
+            for key in ("files", "changed_files", "expected_files"):
+                if key in normalized:
+                    normalized["target_files"] = normalized.get(key)
+                    break
+        if "required_artifacts" not in normalized:
+            for key in ("artifacts", "deliverables", "required_files"):
+                if key in normalized:
+                    normalized["required_artifacts"] = normalized.get(key)
+                    break
         for alias in (
             "name",
             "summary",
@@ -57,6 +69,12 @@ class PlannedTask(BaseModel):
             "acceptance_tests",
             "acceptance",
             "done_when",
+            "files",
+            "changed_files",
+            "expected_files",
+            "artifacts",
+            "deliverables",
+            "required_files",
         ):
             normalized.pop(alias, None)
         return normalized

@@ -67,7 +67,7 @@ class RepoServer:
                 continue
             if path.suffix in {".sqlite3", ".db", ".pyc"}:
                 continue
-            files.append(str(path.relative_to(self.workspace_root)))
+            files.append(path.relative_to(self.workspace_root).as_posix())
         return {"files": files}
 
     def read_file(self, path: str, max_chars: int = 20000) -> dict[str, object]:
@@ -114,6 +114,10 @@ class RepoServer:
                     {
                         "path": str(relative_path),
                         "line": index,
+                        "line_number": index,
+                        "before": lines[start - 1 : index - 1],
+                        "match": line,
+                        "after": lines[index:end],
                         "snippet": snippet,
                     }
                 )

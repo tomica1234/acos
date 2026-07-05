@@ -145,8 +145,8 @@ def test_run_tests_with_fixes_passes_diagnosis_to_fixer_and_stores_threshold(
     result = runner._run_tests_with_fixes(record, task)
 
     assert result is failing_result
-    assert record.status == JobStatus.STUCK
-    assert record.last_error == "diagnosed_repeated_failure:test_expectation_mismatch"
+    assert record.status == JobStatus.DIAGNOSING
+    assert record.last_error == "same_failure_threshold_reached"
     assert record.outputs["failure_diagnosis"]["root_cause"] == (
         "VALUE remains 0 while the test expects 1"
     )
@@ -158,6 +158,9 @@ def test_run_tests_with_fixes_passes_diagnosis_to_fixer_and_stores_threshold(
     assert record.outputs["recovery_ready"]["retry_mode"] == "targeted_fix"
     assert record.outputs["recovery_ready"]["root_cause"] == (
         "VALUE remains 0 while the test expects 1"
+    )
+    assert record.runtime_state["recovery_plan"]["strategy"] == (
+        "RETRY_WITH_DIFFERENT_STRATEGY"
     )
     assert any("failure_diagnosis:" in item for item in fixer_logs[0])
     assert any("repeated_failure_instruction:" in item for item in fixer_logs[1])

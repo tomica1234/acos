@@ -40,6 +40,7 @@ class JobRecord(BaseModel):
     status: JobStatus = JobStatus.SUBMITTED
     history: list[JobStatus] = Field(default_factory=lambda: [JobStatus.SUBMITTED])
     outputs: dict[str, Any] = Field(default_factory=dict)
+    runtime_state: dict[str, Any] = Field(default_factory=dict)
     audit_events: list[AuditEvent] = Field(default_factory=list)
     completed_task_ids: list[str] = Field(default_factory=list)
     checkpoints: list[dict[str, Any]] = Field(default_factory=list)

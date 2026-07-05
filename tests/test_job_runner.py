@@ -137,7 +137,7 @@ def test_job_runner_review_request_changes_then_fix(tmp_path: Path) -> None:
     assert len(environment.git_server.commits) == 1
 
 
-def test_job_runner_max_attempts_stuck(tmp_path: Path) -> None:
+def test_job_runner_max_attempts_triggers_recovery(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     registry = ModelRegistry.from_paths(
@@ -210,7 +210,12 @@ def test_job_runner_max_attempts_stuck(tmp_path: Path) -> None:
 
     record = runner.run_job(spec)
 
-    assert record.status.value == "stuck"
+    assert record.status in {JobStatus.REPLANNING, JobStatus.DIAGNOSING}
+    assert record.runtime_state["recovery_plan"]["trigger"] in {
+        "max_attempts_exceeded",
+        "same_failure_threshold_reached",
+    }
+    assert record.outputs["recovery_history"]
 
 
 def test_job_runner_fails_without_applying_fixer_patch_when_fixer_reports_failed(
@@ -362,7 +367,7 @@ def test_job_runner_pm_uses_context_without_live_tool_calls(tmp_path: Path, monk
     runner._run_structured_role(record, "pm", PRD, "Produce the product requirements")
 
     assert captured["allowed_tools"] == []
-    assert "__repo_tree__.txt" in captured["relevant_files"]
+    assert "__repo_map__.txt" in captured["relevant_files"]
 
 
 def test_job_runner_can_skip_review_and_release_for_generation_test(tmp_path: Path) -> None:
@@ -2068,8 +2073,11 @@ def test_job_runner_blocks_completion_without_test_evidence(
 
     record = runner.run_job(spec)
 
-    assert record.status == JobStatus.BLOCKED
+    assert record.status == JobStatus.REPLANNING
     assert record.last_error == "completion_integrity_failed:missing_test_evidence"
+    assert record.runtime_state["recovery_plan"]["strategy"] == (
+        "REPLAN_TASK_WITH_REQUIRED_ARTIFACTS"
+    )
     assert record.outputs["completion_integrity"]["passed"] is False
     assert record.outputs["completion_integrity"]["failure_reasons"] == ["missing_test_evidence"]
     assert record.outputs["completion_integrity"]["executed_test_count"] == 0
@@ -2151,8 +2159,11 @@ def test_job_runner_blocks_completion_when_implementation_stage_has_no_test_patc
 
     record = runner.run_job(spec)
 
-    assert record.status == JobStatus.BLOCKED
+    assert record.status == JobStatus.REPLANNING
     assert record.last_error == "completion_integrity_failed:missing_stage_test_patches:1"
+    assert record.runtime_state["recovery_plan"]["strategy"] == (
+        "REPLAN_TASK_WITH_REQUIRED_ARTIFACTS"
+    )
     report = record.outputs["completion_integrity"]
     assert report["passed"] is False
     assert report["failure_reasons"] == ["missing_stage_test_patches:1"]
@@ -3146,8 +3157,9 @@ def test_job_runner_blocks_oversized_agent_patch_output_before_applying(
 
     record = runner.run_job(spec)
 
-    assert record.status.value == "blocked"
-    assert record.last_error == "patch_limit_exceeded:implementer:2>1"
+    assert record.status == JobStatus.DIAGNOSING
+    assert record.last_error == "quality_gate_recoverable:patch_limit_exceeded:implementer:2>1"
+    assert record.runtime_state["recovery_plan"]["strategy"] == "DIAGNOSE_FAILURE"
     assert not (workspace / "one.py").exists()
     assert not (workspace / "two.py").exists()
 

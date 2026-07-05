@@ -1,0 +1,432 @@
+"""Recover failed ACOS jobs without treating recoverable failures as terminal."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from typing import Any
+
+from packages.schemas.jobs import JobRecord
+from packages.schemas.models import JobStatus
+
+
+HARD_TERMINAL_STATUSES = {
+    JobStatus.DONE,
+    JobStatus.CANCELLED,
+    JobStatus.POLICY_HARD_STOP,
+}
+WAITING_STATUSES = {
+    JobStatus.WAITING_APPROVAL,
+    JobStatus.WAITING_RUNTIME,
+}
+RECOVERABLE_STATUSES = {
+    JobStatus.BLOCKED,
+    JobStatus.STUCK,
+    JobStatus.FAILED,
+}
+POLICY_HARD_STOP_PREFIXES = (
+    "policy_hard_stop",
+    "policy_denied",
+    "blocked_operation",
+    "secret_access",
+    "direct_main_write",
+    "direct_master_write",
+    "force_push",
+    "production_deploy",
+    "unsafe_shell",
+    "workspace_escape",
+    "sudo",
+    "arbitrary_shell",
+)
+
+
+@dataclass(frozen=True)
+class RecoveryPlan:
+    """A concrete autonomous recovery action for a recoverable failure."""
+
+    trigger: str
+    strategy: str
+    next_status: JobStatus
+    next_actor: str
+    steps: list[str]
+    reason: str
+    checkpoint_policy: str = "preserve"
+    constraints: dict[str, Any] = field(default_factory=dict)
+    hard_stop: bool = False
+
+    def model_dump(self) -> dict[str, Any]:
+        return {
+            "trigger": self.trigger,
+            "strategy": self.strategy,
+            "next_status": self.next_status.value,
+            "next_actor": self.next_actor,
+            "steps": list(self.steps),
+            "reason": self.reason,
+            "checkpoint_policy": self.checkpoint_policy,
+            "constraints": dict(self.constraints),
+            "hard_stop": self.hard_stop,
+        }
+
+
+class RecoveryGovernor:
+    """Convert BLOCKED/STUCK/FAILED into an explicit next recovery strategy."""
+
+    def build_plan(
+        self,
+        record: JobRecord,
+        *,
+        error: str | None = None,
+        runtime_state: dict[str, Any] | None = None,
+    ) -> RecoveryPlan:
+        last_error = str(error or record.last_error or "")
+        lowered = last_error.lower()
+        runtime = runtime_state or record.runtime_state
+
+        if self.is_policy_hard_stop(last_error):
+            return RecoveryPlan(
+                trigger=self._trigger(last_error, "policy_hard_stop"),
+                strategy="POLICY_HARD_STOP",
+                next_status=JobStatus.POLICY_HARD_STOP,
+                next_actor="human",
+                steps=["STOP_FOR_POLICY"],
+                reason=last_error or "policy hard stop",
+                checkpoint_policy="preserve",
+                constraints={"recovery_mode": "policy_hard_stop"},
+                hard_stop=True,
+            )
+
+        if "provider" in lowered and any(token in lowered for token in ("unavailable", "unhealthy", "timeout", "timed out", "down")):
+            return RecoveryPlan(
+                trigger=self._trigger(last_error, "provider_unavailable"),
+                strategy="WAIT_FOR_PROVIDER",
+                next_status=JobStatus.WAITING_RUNTIME,
+                next_actor="runtime",
+                steps=["WAITING_RUNTIME", "AUTO_RESUME_WHEN_PROVIDER_HEALTHY"],
+                reason=last_error or "provider unavailable",
+                checkpoint_policy="preserve",
+                constraints={"recovery_mode": "provider_wait_retry"},
+            )
+
+        if "approval rejected" in lowered or "approval_rejected" in lowered:
+            if any(token in lowered for token in ("critical", "secret", "deploy", "main", "master", "force")):
+                return RecoveryPlan(
+                    trigger=self._trigger(last_error, "approval_rejected"),
+                    strategy="POLICY_HARD_STOP",
+                    next_status=JobStatus.POLICY_HARD_STOP,
+                    next_actor="human",
+                    steps=["STOP_FOR_REJECTED_CRITICAL_OPERATION"],
+                    reason=last_error or "critical approval rejected",
+                    checkpoint_policy="preserve",
+                    constraints={"recovery_mode": "approval_policy_hard_stop"},
+                    hard_stop=True,
+                )
+            return RecoveryPlan(
+                trigger=self._trigger(last_error, "approval_rejected"),
+                strategy="REPLAN_TO_AVOID_REJECTED_OPERATION",
+                next_status=JobStatus.REPLANNING,
+                next_actor="planner",
+                steps=["REPLAN_WITH_CONSTRAINTS", "AVOID_REJECTED_OPERATION"],
+                reason=last_error or "approval rejected",
+                checkpoint_policy="invalidate_failed_stage",
+                constraints={"recovery_mode": "approval_replan"},
+            )
+
+        mapping = self._strategy_mapping(record, last_error, runtime)
+        if mapping is not None:
+            return mapping
+
+        return RecoveryPlan(
+            trigger=self._trigger(last_error, "recoverable_failure"),
+            strategy="DIAGNOSE_FAILURE",
+            next_status=JobStatus.DIAGNOSING,
+            next_actor="diagnoser",
+            steps=["DIAGNOSE_FAILURE", "REPLAN_TASK"],
+            reason=last_error or "recoverable failure",
+            checkpoint_policy="invalidate_failed_stage",
+            constraints={"recovery_mode": "diagnose_and_replan"},
+        )
+
+    def recover(
+        self,
+        record: JobRecord,
+        *,
+        error: str | None = None,
+        runtime_state: dict[str, Any] | None = None,
+    ) -> RecoveryPlan:
+        plan = self.build_plan(record, error=error, runtime_state=runtime_state)
+        now = datetime.now(timezone.utc).isoformat()
+        plan_payload = plan.model_dump() | {"created_at": now}
+        record.runtime_state["recovery_plan"] = plan_payload
+        history = record.outputs.setdefault("recovery_history", [])
+        if not isinstance(history, list):
+            history = []
+            record.outputs["recovery_history"] = history
+        history.append(plan_payload)
+        constraints = record.spec.metadata.setdefault("constraints", {})
+        if not isinstance(constraints, dict):
+            constraints = {}
+            record.spec.metadata["constraints"] = constraints
+        constraints.update(plan.constraints)
+        constraints["recovery_strategy"] = plan.strategy
+        constraints["recovery_next_actor"] = plan.next_actor
+        constraints["recovery_step_count"] = len(history)
+        self._invalidate_checkpoints(record, plan)
+        self._invalidate_outputs(record, plan)
+        record.status = plan.next_status
+        record.history.append(plan.next_status)
+        if plan.hard_stop:
+            record.last_error = plan.reason
+        elif error is not None:
+            record.last_error = error
+        record.updated_at = datetime.now(timezone.utc)
+        return plan
+
+    def recover_if_needed(self, record: JobRecord) -> RecoveryPlan | None:
+        if is_recoverable_status(record.status):
+            return self.recover(record)
+        return None
+
+    @staticmethod
+    def is_policy_hard_stop(last_error: str | None) -> bool:
+        if not last_error:
+            return False
+        lowered = last_error.lower()
+        return any(lowered.startswith(prefix) for prefix in POLICY_HARD_STOP_PREFIXES)
+
+    @staticmethod
+    def _trigger(last_error: str, fallback: str) -> str:
+        if not last_error:
+            return fallback
+        return last_error.split(":", 1)[0]
+
+    def _strategy_mapping(
+        self,
+        record: JobRecord,
+        last_error: str,
+        runtime_state: dict[str, Any],
+    ) -> RecoveryPlan | None:
+        lowered = last_error.lower()
+        trigger = self._trigger(last_error, "recoverable_failure")
+        if trigger in {"max_attempts_exceeded", "tests_failed_after_retries"}:
+            return RecoveryPlan(
+                trigger=trigger,
+                strategy="REPLAN_TASK",
+                next_status=JobStatus.REPLANNING,
+                next_actor="planner",
+                steps=["DIAGNOSE_FAILURE", "REPLAN_TASK"],
+                reason=last_error,
+                checkpoint_policy="invalidate_failed_stage",
+                constraints={"recovery_mode": "max_attempts_replan"},
+            )
+        if trigger in {"same_failure_threshold_reached", "diagnosed_repeated_failure"}:
+            return RecoveryPlan(
+                trigger=trigger,
+                strategy="RETRY_WITH_DIFFERENT_STRATEGY",
+                next_status=JobStatus.DIAGNOSING,
+                next_actor="diagnoser",
+                steps=["DIAGNOSE_FAILURE", "EXPAND_CONTEXT", "RETRY_WITH_DIFFERENT_STRATEGY"],
+                reason=last_error,
+                checkpoint_policy="invalidate_failed_stage",
+                constraints={
+                    "recovery_mode": "same_failure_strategy_change",
+                    "avoid_same_fixer_loop": True,
+                    "expand_context": True,
+                },
+            )
+        if trigger == "design_review_max_attempts_exceeded":
+            return RecoveryPlan(
+                trigger=trigger,
+                strategy="REVISE_PRD_AND_ARCHITECTURE",
+                next_status=JobStatus.REPLANNING,
+                next_actor="pm",
+                steps=["REVISE_PRD", "REVISE_ARCHITECTURE", "REPLAN_TASK"],
+                reason=last_error,
+                checkpoint_policy="invalidate_planning",
+                constraints={"recovery_mode": "design_review_revision"},
+            )
+        if trigger == "acceptance_review_max_attempts_exceeded":
+            return RecoveryPlan(
+                trigger=trigger,
+                strategy="SPLIT_TASK_OR_REDEFINE_ACCEPTANCE",
+                next_status=JobStatus.REPLANNING,
+                next_actor="planner",
+                steps=["SPLIT_TASK", "REDEFINE_ACCEPTANCE", "CREATE_PENDING_FIX_REQUEST"],
+                reason=last_error,
+                checkpoint_policy="invalidate_failed_stage",
+                constraints={"recovery_mode": "acceptance_review_split"},
+            )
+        if trigger in {"required_artifacts_missing", "completion_integrity_failed"}:
+            return RecoveryPlan(
+                trigger=trigger,
+                strategy="REPLAN_TASK_WITH_REQUIRED_ARTIFACTS",
+                next_status=JobStatus.REPLANNING,
+                next_actor="planner",
+                steps=["REPLAN_TASK_WITH_REQUIRED_ARTIFACTS", "RETURN_TO_IMPLEMENTER"],
+                reason=last_error,
+                checkpoint_policy="invalidate_failed_stage",
+                constraints={"recovery_mode": "required_artifacts_replan"},
+            )
+        if trigger in {"target_files_missing", "target_file_missing"} or "target file" in lowered:
+            return RecoveryPlan(
+                trigger=trigger,
+                strategy="RETURN_TO_IMPLEMENTER",
+                next_status=JobStatus.IMPLEMENTING,
+                next_actor="implementer",
+                steps=["RETURN_TO_IMPLEMENTER", "RECREATE_TARGET_FILES"],
+                reason=last_error,
+                checkpoint_policy="invalidate_failed_stage",
+                constraints={"recovery_mode": "target_files_missing"},
+            )
+        if trigger in {"test_patch_quality_failed", "fixer_attempted_to_weaken_tests"} or "weaken tests" in lowered:
+            return RecoveryPlan(
+                trigger=trigger,
+                strategy="RETURN_TO_TEST_WRITER",
+                next_status=JobStatus.WRITING_TESTS,
+                next_actor="test_writer",
+                steps=["RETURN_TO_TEST_WRITER", "REWRITE_TEST_PATCH"],
+                reason=last_error,
+                checkpoint_policy="invalidate_failed_stage",
+                constraints={"recovery_mode": "test_patch_quality_rewrite"},
+            )
+        if "reviewer did not approve" in lowered or "security review did not approve" in lowered:
+            return RecoveryPlan(
+                trigger=trigger,
+                strategy="RETURN_TO_FIXER",
+                next_status=JobStatus.FIXING,
+                next_actor="fixer",
+                steps=["RETURN_TO_FIXER", "ADDRESS_REVIEW_FINDINGS"],
+                reason=last_error,
+                checkpoint_policy="invalidate_failed_stage",
+                constraints={"recovery_mode": "review_repair"},
+            )
+        if trigger == "output_truncated":
+            return RecoveryPlan(
+                trigger=trigger,
+                strategy="COMPACT_CONTEXT_AND_RETRY",
+                next_status=JobStatus.RECOVERING,
+                next_actor="orchestrator",
+                steps=["COMPACT_CONTEXT", "RETRY_AGENT"],
+                reason=last_error,
+                checkpoint_policy="preserve",
+                constraints={"recovery_mode": "compact_context_retry"},
+            )
+        if trigger == "context_budget_exceeded":
+            return RecoveryPlan(
+                trigger=trigger,
+                strategy="EXPAND_COMPACT_RETRIEVAL_AND_RETRY",
+                next_status=JobStatus.RECOVERING,
+                next_actor="orchestrator",
+                steps=["COMPACT_RETRIEVAL", "EXPAND_RELEVANT_FILES", "RETRY_AGENT"],
+                reason=last_error,
+                checkpoint_policy="preserve",
+                constraints={"recovery_mode": "retrieval_retry", "expand_context": True},
+            )
+        if trigger == "implementation_failed":
+            return RecoveryPlan(
+                trigger=trigger,
+                strategy="RETURN_TO_IMPLEMENTER",
+                next_status=JobStatus.IMPLEMENTING,
+                next_actor="implementer",
+                steps=["RETURN_TO_IMPLEMENTER", "RETRY_IMPLEMENTATION_WITH_RECOVERY_CONTEXT"],
+                reason=last_error,
+                checkpoint_policy="invalidate_failed_stage",
+                constraints={"recovery_mode": "implementation_retry"},
+            )
+        if trigger in {"implementation_blocked", "fixer_failed", "fixer_stuck"}:
+            return RecoveryPlan(
+                trigger=trigger,
+                strategy="REPLAN_TASK",
+                next_status=JobStatus.REPLANNING,
+                next_actor="planner",
+                steps=["DIAGNOSE_FAILURE", "REPLAN_TASK"],
+                reason=last_error,
+                checkpoint_policy="invalidate_failed_stage",
+                constraints={"recovery_mode": f"{trigger}_replan"},
+            )
+        if trigger in {"test_writer_blocked", "test_writer_failed"}:
+            return RecoveryPlan(
+                trigger=trigger,
+                strategy="RETURN_TO_TEST_WRITER",
+                next_status=JobStatus.WRITING_TESTS,
+                next_actor="test_writer",
+                steps=["REWRITE_TEST_STRATEGY", "RETRY_TEST_WRITER"],
+                reason=last_error,
+                checkpoint_policy="invalidate_failed_stage",
+                constraints={"recovery_mode": f"{trigger}_rewrite"},
+            )
+        if runtime_state.get("provider_unavailable") is True:
+            return self.build_plan(record, error="provider_unavailable", runtime_state={})
+        return None
+
+    @staticmethod
+    def _invalidate_checkpoints(record: JobRecord, plan: RecoveryPlan) -> None:
+        if plan.checkpoint_policy == "preserve":
+            return
+        if plan.checkpoint_policy == "invalidate_planning":
+            record.runtime_state["planning_invalidated"] = True
+            return
+        for checkpoint in record.checkpoints:
+            if not isinstance(checkpoint, dict):
+                continue
+            if checkpoint.get("test_success") is False or checkpoint.get("stage") == record.outputs.get("failed_stage"):
+                checkpoint["invalidated_by_recovery"] = True
+                checkpoint["recovery_strategy"] = plan.strategy
+
+    @staticmethod
+    def _invalidate_outputs(record: JobRecord, plan: RecoveryPlan) -> None:
+        keys_by_strategy = {
+            "REVISE_PRD_AND_ARCHITECTURE": {
+                "pm",
+                "prd",
+                "prd_quality",
+                "prd_quality_attempts",
+                "architect",
+                "architecture",
+                "planner",
+                "task_graph",
+                "task_graph_validation",
+                "task_graph_validation_attempts",
+            },
+            "REPLAN_TASK": {
+                "planner",
+                "task_graph",
+                "task_graph_validation",
+                "task_graph_validation_attempts",
+            },
+            "REPLAN_TASK_WITH_REQUIRED_ARTIFACTS": {
+                "planner",
+                "task_graph",
+                "task_graph_validation",
+                "task_graph_validation_attempts",
+            },
+            "SPLIT_TASK_OR_REDEFINE_ACCEPTANCE": {
+                "planner",
+                "task_graph",
+                "task_graph_validation",
+                "task_graph_validation_attempts",
+            },
+            "RETURN_TO_IMPLEMENTER": {
+                "implementer",
+                "implementation",
+            },
+            "RETURN_TO_TEST_WRITER": {
+                "test_writer",
+            },
+        }
+        invalidated = sorted(keys_by_strategy.get(plan.strategy, set()))
+        for key in invalidated:
+            record.outputs.pop(key, None)
+        if invalidated:
+            record.runtime_state["invalidated_outputs"] = invalidated
+
+
+def is_hard_terminal_status(status: JobStatus) -> bool:
+    return status in HARD_TERMINAL_STATUSES
+
+
+def is_waiting_status(status: JobStatus) -> bool:
+    return status in WAITING_STATUSES
+
+
+def is_recoverable_status(status: JobStatus) -> bool:
+    return status in RECOVERABLE_STATUSES

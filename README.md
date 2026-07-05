@@ -15,6 +15,9 @@ layer so providers and model sizes remain interchangeable.
 - Orchestrator-owned state machine with retries, blocked and stuck handling
 - AutonomyGovernor recovery that keeps jobs moving until completion unless a
   policy hard stop is reached
+- RecoveryGovernor runtime recovery: `BLOCKED`, `STUCK`, and `FAILED` are
+  recoverable strategy-change triggers, while only `DONE`, `CANCELLED`, and
+  `POLICY_HARD_STOP` are hard terminal states
 - Role-specific model configuration and dynamic model escalation
 - OpenAI-compatible provider support plus a deterministic mock adapter
 - Pydantic-validated agent outputs and context packets
@@ -297,6 +300,13 @@ python -m apps.cli run-demo --workspace /tmp/acos-demo
 - test execution is allowlisted
 - direct `main`/`master` writes are blocked
 - force push, production deploy, and destructive migrations are blocked
+
+## Runtime Recovery
+
+ACOS writes recovery plans to job runtime state when tests, quality gates,
+reviews, or required artifacts fail. The next worker cycle uses that plan as
+agent context and changes strategy instead of repeating the same fixer loop.
+See [docs/RUNTIME_RECOVERY.md](docs/RUNTIME_RECOVERY.md).
 
 ## Current Limitations
 

@@ -26,6 +26,12 @@ from packages.orchestrator.quality_gates import (
     ensure_fixer_safe,
     ensure_reviews_pass,
 )
+from packages.orchestrator.recovery_governor import (
+    RecoveryGovernor,
+    is_hard_terminal_status,
+    is_recoverable_status,
+    is_waiting_status,
+)
 from packages.orchestrator.scaffolds import build_scaffold
 from packages.orchestrator.states import apply_transition
 from packages.schemas.agent_outputs import (
@@ -87,6 +93,7 @@ class JobRunner:
         self.store = store or InMemoryJobStore()
         self.audit = AuditRecorder()
         self.context_builder = ContextBuilder()
+        self.recovery_governor = RecoveryGovernor()
         self.model_router = ModelRouter(registry)
         self.llm_client = LLMClient(registry, self.model_router)
         self.agent_runner = AgentRunner(
@@ -122,8 +129,11 @@ class JobRunner:
     def _plan_record(self, record: JobRecord, *, resume: bool) -> JobRecord:
         self._active_record = record
         try:
-            if record.status == JobStatus.DONE:
+            if self._is_terminal_status(record.status) or self._is_waiting_status(record.status):
                 return record
+            if resume and self._recover_record_if_needed(record):
+                if self._is_terminal_status(record.status) or self._is_waiting_status(record.status):
+                    return self.store.update(record)
             if not resume:
                 self._prepare_branch(record)
             prd = self._load_or_refine_prd_for_autonomy(record)
@@ -149,8 +159,10 @@ class JobRunner:
             record.last_error = None
             return self.store.update(record)
         except QualityGateError as exc:
-            record.status = JobStatus.BLOCKED
-            record.last_error = str(exc)
+            self._recover_record(
+                record,
+                error=self._quality_gate_recovery_error(exc),
+            )
             return self.store.update(record)
         except Exception as exc:  # pragma: no cover - top-level safety net
             record.status = JobStatus.FAILED
@@ -162,8 +174,11 @@ class JobRunner:
     def _run_record(self, record: JobRecord, *, resume: bool) -> JobRecord:
         self._active_record = record
         try:
-            if record.status == JobStatus.DONE:
+            if self._is_terminal_status(record.status) or self._is_waiting_status(record.status):
                 return record
+            if resume and self._recover_record_if_needed(record):
+                if self._is_terminal_status(record.status) or self._is_waiting_status(record.status):
+                    return self.store.update(record)
             if not resume:
                 self._prepare_branch(record)
             prd = self._load_or_refine_prd_for_autonomy(record)
@@ -200,21 +215,26 @@ class JobRunner:
                 ) = self._run_autonomous_task_loop(record, task_graph)
                 implementation = self._combine_implementation_results(implementation_results)
                 test_writer = self._combine_test_writer_results(test_writer_results)
+            if self._has_pending_recovery_plan(record):
+                return self.store.update(record)
             if record.status in {JobStatus.STUCK, JobStatus.BLOCKED, JobStatus.FAILED}:
                 return self.store.update(record)
             if not self._constraint_flag(record, "skip_review"):
                 review, security_review = self._run_review_cycle(record, primary_task)
+                if self._has_pending_recovery_plan(record):
+                    return self.store.update(record)
                 if record.status in {JobStatus.STUCK, JobStatus.BLOCKED, JobStatus.FAILED}:
                     return self.store.update(record)
                 test_result = self._run_tests_with_fixes(record, primary_task)
+                if self._has_pending_recovery_plan(record):
+                    return self.store.update(record)
             else:
                 if record.status != JobStatus.TESTING:
                     apply_transition(record, JobStatus.REVIEWING)
             if record.status in {JobStatus.STUCK, JobStatus.BLOCKED, JobStatus.FAILED}:
                 return self.store.update(record)
             if not test_result.success:
-                record.status = JobStatus.FAILED
-                record.last_error = "tests_failed_after_retries"
+                self._recover_record(record, error="max_attempts_exceeded")
                 return self.store.update(record)
             if not self._validate_completion_integrity(record, task_graph, test_result):
                 return self.store.update(record)
@@ -261,8 +281,10 @@ class JobRunner:
             apply_transition(record, JobStatus.DONE)
             return self.store.update(record)
         except QualityGateError as exc:
-            record.status = JobStatus.BLOCKED
-            record.last_error = str(exc)
+            self._recover_record(
+                record,
+                error=self._quality_gate_recovery_error(exc),
+            )
             return self.store.update(record)
         except Exception as exc:  # pragma: no cover - top-level safety net
             record.status = JobStatus.FAILED
@@ -278,7 +300,7 @@ class JobRunner:
             "planner": JobStatus.PLANNING,
             "implementer": JobStatus.IMPLEMENTING,
             "test_writer": JobStatus.WRITING_TESTS,
-            "diagnoser": JobStatus.TESTING,
+            "diagnoser": JobStatus.DIAGNOSING,
             "reviewer": JobStatus.REVIEWING,
             "security_reviewer": JobStatus.REVIEWING,
             "fixer": JobStatus.FIXING,
@@ -304,6 +326,61 @@ class JobRunner:
         record.last_error = None
         record.updated_at = datetime.now(timezone.utc)
         self.store.update(record)
+
+    def _is_terminal_status(self, status: JobStatus) -> bool:
+        return is_hard_terminal_status(status)
+
+    def _is_waiting_status(self, status: JobStatus) -> bool:
+        return is_waiting_status(status)
+
+    def _is_recoverable_status(self, status: JobStatus) -> bool:
+        return is_recoverable_status(status)
+
+    def _recover_record(
+        self,
+        record: JobRecord,
+        *,
+        error: str | None = None,
+        runtime_state: dict[str, Any] | None = None,
+    ) -> None:
+        if not hasattr(self, "recovery_governor"):
+            self.recovery_governor = RecoveryGovernor()
+        self.recovery_governor.recover(
+            record,
+            error=error,
+            runtime_state=runtime_state,
+        )
+        self.store.update(record)
+
+    def _recover_record_if_needed(self, record: JobRecord) -> bool:
+        if not self._is_recoverable_status(record.status):
+            return False
+        self._recover_record(record)
+        return True
+
+    @staticmethod
+    def _has_pending_recovery_plan(record: JobRecord) -> bool:
+        plan = record.runtime_state.get("recovery_plan")
+        if not isinstance(plan, dict):
+            return False
+        next_status = plan.get("next_status")
+        return isinstance(next_status, str) and record.status.value == next_status
+
+    @staticmethod
+    def _quality_gate_recovery_error(exc: QualityGateError) -> str:
+        message = str(exc)
+        lowered = message.lower()
+        if RecoveryGovernor.is_policy_hard_stop(message):
+            return message
+        if "weaken tests" in lowered:
+            return f"test_patch_quality_failed:{message}"
+        if "required artifact" in lowered or "artifact" in lowered:
+            return f"required_artifacts_missing:{message}"
+        if "target file" in lowered:
+            return f"target_files_missing:{message}"
+        if "reviewer did not approve" in lowered or "security review did not approve" in lowered:
+            return f"reviews_rejected:{message}"
+        return f"quality_gate_recoverable:{message}"
 
     def _load_or_run_role(
         self,
@@ -336,7 +413,7 @@ class JobRunner:
     ) -> Any:
         apply_transition(record, self._phase_for_role(role))
         agent_cfg = self.registry.get_agent(role)
-        relevant_files = self._gather_relevant_files(role)
+        relevant_files = self._gather_relevant_files(role, record=record, task=task)
         diff = (
             self._call_tool(role, "git_server.diff").get("diff", "")
             if self.policy.is_tool_allowed(role, "git_server.diff")
@@ -376,7 +453,10 @@ class JobRunner:
             agent_config=agent_cfg,
             selected_model=selected_model,
             task=task,
-            metadata={"output_schema": agent_cfg.output_schema},
+            metadata={
+                "output_schema": agent_cfg.output_schema,
+                "retrieval_trace": record.runtime_state.get("retrieval_trace", []),
+            },
         )
         routing_context = RoutingContext(
             role=role,
@@ -401,28 +481,223 @@ class JobRunner:
         self.store.update(record)
         return output
 
-    def _gather_relevant_files(self, role: str) -> dict[str, str]:
+    def _gather_relevant_files(
+        self,
+        role: str,
+        *,
+        record: JobRecord | None = None,
+        task: PlannedTask | None = None,
+    ) -> dict[str, str]:
         files: dict[str, str] = {}
+        trace: list[dict[str, str]] = []
         can_tree = self.policy.is_tool_allowed(role, "repo_server.repo_tree")
         can_read = self.policy.is_tool_allowed(role, "repo_server.read_file")
-        candidates: list[str] = []
+        repo_files: list[str] = []
+        candidate_reasons: dict[str, list[str]] = {}
+
+        def add_candidate(path: object, reason: str) -> None:
+            normalized = self._normalize_context_path(path, record)
+            if normalized is None:
+                return
+            candidate_reasons.setdefault(normalized, []).append(reason)
+
+        if task is not None:
+            for path in task.target_files:
+                add_candidate(path, "task.target_files")
+            for path in task.required_artifacts:
+                if self._looks_like_context_file(path):
+                    add_candidate(path, "task.required_artifacts")
+
+        if record is not None:
+            for path in self._failure_context_paths(record):
+                add_candidate(path, "failure_log")
+
+        if self.policy.is_tool_allowed("release_manager", "git_server.status"):
+            try:
+                status = self._call_tool("release_manager", "git_server.status")
+            except Exception as exc:
+                trace.append(
+                    {
+                        "path": "__git_status__",
+                        "reason": "git.modified_files",
+                        "action": f"skipped:{exc}",
+                    }
+                )
+            else:
+                for path in status.get("modified_files", []):
+                    add_candidate(path, "git.modified_files")
+
         if can_tree:
-            tree_files = list(self._call_tool(role, "repo_server.repo_tree").get("files", []))
-            candidates = self._prioritized_context_files(tree_files)
-        else:
-            status = self._call_tool("release_manager", "git_server.status")
-            candidates = self._prioritized_context_files(list(status.get("modified_files", [])))
+            try:
+                repo_files = [
+                    str(path)
+                    for path in self._call_tool(role, "repo_server.repo_tree").get("files", [])
+                ]
+            except Exception as exc:
+                trace.append(
+                    {
+                        "path": "__repo_map__",
+                        "reason": "repo_server.repo_tree",
+                        "action": f"skipped:{exc}",
+                    }
+                )
+            else:
+                repo_file_set = set(repo_files)
+                for path in list(candidate_reasons):
+                    if path not in repo_file_set:
+                        trace.append(
+                            {
+                                "path": path,
+                                "reason": ",".join(candidate_reasons[path]),
+                                "action": "candidate_not_in_repo_map",
+                            }
+                        )
+                if len(candidate_reasons) < 3:
+                    for path in self._prioritized_context_files(repo_files):
+                        add_candidate(path, "repo_map.priority")
+
+        agent_cfg = self.registry.get_agent(role)
+        max_files = self._context_file_budget(agent_cfg.context_budget_tokens)
+        candidates = self._prioritized_context_files(
+            list(candidate_reasons),
+            limit=max_files,
+        )
+
         if can_read:
             for path in candidates:
-                payload = self._call_tool(role, "repo_server.read_file", path=path)
+                try:
+                    payload = self._call_tool(role, "repo_server.read_file", path=path)
+                except Exception as exc:
+                    trace.append(
+                        {
+                            "path": path,
+                            "reason": ",".join(candidate_reasons.get(path, [])),
+                            "action": f"read_failed:{exc}",
+                        }
+                    )
+                    continue
                 files[path] = str(payload["content"])
-            if candidates:
-                files["__retrieval_trace__.txt"] = "\n".join(
-                    f"read_file:{path}:prioritized repository context" for path in candidates
+                trace.append(
+                    {
+                        "path": path,
+                        "reason": ",".join(candidate_reasons.get(path, [])),
+                        "action": "read_file",
+                    }
                 )
-        elif candidates:
-            files["__repo_tree__.txt"] = "\n".join(candidates)
+
+        if repo_files:
+            files["__repo_map__.txt"] = "\n".join(repo_files)
+            trace.append(
+                {
+                    "path": "__repo_map__.txt",
+                    "reason": "repo_server.repo_tree",
+                    "action": "repo_map_only",
+                }
+            )
+        elif candidates and not can_read:
+            files["__repo_map__.txt"] = "\n".join(candidates)
+
+        if trace:
+            files["__retrieval_trace__.txt"] = "\n".join(
+                f"{item['action']}:{item['path']}:{item['reason']}" for item in trace
+            )
+            if record is not None:
+                record.runtime_state["retrieval_trace"] = trace[-100:]
         return files
+
+    @staticmethod
+    def _context_file_budget(context_budget_tokens: int) -> int:
+        if context_budget_tokens <= 0:
+            return 8
+        return max(8, min(40, context_budget_tokens // 1200))
+
+    @staticmethod
+    def _looks_like_context_file(path: object) -> bool:
+        if not isinstance(path, str):
+            return False
+        stripped = path.strip()
+        if not stripped:
+            return False
+        return bool(
+            re.search(
+                r"\.(py|js|jsx|ts|tsx|json|ya?ml|toml|md|css|html|txt)$",
+                stripped,
+                flags=re.IGNORECASE,
+            )
+            or "/" in stripped
+            or "\\" in stripped
+        )
+
+    @staticmethod
+    def _normalize_context_path(
+        path: object,
+        record: JobRecord | None,
+    ) -> str | None:
+        if not isinstance(path, str):
+            return None
+        raw = path.strip().strip("'\"")
+        if not raw:
+            return None
+        normalized = raw.replace("\\", "/")
+        if record is not None:
+            try:
+                workspace = Path(record.spec.repo_path).resolve().as_posix()
+            except OSError:
+                workspace = ""
+            if workspace and normalized.startswith(f"{workspace}/"):
+                normalized = normalized[len(workspace) + 1 :]
+        normalized = normalized.removeprefix("./")
+        if (
+            not normalized
+            or normalized.startswith("../")
+            or normalized == ".."
+            or Path(normalized).is_absolute()
+            or re.match(r"^[A-Za-z]:/", normalized)
+        ):
+            return None
+        return normalized
+
+    def _failure_context_paths(self, record: JobRecord) -> list[str]:
+        paths: list[str] = []
+        diagnosis = record.outputs.get("failure_diagnosis")
+        if isinstance(diagnosis, dict):
+            for path in diagnosis.get("failed_files", []):
+                if isinstance(path, str):
+                    paths.append(path)
+        diagnoses = record.outputs.get("failure_diagnoses")
+        if isinstance(diagnoses, list):
+            for item in diagnoses[-3:]:
+                if isinstance(item, dict):
+                    for path in item.get("failed_files", []):
+                        if isinstance(path, str):
+                            paths.append(path)
+        for text in self._failure_context_texts(record):
+            paths.extend(self._extract_failed_files(text))
+        return self._unique_paths(paths)
+
+    @staticmethod
+    def _failure_context_texts(record: JobRecord) -> list[str]:
+        texts: list[str] = []
+        if isinstance(record.last_error, str):
+            texts.append(record.last_error)
+        test_run = record.outputs.get("test_run")
+        if isinstance(test_run, dict):
+            output_excerpt = test_run.get("output_excerpt")
+            if isinstance(output_excerpt, str):
+                texts.append(output_excerpt)
+        stages = record.outputs.get("autonomous_stages")
+        if isinstance(stages, list):
+            for stage in stages[-3:]:
+                if not isinstance(stage, dict):
+                    continue
+                for key in ("test_run", "post_review_test_run"):
+                    test_payload = stage.get(key)
+                    if isinstance(test_payload, dict) and isinstance(
+                        test_payload.get("output_excerpt"),
+                        str,
+                    ):
+                        texts.append(str(test_payload["output_excerpt"]))
+        return texts
 
     @staticmethod
     def _prioritized_context_files(paths: list[str], limit: int = 40) -> list[str]:
@@ -1799,12 +2074,8 @@ class JobRunner:
             ensure_fixer_safe(fix.patches)
             self._apply_patches(record, "fixer", fix.patches)
             if same_failure_repeats >= self.max_same_failure_repeats:
-                record.status = JobStatus.STUCK
                 self._store_failure_diagnosis(record, diagnosis)
-                record.last_error = (
-                    "diagnosed_repeated_failure:"
-                    f"{diagnosis.classification.value}"
-                )
+                record.last_error = "same_failure_threshold_reached"
                 record.outputs["recovery_ready"] = {
                     "reason": "same_failure_threshold_reached",
                     "classification": diagnosis.classification.value,
@@ -1813,10 +2084,21 @@ class JobRunner:
                     "retry_mode": diagnosis.retry_mode.value,
                     "should_retry": diagnosis.should_retry,
                     "failure_signature": diagnosis.failure_signature,
+                    "diagnosed_last_error": (
+                        "diagnosed_repeated_failure:"
+                        f"{diagnosis.classification.value}"
+                    ),
                 }
-                self.store.update(record)
+                self._recover_record(record, error="same_failure_threshold_reached")
                 return test_result
             test_result = self._run_tests(record)
+        if not test_result.success and attempts >= self.max_attempts_per_task:
+            if not (
+                self._is_recoverable_status(record.status)
+                or self._is_terminal_status(record.status)
+                or self._is_waiting_status(record.status)
+            ):
+                self._recover_record(record, error="max_attempts_exceeded")
         return test_result
 
     def _diagnose_test_failure(
@@ -2069,11 +2351,12 @@ class JobRunner:
     @staticmethod
     def _extract_failed_files(output: str) -> list[str]:
         paths: list[str] = []
-        for match in re.finditer(r"([A-Za-z]:\\[^\n:]+?\.(?:py|js|jsx|ts|tsx))", output):
+        suffixes = r"py|js|jsx|ts|tsx|json|ya?ml|toml|md|css|html|txt"
+        for match in re.finditer(rf"([A-Za-z]:\\[^\n:]+?\.(?:{suffixes}))", output):
             path = match.group(1)
             if path not in paths:
                 paths.append(path)
-        for match in re.finditer(r"\b([\w./-]+\.(?:py|js|jsx|ts|tsx)):(?:\d+)", output):
+        for match in re.finditer(rf"\b([\w./-]+\.(?:{suffixes}))(?::(?:\d+))?", output):
             path = match.group(1)
             if path not in paths:
                 paths.append(path)
@@ -2413,9 +2696,10 @@ class JobRunner:
         if report["passed"]:
             self.store.update(record)
             return True
-        record.status = JobStatus.BLOCKED
-        record.last_error = "completion_integrity_failed:" + ",".join(report["failure_reasons"])
-        self.store.update(record)
+        self._recover_record(
+            record,
+            error="completion_integrity_failed:" + ",".join(report["failure_reasons"]),
+        )
         return False
 
     @staticmethod
@@ -2681,10 +2965,12 @@ class JobRunner:
             try:
                 ensure_reviews_pass(review, security_review)
                 return review, security_review
-            except QualityGateError:
+            except QualityGateError as exc:
                 attempts += 1
                 if attempts >= self.max_attempts_per_task:
-                    raise
+                    raise QualityGateError(
+                        f"acceptance_review_max_attempts_exceeded:{exc}"
+                    ) from exc
                 findings = [
                     review.summary,
                     security_review.summary,

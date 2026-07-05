@@ -31,6 +31,9 @@ def summarize_job_progress(record: JobRecord) -> dict[str, Any]:
     completion_integrity = _completion_integrity(record)
     failure_analysis = _failure_analysis(record, failed_stage, recovery_history)
     failure_diagnosis = _failure_diagnosis(record)
+    recovery_plan = record.runtime_state.get("recovery_plan")
+    if not isinstance(recovery_plan, dict):
+        recovery_plan = None
     total_tasks = len(planned_ids)
     completed_count = len([task_id for task_id in completed_task_ids if task_id in planned_id_set])
     progress_ratio = completed_count / total_tasks if total_tasks else 0.0
@@ -68,6 +71,7 @@ def summarize_job_progress(record: JobRecord) -> dict[str, Any]:
         "completion_integrity": completion_integrity,
         "execution_limits": execution_limits,
         "failure_analysis": failure_analysis,
+        "recovery_plan": recovery_plan,
         "change_summary": change_summary,
         "last_error": record.last_error,
         "updated_at": record.updated_at.isoformat(),
@@ -281,6 +285,18 @@ def _resume_recommendation(
             "can_auto_continue": False,
             "suggested_cli_args": [],
             "suggested_continue_cli_args": [],
+        }
+    recovery_plan = record.runtime_state.get("recovery_plan")
+    if isinstance(recovery_plan, dict) and not recovery_plan.get("hard_stop"):
+        return {
+            "action": str(recovery_plan.get("strategy") or "run_recovery_plan").lower(),
+            "task_id": recovery_plan.get("task_id"),
+            "stage": recovery_plan.get("stage"),
+            "reason": recovery_plan.get("reason") or record.last_error,
+            "can_auto_continue": True,
+            "recovery_plan": recovery_plan,
+            "suggested_cli_args": _resume_cli_args(record.job_id),
+            "suggested_continue_cli_args": _continue_cli_args(record.job_id),
         }
     if failure_analysis.get("auto_continue_blocked"):
         classification = failure_analysis.get("classification")
