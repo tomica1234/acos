@@ -30,6 +30,7 @@ def summarize_job_progress(record: JobRecord) -> dict[str, Any]:
     execution_limits = _execution_limits(record)
     completion_integrity = _completion_integrity(record)
     failure_analysis = _failure_analysis(record, failed_stage, recovery_history)
+    failure_diagnosis = _failure_diagnosis(record)
     total_tasks = len(planned_ids)
     completed_count = len([task_id for task_id in completed_task_ids if task_id in planned_id_set])
     progress_ratio = completed_count / total_tasks if total_tasks else 0.0
@@ -42,7 +43,7 @@ def summarize_job_progress(record: JobRecord) -> dict[str, Any]:
         failure_analysis,
         autonomy_readiness,
     )
-    return {
+    payload = {
         "job_id": record.job_id,
         "status": record.status.value,
         "total_tasks": total_tasks,
@@ -71,6 +72,21 @@ def summarize_job_progress(record: JobRecord) -> dict[str, Any]:
         "last_error": record.last_error,
         "updated_at": record.updated_at.isoformat(),
     }
+    if failure_diagnosis is not None:
+        payload["failure_diagnosis"] = failure_diagnosis
+    return payload
+
+
+def _failure_diagnosis(record: JobRecord) -> dict[str, Any] | None:
+    diagnosis = record.outputs.get("failure_diagnosis")
+    if isinstance(diagnosis, dict):
+        return diagnosis
+    diagnoses = record.outputs.get("failure_diagnoses")
+    if isinstance(diagnoses, list):
+        for item in reversed(diagnoses):
+            if isinstance(item, dict):
+                return item
+    return None
 
 
 def _planned_tasks(record: JobRecord) -> list[dict[str, Any]]:
@@ -262,6 +278,8 @@ def _resume_recommendation(
             if failure_analysis.get("classification") == "recurring_stage_failure"
             else "inspect_repeated_failure"
         )
+        if failure_analysis.get("classification") == "diagnosed_repeated_failure":
+            action = "diagnosis_guided_recovery"
         if failure_analysis.get("classification") == "completion_integrity_failed":
             action = "inspect_completion_integrity"
         return {
@@ -354,6 +372,7 @@ def _failure_analysis(
         classification = "recurring_stage_failure"
     auto_continue_blocked = classification in {
         "repeated_test_failure",
+        "diagnosed_repeated_failure",
         "recurring_stage_failure",
         "completion_integrity_failed",
     }
@@ -386,6 +405,8 @@ def _failure_classification(last_error: str | None) -> str | None:
         return None
     if last_error == "same_failure_threshold_reached":
         return "repeated_test_failure"
+    if last_error.startswith("diagnosed_repeated_failure:"):
+        return "diagnosed_repeated_failure"
     if last_error.startswith("fixer_failed:"):
         return "fixer_failed"
     if last_error.startswith("fixer_stuck:"):
@@ -448,6 +469,19 @@ def _recommended_recovery(
             "constraints": {
                 "recovery_mode": "repeated_failure",
                 "recovery_strategy": "escalated_retry",
+            },
+        },
+        "diagnosed_repeated_failure": {
+            "strategy": "diagnosis_guided_retry",
+            "reason": (
+                "the same deterministic failure repeated, and a structured diagnosis is "
+                "available to guide the next fixer attempt"
+            ),
+            "preserve_failure_counts_for_model_escalation": True,
+            "constraints": {
+                "recovery_mode": "diagnosed_repeated_failure",
+                "recovery_strategy": "diagnosis_guided_retry",
+                "stage_review": True,
             },
         },
         "fixer_failed": {

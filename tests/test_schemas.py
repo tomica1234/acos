@@ -3,6 +3,7 @@ from pydantic import ValidationError
 
 from packages.schemas.agent_outputs import (
     ArchitecturePlan,
+    FailureDiagnosis,
     FilePatch,
     Finding,
     FixResult,
@@ -62,6 +63,13 @@ def test_schema_instantiation() -> None:
     fix = FixResult(status=FixStatus.FIXED, summary="fixed", patches=[patch])
     prd = PRD(title="ACOS", problem_statement="Automate coding")
     architecture = ArchitecturePlan(summary="modular")
+    diagnosis = FailureDiagnosis(
+        classification="import_error",
+        root_cause="main imports Base from the wrong module",
+        recommended_fix_strategy="Import Base from models",
+        confidence=0.9,
+        retry_mode="targeted_fix",
+    )
     spec = JobSpec(request_text="build something", repo_path=".")
     packet = ContextPacket(
         job_id=spec.job_id,
@@ -81,6 +89,7 @@ def test_schema_instantiation() -> None:
     assert fix.status == FixStatus.FIXED
     assert prd.title == "ACOS"
     assert architecture.summary == "modular"
+    assert diagnosis.classification.value == "import_error"
     assert packet.role == "implementer"
 
 
@@ -98,6 +107,52 @@ def test_invalid_schema_values_raise_validation_error() -> None:
             type="unknown",
             base_url="http://localhost",
             api_key_env="KEY",
+        )
+
+    with pytest.raises(ValidationError):
+        FailureDiagnosis(
+            classification="network_mystery",
+            root_cause="bad",
+            recommended_fix_strategy="bad",
+            confidence=0.5,
+        )
+
+
+def test_file_patch_accepts_common_model_path_aliases() -> None:
+    fix = FixResult.model_validate(
+        {
+            "status": "fixed",
+            "summary": "fixed import",
+            "patches": [
+                {
+                    "file": "backend/main.py",
+                    "content": "print('ok')\n",
+                    "operation": "update",
+                }
+            ],
+        }
+    )
+
+    assert fix.patches[0].path == "backend/main.py"
+
+    patch = FilePatch.model_validate(
+        {
+            "filename": "backend/models.py",
+            "content": "class User: pass\n",
+        }
+    )
+
+    assert patch.path == "backend/models.py"
+
+
+def test_file_patch_still_rejects_unknown_extra_keys() -> None:
+    with pytest.raises(ValidationError):
+        FilePatch.model_validate(
+            {
+                "path": "feature.py",
+                "content": "VALUE = 1\n",
+                "unexpected": True,
+            }
         )
 
 

@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import importlib.metadata
 import os
 import re
 import shutil
 import subprocess
 import sys
+import tomllib
 from pathlib import Path
 from typing import Iterable
 
@@ -155,6 +157,7 @@ class TestServer:
     ) -> None:
         self.workspace_root = Path(workspace_root).resolve()
         self.scripted_results = list(scripted_results or [])
+        self._installed_dependency_roots: set[Path] = set()
 
     def run_test(
         self,
@@ -168,6 +171,9 @@ class TestServer:
         command = list(TEST_COMMAND_ALLOWLIST[command_name])
         if len(command) >= 3 and command[0] == sys.executable and command[1] != "-B":
             command = [command[0], "-B", *command[1:]]
+        dependency_result = self._ensure_project_test_dependencies(timeout_seconds)
+        if dependency_result is not None:
+            return dependency_result.model_dump()
         for cache_dir in self.workspace_root.rglob("__pycache__"):
             shutil.rmtree(cache_dir, ignore_errors=True)
         env = os.environ.copy()
@@ -200,6 +206,196 @@ class TestServer:
             executed_test_count=_parse_executed_test_count(output),
         )
         return payload.model_dump()
+
+    def _ensure_project_test_dependencies(
+        self,
+        timeout_seconds: int,
+    ) -> TestRunResult | None:
+        inferred_result = self._install_missing_requirements(
+            self.workspace_root,
+            self._inferred_test_requirements(),
+            timeout_seconds,
+        )
+        if inferred_result is not None:
+            return inferred_result
+        dependency_roots = self._dependency_roots()
+        if not dependency_roots:
+            return None
+        for root in dependency_roots:
+            if root in self._installed_dependency_roots:
+                continue
+            install_command = self._dependency_install_command(root)
+            if install_command is None:
+                self._installed_dependency_roots.add(root)
+                continue
+            install_result = self._run_dependency_install(
+                root,
+                install_command,
+                timeout_seconds,
+            )
+            if install_result is not None:
+                return install_result
+            self._installed_dependency_roots.add(root)
+        return None
+
+    def _install_missing_requirements(
+        self,
+        root: Path,
+        requirements: list[str],
+        timeout_seconds: int,
+    ) -> TestRunResult | None:
+        missing = [
+            requirement
+            for requirement in requirements
+            if not self._requirement_installed(requirement)
+        ]
+        if not missing:
+            return None
+        return self._run_dependency_install(
+            root,
+            [sys.executable, "-m", "pip", "install", *missing],
+            timeout_seconds,
+        )
+
+    @staticmethod
+    def _run_dependency_install(
+        root: Path,
+        install_command: list[str],
+        timeout_seconds: int,
+    ) -> TestRunResult | None:
+        env = os.environ.copy()
+        env["PYTHONDONTWRITEBYTECODE"] = "1"
+        try:
+            result = subprocess.run(
+                install_command,
+                cwd=root,
+                capture_output=True,
+                text=True,
+                timeout=timeout_seconds,
+                env=env,
+                check=False,
+            )
+        except subprocess.TimeoutExpired as exc:
+            output = "\n".join(
+                item
+                for item in [
+                    "Dependency installation timed out before tests could run.",
+                    str(exc.stdout or ""),
+                    str(exc.stderr or ""),
+                ]
+                if item
+            )
+            return TestRunResult(
+                success=False,
+                command=install_command,
+                failed_tests=[],
+                output_excerpt=output[-20000:],
+                exit_code=124,
+                executed_test_count=0,
+            )
+        output = (result.stdout + "\n" + result.stderr).strip()
+        if result.returncode != 0:
+            return TestRunResult(
+                success=False,
+                command=install_command,
+                failed_tests=[],
+                output_excerpt=(
+                    "Dependency installation failed before tests could run.\n"
+                    + output
+                )[-20000:],
+                exit_code=result.returncode,
+                executed_test_count=0,
+            )
+        return None
+
+    def _dependency_roots(self) -> list[Path]:
+        roots: set[Path] = set()
+        for path in self.workspace_root.rglob("requirements.txt"):
+            if self._is_visible_workspace_file(path):
+                roots.add(path.parent)
+        for path in self.workspace_root.rglob("pyproject.toml"):
+            if self._is_visible_workspace_file(path) and self._pyproject_has_dependencies(path):
+                roots.add(path.parent)
+        return sorted(roots, key=lambda item: len(item.parts))
+
+    def _is_visible_workspace_file(self, path: Path) -> bool:
+        try:
+            relative = path.relative_to(self.workspace_root)
+        except ValueError:
+            return False
+        return not any(part.startswith(".") for part in relative.parts)
+
+    def _dependency_install_command(self, root: Path) -> list[str] | None:
+        requirements = root / "requirements.txt"
+        if requirements.exists():
+            missing = [
+                requirement
+                for requirement in self._read_requirements(requirements)
+                if not self._requirement_installed(requirement)
+            ]
+            if missing:
+                return [sys.executable, "-m", "pip", "install", *missing]
+            return None
+        pyproject = root / "pyproject.toml"
+        if pyproject.exists() and self._pyproject_has_dependencies(pyproject):
+            return [sys.executable, "-m", "pip", "install", "-e", str(root)]
+        return None
+
+    def _inferred_test_requirements(self) -> list[str]:
+        requirements: list[str] = []
+        for path in self.workspace_root.rglob("*.py"):
+            if not self._is_visible_workspace_file(path):
+                continue
+            try:
+                content = path.read_text(encoding="utf-8")
+            except UnicodeDecodeError:
+                continue
+            if (
+                "python -m playwright" in content
+                or '"-m", "playwright"' in content
+                or "'-m', 'playwright'" in content
+                or "import playwright" in content
+            ):
+                requirements.append("playwright")
+            if "import pytest_asyncio" in content or "pytest.mark.asyncio" in content:
+                requirements.append("pytest-asyncio")
+            if "aiosqlite" in content:
+                requirements.append("aiosqlite")
+        return sorted(set(requirements))
+
+    @staticmethod
+    def _read_requirements(path: Path) -> list[str]:
+        requirements: list[str] = []
+        for line in path.read_text(encoding="utf-8").splitlines():
+            item = line.strip()
+            if not item or item.startswith("#") or item.startswith("-"):
+                continue
+            requirements.append(item)
+        return requirements
+
+    @staticmethod
+    def _requirement_installed(requirement: str) -> bool:
+        package_name = re.split(r"[<>=!~;\\[]", requirement, maxsplit=1)[0].strip()
+        if not package_name:
+            return True
+        try:
+            importlib.metadata.version(package_name)
+            return True
+        except importlib.metadata.PackageNotFoundError:
+            return False
+
+    @staticmethod
+    def _pyproject_has_dependencies(path: Path) -> bool:
+        try:
+            data = tomllib.loads(path.read_text(encoding="utf-8"))
+        except (OSError, tomllib.TOMLDecodeError):
+            return False
+        project = data.get("project")
+        if not isinstance(project, dict):
+            return False
+        dependencies = project.get("dependencies")
+        optional = project.get("optional-dependencies")
+        return bool(dependencies) or bool(optional)
 
 
 def _parse_executed_test_count(output: str) -> int | None:

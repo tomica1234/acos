@@ -3,14 +3,14 @@ providers:
     type: openai_compatible
     base_url: "${LOCAL_ORNITH_BASE_URL:-http://localhost:8000/v1}"
     api_key_env: "ORNITH_API_KEY"
-    timeout_seconds: "${LOCAL_ORNITH_TIMEOUT_SECONDS:-420}"
+    timeout_seconds: "${LOCAL_ORNITH_TIMEOUT_SECONDS:-7200}"
     default_headers: {}
     supports_tools: true
     supports_json_mode: true
     supports_structured_output: false
     supports_streaming: true
-    max_context_tokens: 4096
-    default_max_output_tokens: 2048
+    max_context_tokens: 65536
+    default_max_output_tokens: 8192
 
   mock_provider:
     type: mock
@@ -30,8 +30,8 @@ models:
     provider: local_ornith
     model: "ornith-1.0-35b-Q4_K_M.gguf"
     display_name: "Ornith 1.0 35B Q4_K_M"
-    max_context_tokens: 4096
-    max_output_tokens: 2048
+    max_context_tokens: 65536
+    max_output_tokens: 8192
     supports_tool_calling: true
     supports_structured_output: false
     supports_json_repair: true

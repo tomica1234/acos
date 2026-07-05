@@ -614,6 +614,57 @@ def apply_recovery_overrides(record: JobRecord, summary: dict[str, object]) -> d
     for key, value in recovery_constraints.items():
         if isinstance(key, str) and value is not None:
             constraints[key] = value
+    diagnosis = summary.get("failure_diagnosis")
+    if (
+        recovery.get("strategy") == "diagnosis_guided_retry"
+        and isinstance(diagnosis, dict)
+    ):
+        playbook = _diagnosis_recovery_playbook(diagnosis, recovery)
+        constraints["pm_stall_recovery"] = True
+        constraints["pm_strategy_change"] = True
+        constraints["pm_strategy"] = playbook["pm_strategy"]
+        constraints["pm_reason"] = "diagnosed_repeated_failure"
+        constraints["pm_next_actor"] = playbook["next_actor"]
+        constraints["pm_recovery_playbook"] = playbook["playbook"]
+        constraints["pm_success_criteria"] = playbook["success_criteria"]
+        constraints["diagnosis_classification"] = diagnosis.get("classification")
+        constraints["diagnosis_retry_mode"] = diagnosis.get("retry_mode")
+        constraints["diagnosis_should_retry"] = diagnosis.get("should_retry")
+        constraints["diagnosis_root_cause"] = diagnosis.get("root_cause")
+        constraints["diagnosis_recommended_fix_strategy"] = diagnosis.get(
+            "recommended_fix_strategy"
+        )
+        _record_pm_recovery_intervention(
+            record,
+            {
+                "action": "change_strategy",
+                "reason": "diagnosed_repeated_failure",
+                "strategy": playbook["pm_strategy"],
+                "summary": (
+                    f"PM is changing method to {playbook['playbook']} based on the "
+                    "structured failure diagnosis instead of repeating the same fixer loop."
+                ),
+                "can_apply_automatically": True,
+                "applied": True,
+                "status": record.status.value,
+                "resume_action": "diagnosis_guided_recovery",
+                "next_actor": playbook["next_actor"],
+                "playbook": playbook["playbook"],
+                "success_criteria": playbook["success_criteria"],
+                "focus_task_id": recovery.get("failed_task_id"),
+                "diagnosis": diagnosis,
+                "constraints": {
+                    key: value
+                    for key, value in constraints.items()
+                    if isinstance(key, str)
+                    and (
+                        key.startswith("diagnosis_")
+                        or key.startswith("pm_")
+                        or key.startswith("recovery_")
+                    )
+                },
+            },
+        )
     constraints["recovery_reason"] = recovery.get("reason")
     failed_task_id = recovery.get("failed_task_id")
     if failed_task_id is not None:
@@ -632,6 +683,113 @@ def apply_recovery_overrides(record: JobRecord, summary: dict[str, object]) -> d
         record.history.append(JobStatus.TESTING)
         record.last_error = None
     return recovery
+
+
+def _diagnosis_recovery_playbook(
+    diagnosis: dict[str, object],
+    recovery: dict[str, object],
+) -> dict[str, str]:
+    classification = str(diagnosis.get("classification") or "unknown")
+    retry_mode = str(diagnosis.get("retry_mode") or "")
+    failed_task = recovery.get("failed_task_id")
+    task_scope = f"task {failed_task}" if isinstance(failed_task, str) else "the failed task"
+    playbooks: dict[str, dict[str, str]] = {
+        "missing_dependency": {
+            "pm_strategy": "dependency_alignment_first",
+            "next_actor": "implementer",
+            "playbook": (
+                "inspect dependency manifests and runtime imports first, then align or pin "
+                "the smallest compatible dependency set before touching application logic"
+            ),
+            "success_criteria": (
+                "dependency import smoke test passes and the original failing pytest command "
+                "reaches application assertions instead of dependency import errors"
+            ),
+        },
+        "import_error": {
+            "pm_strategy": "import_wiring_repair_first",
+            "next_actor": "implementer",
+            "playbook": (
+                "inspect the actual defining and importing files, repair only the broken "
+                "module wiring, then rerun the failing import/test target"
+            ),
+            "success_criteria": (
+                "the named module imports successfully and the same ImportError signature "
+                "does not recur"
+            ),
+        },
+        "syntax_error": {
+            "pm_strategy": "syntax_minimal_rewrite",
+            "next_actor": "implementer",
+            "playbook": (
+                "open the exact syntax error file and rewrite the smallest invalid block "
+                "before expanding scope"
+            ),
+            "success_criteria": "python compilation or test collection passes for the affected file",
+        },
+        "test_expectation_mismatch": {
+            "pm_strategy": "contract_reconciliation",
+            "next_actor": "planner",
+            "playbook": (
+                "reconcile test expectations with the requested behavior, then choose either "
+                "a focused implementation patch or a focused test correction with evidence"
+            ),
+            "success_criteria": (
+                "the failing assertion is explained by an explicit behavior contract and "
+                "the updated code/tests pass together"
+            ),
+        },
+        "frontend_build_error": {
+            "pm_strategy": "frontend_build_repair_first",
+            "next_actor": "implementer",
+            "playbook": (
+                "inspect package scripts and the frontend build output, fix the smallest "
+                "TypeScript/Vite/package issue, then rerun the build"
+            ),
+            "success_criteria": "frontend build/test command exits successfully",
+        },
+        "runtime_error": {
+            "pm_strategy": "runtime_trace_reproduction",
+            "next_actor": "implementer",
+            "playbook": (
+                "reproduce the runtime traceback, identify the first project-owned frame, "
+                "and repair that narrow path before broad refactors"
+            ),
+            "success_criteria": "the same runtime traceback signature does not recur",
+        },
+    }
+    selected = dict(playbooks.get(classification, {}))
+    if not selected:
+        selected = {
+            "pm_strategy": "inspect_before_retry",
+            "next_actor": "planner" if retry_mode == "inspect_files_first" else "implementer",
+            "playbook": (
+                "inspect the failing files and command output before writing patches, then "
+                f"split {task_scope} into the smallest verifiable recovery step"
+            ),
+            "success_criteria": "the previous failure signature changes or the focused test passes",
+        }
+    return selected
+
+
+def _record_pm_recovery_intervention(
+    record: JobRecord,
+    decision: dict[str, Any],
+) -> dict[str, Any]:
+    interventions = record.outputs.setdefault("pm_interventions", [])
+    if not isinstance(interventions, list):
+        interventions = []
+        record.outputs["pm_interventions"] = interventions
+    applied_decision = dict(decision)
+    applied_decision["applied"] = True
+    applied_decision["intervention_index"] = len(interventions) + 1
+    constraints = record.spec.metadata.setdefault("constraints", {})
+    if not isinstance(constraints, dict):
+        constraints = {}
+        record.spec.metadata["constraints"] = constraints
+    constraints["pm_intervention_count"] = applied_decision["intervention_index"]
+    interventions.append(applied_decision)
+    return applied_decision
 
 
 def apply_planning_repair_overrides(
@@ -1041,7 +1199,9 @@ def supervise_persisted_job(
             require_prd_quality=require_prd_quality,
             stage_review=stage_review,
             test_timeout_seconds=test_timeout_seconds,
-            allow_repeated_failure_recovery=allow_repeated_failure_recovery,
+            allow_repeated_failure_recovery=(
+                allow_repeated_failure_recovery or pm_stall_recovery
+            ),
         )
         if steps_run == 0 and no_action_summary is not None:
             cycle_payload = autonomous_result_payload(

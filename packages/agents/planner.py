@@ -13,6 +13,13 @@ Plan for autonomous incremental execution:
 - pair each meaningful behavior with a test_writer task
 - give every task narrow acceptance_criteria that can be tested independently
 - leave polish, UI, and README tasks until after the core behavior passes
+Prefer a complete autonomous development plan over a short plan:
+- include every task needed for end-to-end implementation, tests, documentation, and release readiness
+- split large work into small independently executable tasks
+- include enough implementer and test_writer tasks to cover every meaningful behavior
+- do not omit follow-up tasks merely to save tokens
+- do not explain your reasoning outside the JSON object
+- the first character of your response must be {
 Return this exact shape:
 {
   "goal": "string",

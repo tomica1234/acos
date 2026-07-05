@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
-from typing import Literal
+from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from packages.schemas.models import (
+    FailureClassification,
+    FailureRetryMode,
     FixStatus,
     ImplementationStatus,
     ReviewDecision,
@@ -24,6 +26,19 @@ class FilePatch(BaseModel):
     content: str
     operation: Literal["create", "update"] = "update"
     rationale: str | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_path_aliases(cls, value: Any) -> Any:
+        if not isinstance(value, dict):
+            return value
+        normalized = dict(value)
+        if "path" not in normalized:
+            for alias in ("file", "filename"):
+                if alias in normalized:
+                    normalized["path"] = normalized.pop(alias)
+                    break
+        return normalized
 
 
 class PRD(BaseModel):
@@ -131,6 +146,22 @@ class TestRunResult(BaseModel):
 
 
 TestRunResult.__test__ = False
+
+
+class FailureDiagnosis(BaseModel):
+    """Structured diagnosis for a deterministic test or build failure."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    classification: FailureClassification = FailureClassification.UNKNOWN
+    root_cause: str
+    failed_files: list[str] = Field(default_factory=list)
+    failed_tests: list[str] = Field(default_factory=list)
+    recommended_fix_strategy: str
+    confidence: float = Field(ge=0.0, le=1.0)
+    should_retry: bool = True
+    retry_mode: FailureRetryMode = FailureRetryMode.NORMAL_FIX
+    failure_signature: str | None = None
 
 
 class FixResult(BaseModel):

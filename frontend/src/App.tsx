@@ -63,6 +63,15 @@ type ProgressResult = {
     total_tasks?: number
     last_error?: string | null
   }
+  failure_diagnosis?: {
+    classification?: string
+    root_cause?: string
+    recommended_fix_strategy?: string
+    retry_mode?: string
+    confidence?: number
+    failure_signature?: string | null
+    same_failure_repeats?: number
+  } | null
   pm_interventions?: PmDecision[]
   recent_audit_events?: Array<{
     timestamp?: string
@@ -79,6 +88,8 @@ type BackgroundRun = {
   job_id?: string
   batches_run?: number
   stop_requested?: boolean
+  created_at?: string
+  updated_at?: string
   last_result?: RunResult | null
   error?: string
 }
@@ -123,10 +134,84 @@ LLM採点:
 - ローカルで起動できる手順をREADMEに書く
 `
 
-const defaultRepoPath = '/Users/tachibanashunta/wip/acos/tmp_runs/english-vocab-test-app'
+const defaultRepoPath = '\\\\wsl.localhost\\Ubuntu\\home\\jalan\\wip\\acos-runs\\english-vocab-test-app'
 
 function compactJson(value: unknown) {
   return JSON.stringify(value, null, 2)
+}
+
+const stageOrder = [
+  { key: 'submitted', label: '受付' },
+  { key: 'analyzing', label: '要件' },
+  { key: 'designing', label: '設計' },
+  { key: 'planning', label: '計画' },
+  { key: 'implementing', label: '実装' },
+  { key: 'writing_tests', label: 'テスト作成' },
+  { key: 'reviewing', label: 'レビュー' },
+  { key: 'testing', label: 'テスト' },
+  { key: 'fixing', label: '修正' },
+  { key: 'finalizing', label: '完了処理' },
+  { key: 'done', label: '完了' },
+]
+
+const activeStatuses = new Set(['queued', 'running', 'stopping'])
+const terminalStatuses = new Set(['done', 'paused', 'stopped', 'error', 'failed', 'blocked', 'stuck'])
+
+function progressPercent(progress: ProgressResult | null, result: RunResult | null) {
+  const ratio = progress?.summary?.progress_ratio ?? result?.summary?.progress_ratio
+  if (typeof ratio === 'number' && Number.isFinite(ratio)) {
+    return Math.max(0, Math.min(100, Math.round(ratio * 100)))
+  }
+  const completed = progress?.summary?.completed_task_count ?? result?.summary?.completed_task_count
+  const total = progress?.summary?.total_tasks
+  if (typeof completed === 'number' && typeof total === 'number' && total > 0) {
+    return Math.max(0, Math.min(100, Math.round((completed / total) * 100)))
+  }
+  return 0
+}
+
+function currentStatus(
+  progress: ProgressResult | null,
+  result: RunResult | null,
+  backgroundRun: BackgroundRun | null,
+) {
+  return progress?.status || result?.status || backgroundRun?.status || 'waiting'
+}
+
+function statusTone(status: string) {
+  if (['done'].includes(status)) return 'good'
+  if (['failed', 'error', 'blocked', 'stuck'].includes(status)) return 'bad'
+  if (['paused', 'stopped', 'stopping'].includes(status)) return 'warn'
+  if (['running', 'queued', 'submitted', 'analyzing', 'designing', 'planning', 'implementing', 'writing_tests', 'reviewing', 'testing', 'fixing', 'finalizing'].includes(status)) return 'live'
+  return 'idle'
+}
+
+function stageState(stageKey: string, status: string, history: string[] = []) {
+  if (stageKey === status) return 'current'
+  if (history.includes(stageKey) || stageOrder.findIndex((stage) => stage.key === stageKey) < stageOrder.findIndex((stage) => stage.key === status)) {
+    return 'done'
+  }
+  return 'pending'
+}
+
+function formatTime(value?: string) {
+  if (!value) return '-'
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return value
+  return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })
+}
+
+function describeProgressGap(
+  progress: ProgressResult | null,
+  progressError: string | null,
+  backgroundRun: BackgroundRun | null,
+) {
+  if (progress) return null
+  if (progressError) return progressError
+  if (backgroundRun?.status === 'running' && (backgroundRun.batches_run ?? 0) === 0) {
+    return 'ジョブ初期化または最初の計画レスポンス待ち'
+  }
+  return '実行を開始すると、ジョブ状態を数秒ごとに読み込みます。'
 }
 
 function App() {
@@ -357,11 +442,31 @@ function App() {
 
   useEffect(() => {
     void reconnectBackgroundRun()
+    void refreshProgress()
   }, [])
+
+  useEffect(() => {
+    if (isRunning || backgroundRun?.run_id) return
+    const id = window.setInterval(() => {
+      void refreshProgress()
+    }, 10000)
+    return () => window.clearInterval(id)
+  }, [backgroundRun?.run_id, isRunning, jobId, payload.jobs_dir])
 
   const liveSummary = progress?.summary ?? result?.summary
   const planning = liveSummary?.planning_summary
   const stop = result?.stop_summary
+  const status = currentStatus(progress, result, backgroundRun)
+  const tone = statusTone(status)
+  const percent = progressPercent(progress, result)
+  const taskTotal = progress?.summary?.total_tasks ?? 0
+  const taskDone = progress?.summary?.completed_task_count ?? result?.summary?.completed_task_count ?? 0
+  const taskPending = progress?.summary?.pending_task_count ?? result?.summary?.pending_task_count ?? 0
+  const progressGap = describeProgressGap(progress, progressError, backgroundRun)
+  const lastError = progress?.last_error ?? progress?.summary?.last_error ?? result?.error ?? backgroundRun?.error
+  const diagnosis = progress?.failure_diagnosis
+  const workerActive = backgroundRun?.status ? activeStatuses.has(backgroundRun.status) : false
+  const workerTerminal = backgroundRun?.status ? terminalStatuses.has(backgroundRun.status) : false
   const latestPmDecision =
     progress?.pm_interventions?.slice(-1)[0] ??
     result?.pm_decision ??
@@ -381,6 +486,52 @@ function App() {
               : '待機中'}
           </div>
         </header>
+
+        <section className={`mobile-status-card ${tone}`}>
+          <div className="mobile-status-main">
+            <div>
+              <span>status</span>
+              <strong>{status}</strong>
+            </div>
+            <div>
+              <span>tasks</span>
+              <strong>
+                {taskDone}/{taskTotal || '-'}
+              </strong>
+            </div>
+            <div>
+              <span>worker</span>
+              <strong>{backgroundRun?.status || (isRunning ? 'running' : 'idle')}</strong>
+            </div>
+          </div>
+          <div className="mobile-progress-bar" aria-label="mobile job progress">
+            <div style={{ width: `${percent}%` }} />
+          </div>
+          <div className="mobile-status-detail">
+            <span>{percent}%</span>
+            <span>{formatTime(progress?.updated_at || backgroundRun?.updated_at)}</span>
+          </div>
+          {progress?.summary?.next_task?.id && (
+            <p>
+              {progress.summary.next_task.id}: {progress.summary.next_task.title}
+            </p>
+          )}
+          {lastError && <p className="mobile-error">last error: {lastError}</p>}
+          {diagnosis?.root_cause && <p className="mobile-diagnosis">{diagnosis.root_cause}</p>}
+          <div className="mobile-actions">
+            <button className="ghost-button" type="button" onClick={() => void refreshProgress()}>
+              更新
+            </button>
+            <button className="ghost-button" type="button" onClick={() => void reconnectBackgroundRun()}>
+              再接続
+            </button>
+            {backgroundRun?.run_id && !workerTerminal && (
+              <button className="ghost-button danger-action" type="button" onClick={requestStop}>
+                停止
+              </button>
+            )}
+          </div>
+        </section>
 
         <form className="layout" onSubmit={runJob}>
           <section className="panel requirement-panel">
@@ -492,9 +643,78 @@ function App() {
               worker再接続
             </button>
           </div>
-          {progressError && !progress && <div className="progress-note">{progressError}</div>}
-          {!progress && !progressError && (
-            <div className="progress-note">実行を開始すると、ジョブ状態を数秒ごとに読み込みます。</div>
+          <div className={`progress-overview ${tone}`}>
+            <div className="progress-headline">
+              <div>
+                <span>現在の状態</span>
+                <strong>{status}</strong>
+              </div>
+              <div>
+                <span>タスク</span>
+                <strong>
+                  {taskDone}/{taskTotal || '-'}
+                </strong>
+              </div>
+              <div>
+                <span>worker</span>
+                <strong>{backgroundRun?.status || (isRunning ? 'running' : 'idle')}</strong>
+              </div>
+              <div>
+                <span>最終更新</span>
+                <strong>{formatTime(progress?.updated_at || backgroundRun?.updated_at)}</strong>
+              </div>
+            </div>
+            <div className="progress-bar" aria-label="job progress">
+              <div style={{ width: `${percent}%` }} />
+            </div>
+            <div className="progress-caption">
+              <span>{percent}%</span>
+              <span>
+                {workerActive
+                  ? '処理中'
+                  : workerTerminal
+                    ? 'worker停止'
+                    : '待機'}
+                {taskPending ? ` / pending ${taskPending}` : ''}
+              </span>
+            </div>
+          </div>
+          <div className="stage-strip">
+            {stageOrder.map((stage) => (
+              <div
+                className={`stage ${stageState(stage.key, status, progress?.history)}`}
+                key={stage.key}
+              >
+                <span />
+                <strong>{stage.label}</strong>
+              </div>
+            ))}
+          </div>
+          {progressGap && !progress && <div className="progress-note">{progressGap}</div>}
+          {lastError && <div className="error-box live-error">last error: {lastError}</div>}
+          {diagnosis && (
+            <div className="diagnosis-card">
+              <div>
+                <span>diagnosis</span>
+                <strong>{diagnosis.classification || '-'}</strong>
+              </div>
+              <div>
+                <span>root cause</span>
+                <strong>{diagnosis.root_cause || '-'}</strong>
+              </div>
+              <div>
+                <span>fix strategy</span>
+                <strong>{diagnosis.recommended_fix_strategy || '-'}</strong>
+              </div>
+              <div>
+                <span>retry</span>
+                <strong>
+                  {[diagnosis.retry_mode, diagnosis.failure_signature]
+                    .filter(Boolean)
+                    .join(' / ') || '-'}
+                </strong>
+              </div>
+            </div>
           )}
           {progress && (
             <>
@@ -512,7 +732,7 @@ function App() {
                 </div>
                 <div>
                   <span>pending</span>
-                  <strong>{progress.summary?.pending_task_count ?? 0}</strong>
+                  <strong>{taskPending}</strong>
                 </div>
                 <div>
                   <span>outputs</span>
@@ -570,10 +790,11 @@ function App() {
               <div className="event-list">
                 {(progress.recent_audit_events || []).slice(-6).map((event, index) => (
                   <div key={`${event.timestamp}-${index}`}>
-                    <span>{event.role || 'system'}</span>
-                    <strong>{event.event_type || '-'}</strong>
-                    <em>{event.action || '-'}</em>
+                    <span>{formatTime(event.timestamp)}</span>
+                    <strong>{event.role || 'system'}</strong>
+                    <em>{event.event_type || '-'}</em>
                     <b>{event.status || '-'}</b>
+                    <small>{event.action || '-'}</small>
                   </div>
                 ))}
               </div>

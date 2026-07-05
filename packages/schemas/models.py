@@ -44,6 +44,24 @@ class FixStatus(str, Enum):
     FAILED = "failed"
 
 
+class FailureClassification(str, Enum):
+    IMPORT_ERROR = "import_error"
+    SYNTAX_ERROR = "syntax_error"
+    TEST_EXPECTATION_MISMATCH = "test_expectation_mismatch"
+    MISSING_DEPENDENCY = "missing_dependency"
+    RUNTIME_ERROR = "runtime_error"
+    FRONTEND_BUILD_ERROR = "frontend_build_error"
+    UNKNOWN = "unknown"
+
+
+class FailureRetryMode(str, Enum):
+    NORMAL_FIX = "normal_fix"
+    TARGETED_FIX = "targeted_fix"
+    INSPECT_FILES_FIRST = "inspect_files_first"
+    REWRITE_SMALL_SCOPE = "rewrite_small_scope"
+    ASK_HUMAN = "ask_human"
+
+
 class JobStatus(str, Enum):
     SUBMITTED = "submitted"
     ANALYZING = "analyzing"

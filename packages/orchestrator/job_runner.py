@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import re
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -28,6 +30,7 @@ from packages.orchestrator.scaffolds import build_scaffold
 from packages.orchestrator.states import apply_transition
 from packages.schemas.agent_outputs import (
     ArchitecturePlan,
+    FailureDiagnosis,
     FixResult,
     ImplementationResult,
     PRD,
@@ -40,6 +43,8 @@ from packages.schemas.agent_outputs import (
 )
 from packages.schemas.jobs import JobRecord, JobSpec
 from packages.schemas.models import (
+    FailureClassification,
+    FailureRetryMode,
     FixStatus,
     ImplementationStatus,
     JobStatus,
@@ -61,7 +66,15 @@ def _disable_mock_fallback_models(registry: ModelRegistry) -> None:
 class JobRunner:
     """Run ACOS jobs across explicit role phases."""
 
-    CONTEXT_ONLY_ROLES = {"pm", "architect", "planner", "implementer", "test_writer", "fixer"}
+    CONTEXT_ONLY_ROLES = {
+        "pm",
+        "architect",
+        "planner",
+        "implementer",
+        "test_writer",
+        "diagnoser",
+        "fixer",
+    }
     IMPLEMENTATION_TASK_ROLES = {"architect", "implementer"}
     TEST_TASK_ROLES = {"test_writer"}
 
@@ -269,6 +282,7 @@ class JobRunner:
             "planner": JobStatus.PLANNING,
             "implementer": JobStatus.IMPLEMENTING,
             "test_writer": JobStatus.WRITING_TESTS,
+            "diagnoser": JobStatus.TESTING,
             "reviewer": JobStatus.REVIEWING,
             "security_reviewer": JobStatus.REVIEWING,
             "fixer": JobStatus.FIXING,
@@ -454,6 +468,22 @@ class JobRunner:
         role_guidance = self._role_recovery_guidance(strategy, role)
         if role_guidance is not None:
             guidance.append(role_guidance)
+        if strategy == "diagnosis_guided_retry":
+            root_cause = constraints.get("diagnosis_root_cause")
+            fix_strategy = constraints.get("diagnosis_recommended_fix_strategy")
+            retry_mode = constraints.get("diagnosis_retry_mode")
+            should_retry = constraints.get("diagnosis_should_retry")
+            if isinstance(root_cause, str):
+                guidance.append(f"diagnosis_root_cause: {root_cause}")
+            if isinstance(fix_strategy, str):
+                guidance.append(
+                    f"diagnosis_recommended_fix_strategy: {fix_strategy}"
+                )
+            if isinstance(retry_mode, str) or isinstance(should_retry, bool):
+                guidance.append(
+                    "diagnosis_retry_policy: "
+                    f"retry_mode={retry_mode}; should_retry={should_retry}"
+                )
         return guidance
 
     def _recovery_history_logs(self, record: JobRecord, role: str) -> list[str]:
@@ -463,6 +493,7 @@ class JobRunner:
             "planner",
             "implementer",
             "test_writer",
+            "diagnoser",
             "fixer",
             "reviewer",
         }:
@@ -526,7 +557,15 @@ class JobRunner:
         return logs
 
     def _pm_stall_guidance_logs(self, record: JobRecord, role: str) -> list[str]:
-        if role not in {"pm", "planner", "architect", "implementer", "test_writer", "fixer"}:
+        if role not in {
+            "pm",
+            "planner",
+            "architect",
+            "implementer",
+            "test_writer",
+            "diagnoser",
+            "fixer",
+        }:
             return []
         constraints = self._constraints(record)
         if constraints.get("pm_stall_recovery") is not True:
@@ -534,12 +573,20 @@ class JobRunner:
         strategy = constraints.get("pm_strategy", "unknown")
         focus_task_id = constraints.get("pm_focus_task_id", "unknown")
         reason = constraints.get("pm_reason", "same_progress_marker_repeated")
+        next_actor = constraints.get("pm_next_actor", "unknown")
+        playbook = constraints.get("pm_recovery_playbook")
+        success_criteria = constraints.get("pm_success_criteria")
         logs = [
             (
                 "pm_stall_recovery: "
-                f"strategy={strategy}; focus_task_id={focus_task_id}; reason={reason}"
+                f"strategy={strategy}; focus_task_id={focus_task_id}; "
+                f"next_actor={next_actor}; reason={reason}"
             )
         ]
+        if isinstance(playbook, str):
+            logs.append(f"pm_recovery_playbook: {playbook}")
+        if isinstance(success_criteria, str):
+            logs.append(f"pm_recovery_success_criteria: {success_criteria}")
         if strategy == "split_or_simplify_next_task":
             logs.append(
                 "pm_stall_instruction: change approach now; split the focused task into a "
@@ -555,6 +602,26 @@ class JobRunner:
             logs.append(
                 "pm_stall_instruction: continue with the raised stage limit, but keep the next "
                 "stage narrowly scoped and verify it before expanding."
+            )
+        elif strategy == "diagnosis_guided_fix":
+            logs.append(
+                "pm_stall_instruction: the PM must change method based on the diagnosis; "
+                "do not repeat the same fixer loop. Re-scope dependencies, tests, or the "
+                "task boundary so the diagnosed root cause is removed first."
+            )
+        elif strategy in {
+            "dependency_alignment_first",
+            "import_wiring_repair_first",
+            "syntax_minimal_rewrite",
+            "contract_reconciliation",
+            "frontend_build_repair_first",
+            "runtime_trace_reproduction",
+            "inspect_before_retry",
+        }:
+            logs.append(
+                "pm_stall_instruction: execute the PM recovery playbook before normal "
+                "feature work; success means the diagnosed signature is removed, not merely "
+                "that a new patch was attempted."
             )
         return logs
 
@@ -594,6 +661,20 @@ class JobRunner:
             return (
                 "recovery_instruction: audit completion evidence first, then fill only the missing "
                 "tasks, tests, or stage proof needed by the integrity gate."
+            )
+        if strategy == "diagnosis_guided_retry" and role in {
+            "pm",
+            "planner",
+            "architect",
+            "implementer",
+            "test_writer",
+            "fixer",
+        }:
+            return (
+                "recovery_instruction: treat the diagnosis as a PM strategy change. "
+                "Change method before retrying: adjust dependency policy, split the failed "
+                "task, or rewrite the smallest setup surface needed by the diagnosed root "
+                "cause. Do not continue with the same patch loop."
             )
         return None
 
@@ -1641,19 +1722,39 @@ class JobRunner:
         test_result = self._run_tests(record)
         attempts = 0
         same_failure_repeats = 0
+        previous_failure_signature: str | None = None
         while not test_result.success and attempts < self.max_attempts_per_task:
+            diagnosis = self._diagnose_test_failure(
+                record,
+                task,
+                test_result,
+                previous_failure_signature=previous_failure_signature,
+                same_failure_repeats=same_failure_repeats,
+            )
+            failure_signature = diagnosis.failure_signature or self._failure_signature(
+                test_result
+            )
+            if previous_failure_signature == failure_signature:
+                same_failure_repeats += 1
+            else:
+                same_failure_repeats = 1
+                previous_failure_signature = failure_signature
+            diagnosis_logs = self._diagnosis_logs(
+                diagnosis,
+                same_failure_repeats=same_failure_repeats,
+                repeated=record.same_test_failure_count > 0,
+            )
             fix = self._run_structured_role(
                 record,
                 "fixer",
                 FixResult,
                 "Fix only the current autonomous stage test failures",
                 task=task,
-                logs=[*(logs or []), test_result.output_excerpt],
+                logs=[*(logs or []), *diagnosis_logs, test_result.output_excerpt],
             )
             attempts += 1
             record.failure_count += 1
-            if test_result.failed_tests:
-                same_failure_repeats += 1
+            if failure_signature:
                 record.same_test_failure_count += 1
             else:
                 same_failure_repeats = 0
@@ -1665,10 +1766,315 @@ class JobRunner:
             self._apply_patches(record, "fixer", fix.patches)
             if same_failure_repeats >= self.max_same_failure_repeats:
                 record.status = JobStatus.STUCK
-                record.last_error = "same_failure_threshold_reached"
+                self._store_failure_diagnosis(record, diagnosis)
+                record.last_error = (
+                    "diagnosed_repeated_failure:"
+                    f"{diagnosis.classification.value}"
+                )
+                record.outputs["recovery_ready"] = {
+                    "reason": "same_failure_threshold_reached",
+                    "classification": diagnosis.classification.value,
+                    "root_cause": diagnosis.root_cause,
+                    "recommended_fix_strategy": diagnosis.recommended_fix_strategy,
+                    "retry_mode": diagnosis.retry_mode.value,
+                    "should_retry": diagnosis.should_retry,
+                    "failure_signature": diagnosis.failure_signature,
+                }
+                self.store.update(record)
                 return test_result
             test_result = self._run_tests(record)
         return test_result
+
+    def _diagnose_test_failure(
+        self,
+        record: JobRecord,
+        task: PlannedTask | None,
+        test_result: TestRunResult,
+        *,
+        previous_failure_signature: str | None,
+        same_failure_repeats: int,
+    ) -> FailureDiagnosis:
+        fallback = self._deterministic_failure_diagnosis(test_result)
+        logs = [
+            "diagnosis_seed: "
+            f"classification={fallback.classification.value}; "
+            f"signature={fallback.failure_signature or 'unknown'}; "
+            f"root_cause={fallback.root_cause}; "
+            f"recommended_fix_strategy={fallback.recommended_fix_strategy}",
+            test_result.output_excerpt,
+        ]
+        if previous_failure_signature and previous_failure_signature == fallback.failure_signature:
+            logs.append(
+                "repeated_failure_context: this failure signature has repeated; "
+                "change strategy instead of repeating the prior fix."
+            )
+        try:
+            diagnosis = self._run_structured_role(
+                record,
+                "diagnoser",
+                FailureDiagnosis,
+                "Diagnose the deterministic test failure before fixing",
+                task=task,
+                logs=logs,
+            )
+        except Exception as exc:
+            diagnosis = fallback.model_copy(
+                update={
+                    "root_cause": (
+                        f"{fallback.root_cause} Diagnoser unavailable: {exc}"
+                    ),
+                    "confidence": min(fallback.confidence, 0.55),
+                }
+            )
+        if not diagnosis.failure_signature:
+            diagnosis = diagnosis.model_copy(
+                update={"failure_signature": fallback.failure_signature}
+            )
+        if not diagnosis.failed_tests:
+            diagnosis = diagnosis.model_copy(
+                update={"failed_tests": fallback.failed_tests}
+            )
+        self._store_failure_diagnosis(
+            record,
+            diagnosis,
+            same_failure_repeats=same_failure_repeats,
+        )
+        return diagnosis
+
+    @staticmethod
+    def _diagnosis_logs(
+        diagnosis: FailureDiagnosis,
+        *,
+        same_failure_repeats: int,
+        repeated: bool,
+    ) -> list[str]:
+        logs = [
+            "failure_diagnosis: "
+            f"classification={diagnosis.classification.value}; "
+            f"retry_mode={diagnosis.retry_mode.value}; "
+            f"confidence={diagnosis.confidence}; "
+            f"should_retry={diagnosis.should_retry}; "
+            f"signature={diagnosis.failure_signature or 'unknown'}; "
+            f"root_cause={diagnosis.root_cause}; "
+            f"recommended_fix_strategy={diagnosis.recommended_fix_strategy}; "
+            f"failed_files={','.join(diagnosis.failed_files)}; "
+            f"failed_tests={','.join(diagnosis.failed_tests)}"
+        ]
+        if repeated or same_failure_repeats > 1:
+            logs.append(
+                "repeated_failure_instruction: the same failure signature is still present; "
+                "do not repeat the previous patch strategy. Focus only on the diagnosed "
+                "root cause and inspect the named files first when needed."
+            )
+        if diagnosis.retry_mode == FailureRetryMode.INSPECT_FILES_FIRST:
+            logs.append(
+                "diagnosis_instruction: inspect the relevant files before editing; avoid "
+                "guessing from the test output alone."
+            )
+        elif diagnosis.retry_mode == FailureRetryMode.REWRITE_SMALL_SCOPE:
+            logs.append(
+                "diagnosis_instruction: replace only the smallest coherent scope needed "
+                "to address the diagnosed failure."
+            )
+        return logs
+
+    def _store_failure_diagnosis(
+        self,
+        record: JobRecord,
+        diagnosis: FailureDiagnosis,
+        *,
+        same_failure_repeats: int | None = None,
+    ) -> None:
+        payload = diagnosis.model_dump(mode="json")
+        if same_failure_repeats is not None:
+            payload["same_failure_repeats"] = same_failure_repeats
+        record.outputs["failure_diagnosis"] = payload
+        history = record.outputs.setdefault("failure_diagnoses", [])
+        if isinstance(history, list):
+            history.append(payload)
+            del history[:-10]
+        self.store.update(record)
+
+    def _deterministic_failure_diagnosis(
+        self,
+        test_result: TestRunResult,
+    ) -> FailureDiagnosis:
+        output = test_result.output_excerpt or ""
+        signature = self._failure_signature(test_result)
+        failed_files = self._extract_failed_files(output)
+        if "no tests ran" in output.lower() or test_result.executed_test_count == 0:
+            return FailureDiagnosis(
+                classification=FailureClassification.TEST_EXPECTATION_MISMATCH,
+                root_cause=(
+                    "Pytest did not discover any tests. The project likely has a "
+                    "pytest.ini/testpaths configuration that excludes existing test "
+                    "files, or the generated tests are outside the configured test "
+                    "directory."
+                ),
+                failed_files=[*failed_files, "pytest.ini", "tests/"][:8],
+                failed_tests=test_result.failed_tests,
+                recommended_fix_strategy=(
+                    "Inspect pytest.ini and the actual test file layout; update "
+                    "testpaths or move tests so pytest discovers the generated tests."
+                ),
+                confidence=0.85,
+                should_retry=True,
+                retry_mode=FailureRetryMode.INSPECT_FILES_FIRST,
+                failure_signature=signature,
+            )
+        if "ModuleNotFoundError" in output or "No module named" in output:
+            return FailureDiagnosis(
+                classification=FailureClassification.MISSING_DEPENDENCY,
+                root_cause="A required Python module or package cannot be imported.",
+                failed_files=failed_files,
+                failed_tests=test_result.failed_tests,
+                recommended_fix_strategy=(
+                    "Add the missing dependency or correct the import/module path without "
+                    "weakening tests."
+                ),
+                confidence=0.8,
+                should_retry=True,
+                retry_mode=FailureRetryMode.TARGETED_FIX,
+                failure_signature=signature,
+            )
+        if "ImportError" in output:
+            return FailureDiagnosis(
+                classification=FailureClassification.IMPORT_ERROR,
+                root_cause=self._import_error_root_cause(output),
+                failed_files=failed_files,
+                failed_tests=test_result.failed_tests,
+                recommended_fix_strategy=(
+                    "Correct the import wiring so symbols are imported from the module "
+                    "where they are actually defined."
+                ),
+                confidence=0.85,
+                should_retry=True,
+                retry_mode=FailureRetryMode.TARGETED_FIX,
+                failure_signature=signature,
+            )
+        if "SyntaxError" in output:
+            return FailureDiagnosis(
+                classification=FailureClassification.SYNTAX_ERROR,
+                root_cause="Generated code contains invalid Python syntax.",
+                failed_files=failed_files,
+                failed_tests=test_result.failed_tests,
+                recommended_fix_strategy=(
+                    "Fix the syntax error in the named file and preserve existing behavior."
+                ),
+                confidence=0.85,
+                should_retry=True,
+                retry_mode=FailureRetryMode.TARGETED_FIX,
+                failure_signature=signature,
+            )
+        if self._looks_like_frontend_build_error(output):
+            return FailureDiagnosis(
+                classification=FailureClassification.FRONTEND_BUILD_ERROR,
+                root_cause="Frontend build or package tooling failed.",
+                failed_files=failed_files,
+                failed_tests=test_result.failed_tests,
+                recommended_fix_strategy=(
+                    "Fix the smallest frontend source or package configuration issue shown "
+                    "by the build output."
+                ),
+                confidence=0.75,
+                should_retry=True,
+                retry_mode=FailureRetryMode.TARGETED_FIX,
+                failure_signature=signature,
+            )
+        if "E   AssertionError" in output or "assert " in output:
+            return FailureDiagnosis(
+                classification=FailureClassification.TEST_EXPECTATION_MISMATCH,
+                root_cause="Implementation behavior does not match a test expectation.",
+                failed_files=failed_files,
+                failed_tests=test_result.failed_tests,
+                recommended_fix_strategy=(
+                    "Adjust the implementation to satisfy the asserted behavior without "
+                    "loosening the test."
+                ),
+                confidence=0.75,
+                should_retry=True,
+                retry_mode=FailureRetryMode.NORMAL_FIX,
+                failure_signature=signature,
+            )
+        return FailureDiagnosis(
+            classification=FailureClassification.RUNTIME_ERROR,
+            root_cause="Tests failed with a runtime error that needs focused inspection.",
+            failed_files=failed_files,
+            failed_tests=test_result.failed_tests,
+            recommended_fix_strategy=(
+                "Inspect the failing traceback and make the smallest code change that "
+                "addresses the runtime failure."
+            ),
+            confidence=0.45,
+            should_retry=True,
+            retry_mode=FailureRetryMode.INSPECT_FILES_FIRST,
+            failure_signature=signature,
+        )
+
+    @staticmethod
+    def _failure_signature(test_result: TestRunResult) -> str:
+        output = test_result.output_excerpt or ""
+        patterns = [
+            r"(ImportError:\s*[^\n]+)",
+            r"(ModuleNotFoundError:\s*[^\n]+)",
+            r"(SyntaxError:\s*[^\n]+)",
+            r"(AssertionError:\s*[^\n]*)",
+            r"(TypeError:\s*[^\n]+)",
+            r"(ValueError:\s*[^\n]+)",
+            r"(RuntimeError:\s*[^\n]+)",
+        ]
+        for pattern in patterns:
+            match = re.search(pattern, output)
+            if match:
+                message = re.sub(r"\s+", " ", match.group(1)).strip()
+                return message.replace("'", "")
+        if test_result.failed_tests:
+            return "|".join(test_result.failed_tests)
+        return re.sub(r"\s+", " ", output[:240]).strip()
+
+    @staticmethod
+    def _extract_failed_files(output: str) -> list[str]:
+        paths: list[str] = []
+        for match in re.finditer(r"([A-Za-z]:\\[^\n:]+?\.(?:py|js|jsx|ts|tsx))", output):
+            path = match.group(1)
+            if path not in paths:
+                paths.append(path)
+        for match in re.finditer(r"\b([\w./-]+\.(?:py|js|jsx|ts|tsx)):(?:\d+)", output):
+            path = match.group(1)
+            if path not in paths:
+                paths.append(path)
+        return paths[:8]
+
+    @staticmethod
+    def _import_error_root_cause(output: str) -> str:
+        match = re.search(
+            r"ImportError:\s*cannot import name '([^']+)' from '([^']+)'", output
+        )
+        if match:
+            symbol, module = match.groups()
+            return (
+                f"{symbol} is imported from {module}, but that module does not "
+                "export the requested symbol."
+            )
+        match = re.search(r"(ImportError:\s*[^\n]+)", output)
+        if match:
+            return match.group(1).strip()
+        return "A Python import failed because the generated module wiring is inconsistent."
+
+    @staticmethod
+    def _looks_like_frontend_build_error(output: str) -> bool:
+        lowered = output.lower()
+        return any(
+            marker in lowered
+            for marker in (
+                "npm err!",
+                "vite",
+                "webpack",
+                "eslint",
+                "typescript",
+                "tsc",
+            )
+        )
 
     @staticmethod
     def _synthetic_test_result(*, success: bool, output: str) -> TestRunResult:
@@ -2321,7 +2727,11 @@ def build_default_runner(
     config_path = Path(config_dir)
     workspace_path = Path(workspace_root).resolve()
     workspace_path.mkdir(parents=True, exist_ok=True)
-    memory_db = Path(memory_db_path or (workspace_path / ".acos_memory.sqlite3"))
+    if memory_db_path is None:
+        workspace_hash = hashlib.sha256(str(workspace_path).encode("utf-8")).hexdigest()[:16]
+        memory_db = config_path.parent / ".acos" / "memory" / f"{workspace_hash}.sqlite3"
+    else:
+        memory_db = Path(memory_db_path)
     memory_db.parent.mkdir(parents=True, exist_ok=True)
     registry = ModelRegistry.from_paths(
         provider_path=config_path / "model_providers.yaml",

@@ -34,6 +34,12 @@ tools:
       - repo_server.apply_patch
       - git_server.diff
 
+    diagnoser:
+      - repo_server.read_file
+      - repo_server.search_text
+      - git_server.diff
+      - memory_server.read_memory
+
     reviewer:
       - repo_server.read_file
       - git_server.diff

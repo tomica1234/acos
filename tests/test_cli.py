@@ -7,6 +7,7 @@ import pytest
 import yaml
 
 from apps.cli import (
+    apply_recovery_overrides,
     autonomous_result_payload,
     build_job_spec_from_request,
     load_job_spec_from_file,
@@ -181,7 +182,9 @@ def test_build_default_runner_creates_missing_workspace(tmp_path: Path) -> None:
     assert runner is not None
     assert environment is not None
     assert workspace.is_dir()
-    assert (workspace / ".acos_memory.sqlite3").exists()
+    assert not (workspace / ".acos_memory.sqlite3").exists()
+    memory_files = list((config_dir().parent / ".acos" / "memory").glob("*.sqlite3"))
+    assert memory_files
     assert "mock_structured" not in runner.registry.get_agent("implementer").fallback_models
 
 
@@ -3171,6 +3174,66 @@ def test_autonomous_result_payload_blocks_auto_continue_after_repeated_failure(
     }
 
 
+def test_apply_recovery_overrides_records_pm_strategy_change_for_diagnosis(
+    tmp_path: Path,
+) -> None:
+    spec = JobSpec(
+        job_id="diagnosis-recovery-job",
+        request_text="Build it",
+        repo_path=str(tmp_path),
+    )
+    record = JobRecord(job_id=spec.job_id, spec=spec, status=JobStatus.STUCK)
+    summary = {
+        "failure_diagnosis": {
+            "classification": "missing_dependency",
+            "root_cause": "pydantic-settings and pydantic versions are incompatible",
+            "recommended_fix_strategy": "align dependency versions",
+            "retry_mode": "targeted_fix",
+            "should_retry": False,
+            "failure_signature": "ModuleNotFoundError: pydantic._internal._signature",
+        },
+        "failure_analysis": {
+            "recommended_recovery": {
+                "strategy": "diagnosis_guided_retry",
+                "reason": "the same deterministic failure repeated",
+                "failed_task_id": "project-init",
+                "failed_stage": 1,
+                "constraints": {
+                    "recovery_mode": "diagnosed_repeated_failure",
+                    "recovery_strategy": "diagnosis_guided_retry",
+                    "stage_review": True,
+                },
+            },
+        },
+    }
+
+    recovery = apply_recovery_overrides(record, summary)
+
+    constraints = record.spec.metadata["constraints"]
+    assert recovery is summary["failure_analysis"]["recommended_recovery"]
+    assert constraints["recovery_strategy"] == "diagnosis_guided_retry"
+    assert constraints["pm_strategy_change"] is True
+    assert constraints["pm_strategy"] == "dependency_alignment_first"
+    assert constraints["pm_next_actor"] == "implementer"
+    assert "dependency manifests" in constraints["pm_recovery_playbook"]
+    assert "dependency import smoke test" in constraints["pm_success_criteria"]
+    assert constraints["diagnosis_root_cause"] == (
+        "pydantic-settings and pydantic versions are incompatible"
+    )
+    assert constraints["diagnosis_recommended_fix_strategy"] == (
+        "align dependency versions"
+    )
+    assert constraints["diagnosis_should_retry"] is False
+    assert record.outputs["pm_interventions"][0]["strategy"] == (
+        "dependency_alignment_first"
+    )
+    assert record.outputs["pm_interventions"][0]["next_actor"] == "implementer"
+    assert "dependency manifests" in record.outputs["pm_interventions"][0]["playbook"]
+    assert record.outputs["pm_interventions"][0]["diagnosis"]["classification"] == (
+        "missing_dependency"
+    )
+
+
 def test_continue_job_stops_before_repeated_failure_recovery_by_default(
     tmp_path: Path,
     monkeypatch,
@@ -4021,6 +4084,101 @@ def test_supervise_job_pm_recovery_changes_strategy_after_stall(
     assert constraints["pm_strategy"] == "split_or_simplify_next_task"
     assert constraints["recovery_strategy"] == "split_or_clarify_task"
     assert constraints["pm_focus_task_id"] == "core"
+
+
+def test_supervise_job_auto_resumes_diagnosed_failure_with_pm_strategy(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    from packages.orchestrator.job_store import FileJobStore
+
+    jobs_dir = tmp_path / "jobs"
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    task_graph = TaskGraph(
+        goal="Build it",
+        tasks=[
+            PlannedTask(id="project-init", title="Init", description="Build init", role="implementer"),
+        ],
+    )
+    spec = JobSpec(
+        job_id="supervise-diagnosis-auto-recovery-job",
+        request_text="Build something useful.",
+        repo_path=str(workspace),
+    )
+    store = FileJobStore(jobs_dir)
+    record = store.create(spec)
+    record.status = JobStatus.STUCK
+    record.last_error = "diagnosed_repeated_failure:missing_dependency"
+    record.failure_count = 2
+    record.same_test_failure_count = 2
+    record.outputs["task_graph"] = task_graph.model_dump()
+    record.outputs["autonomous_stages"] = [
+        {
+            "stage": 1,
+            "task": task_graph.tasks[0].model_dump(),
+            "test_run": {"success": False},
+        }
+    ]
+    record.outputs["failure_diagnosis"] = {
+        "classification": "missing_dependency",
+        "root_cause": "pydantic-settings and pydantic versions are incompatible",
+        "failed_files": ["backend/app/config.py"],
+        "failed_tests": ["backend/tests"],
+        "recommended_fix_strategy": "align dependency versions",
+        "confidence": 0.95,
+        "should_retry": False,
+        "retry_mode": "targeted_fix",
+        "failure_signature": "ModuleNotFoundError: pydantic._internal._signature",
+    }
+    store.update(record)
+    captured: dict[str, object] = {"resume_count": 0}
+
+    class DummyRunner:
+        def resume_job(self, job_id: str) -> JobRecord:
+            captured["resume_count"] += 1
+            resumed = captured["store"].get(job_id)
+            constraints = resumed.spec.metadata["constraints"]
+            assert constraints["pm_strategy"] == "dependency_alignment_first"
+            assert constraints["pm_next_actor"] == "implementer"
+            assert "dependency manifests" in constraints["pm_recovery_playbook"]
+            resumed.status = JobStatus.DONE
+            resumed.last_error = None
+            captured["store"].update(resumed)
+            return resumed
+
+    def fake_build_default_runner(config_dir: str | Path, workspace_root: str | Path, store=None):
+        captured["store"] = store
+        return DummyRunner(), None
+
+    monkeypatch.setattr("apps.cli.build_default_runner", fake_build_default_runner)
+
+    exit_code = main(
+        [
+            "supervise-job",
+            "--config-dir",
+            str(config_dir()),
+            "--jobs-dir",
+            str(jobs_dir),
+            "--job-id",
+            "supervise-diagnosis-auto-recovery-job",
+            "--max-cycles",
+            "2",
+            "--steps-per-cycle",
+            "1",
+            "--pm-stall-recovery",
+        ]
+    )
+
+    assert exit_code == 0
+    assert captured["resume_count"] == 1
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["done"] is True
+    assert payload["steps_run"] == 1
+    assert payload["step_events"][0]["forced_recovery"] is True
+    assert payload["step_events"][0]["recovery_strategy"] == "diagnosis_guided_retry"
+    assert payload["pm_interventions"][0]["strategy"] == "dependency_alignment_first"
 
 
 def test_supervise_job_treats_planning_quality_attempts_as_progress(

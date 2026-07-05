@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import os
+import time
 from pathlib import Path
+from uuid import uuid4
 
 from packages.schemas.jobs import JobRecord, JobSpec, utc_now
 
@@ -63,14 +65,35 @@ class FileJobStore(InMemoryJobStore):
         return self.root / f"{job_id}.json"
 
     def _temp_path_for(self, job_id: str) -> Path:
-        return self.root / f".{job_id}.json.tmp"
+        return self.root / f".{job_id}.{os.getpid()}.{uuid4().hex}.json.tmp"
 
     def _write_atomic(self, temp_path: Path, path: Path, payload: str) -> None:
         with temp_path.open("w", encoding="utf-8") as handle:
             handle.write(payload)
             handle.flush()
             os.fsync(handle.fileno())
-        temp_path.replace(path)
+        last_error: PermissionError | None = None
+        for attempt in range(8):
+            try:
+                temp_path.replace(path)
+                return
+            except PermissionError as exc:
+                last_error = exc
+                time.sleep(0.05 * (attempt + 1))
+
+        # Windows can deny replace() while another process briefly has the
+        # destination open. Preserve progress by overwriting in place instead
+        # of failing the whole autonomous run.
+        try:
+            with path.open("w", encoding="utf-8") as handle:
+                handle.write(payload)
+                handle.flush()
+                os.fsync(handle.fileno())
+            return
+        except PermissionError:
+            if last_error is not None:
+                raise last_error
+            raise
 
     def _quarantine_invalid_record(self, path: Path) -> None:
         quarantine_path = path.with_suffix(path.suffix + ".invalid")

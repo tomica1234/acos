@@ -33,6 +33,12 @@ def test_summarize_job_progress_reports_pending_and_failed_stage(tmp_path) -> No
     record = JobRecord(job_id=spec.job_id, spec=spec, status=JobStatus.STUCK)
     record.completed_task_ids = ["core", "core-tests"]
     record.outputs["task_graph"] = task_graph.model_dump()
+    record.outputs["failure_diagnosis"] = {
+        "classification": "import_error",
+        "root_cause": "backend/main.py imports Base from database.py",
+        "recommended_fix_strategy": "Import Base from models.py",
+        "retry_mode": "targeted_fix",
+    }
     record.outputs["autonomous_stages"] = [
         {
             "stage": 1,
@@ -91,6 +97,12 @@ def test_summarize_job_progress_reports_pending_and_failed_stage(tmp_path) -> No
             },
         },
     }
+    assert payload["failure_diagnosis"] == {
+        "classification": "import_error",
+        "root_cause": "backend/main.py imports Base from database.py",
+        "recommended_fix_strategy": "Import Base from models.py",
+        "retry_mode": "targeted_fix",
+    }
     assert payload["resume"]["action"] == "inspect_repeated_failure"
     assert payload["resume"]["task_id"] == "extra"
     assert payload["resume"]["can_auto_continue"] is False
@@ -99,6 +111,52 @@ def test_summarize_job_progress_reports_pending_and_failed_stage(tmp_path) -> No
     assert payload["change_summary"]["changed_files"] == ["feature.py", "tests/test_feature.py"]
     assert payload["change_summary"]["patch_count"] == 3
     assert payload["change_summary"]["stages"][1]["task_id"] == "extra"
+
+
+def test_summarize_job_progress_reports_diagnosis_guided_recovery(tmp_path) -> None:
+    task_graph = TaskGraph(
+        goal="Recover with diagnosis",
+        tasks=[
+            PlannedTask(id="core", title="Core", description="Build core", role="implementer"),
+        ],
+    )
+    spec = JobSpec(
+        job_id="diagnosis-guided-progress",
+        request_text="Build it",
+        repo_path=str(tmp_path),
+    )
+    record = JobRecord(job_id=spec.job_id, spec=spec, status=JobStatus.STUCK)
+    record.last_error = "diagnosed_repeated_failure:missing_dependency"
+    record.failure_count = 2
+    record.same_test_failure_count = 2
+    record.outputs["task_graph"] = task_graph.model_dump()
+    record.outputs["failure_diagnosis"] = {
+        "classification": "missing_dependency",
+        "root_cause": "pydantic-settings and pydantic versions are incompatible",
+        "recommended_fix_strategy": "Align the dependency versions",
+        "retry_mode": "targeted_fix",
+    }
+    record.outputs["autonomous_stages"] = [
+        {
+            "stage": 1,
+            "task": task_graph.tasks[0].model_dump(),
+            "change_summary": {"changed_files": ["backend/requirements.txt"], "patch_count": 1},
+            "test_run": {"success": False},
+        },
+    ]
+
+    payload = summarize_job_progress(record)
+
+    assert payload["last_error"] == "diagnosed_repeated_failure:missing_dependency"
+    assert payload["failure_analysis"]["classification"] == "diagnosed_repeated_failure"
+    assert payload["failure_analysis"]["recommended_recovery"]["strategy"] == (
+        "diagnosis_guided_retry"
+    )
+    assert payload["resume"]["action"] == "diagnosis_guided_recovery"
+    assert payload["resume"]["can_auto_continue"] is False
+    assert payload["failure_diagnosis"]["root_cause"] == (
+        "pydantic-settings and pydantic versions are incompatible"
+    )
 
 
 def test_summarize_job_progress_reports_planning_quality_attempts(tmp_path) -> None:

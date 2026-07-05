@@ -45,6 +45,35 @@ def test_file_job_store_writes_records_atomically(tmp_path: Path) -> None:
     assert FileJobStore(jobs_dir).get("job-atomic").status == JobStatus.TESTING
 
 
+def test_file_job_store_falls_back_when_windows_replace_is_denied(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    jobs_dir = tmp_path / "jobs"
+    spec = JobSpec(
+        job_id="job-win-replace",
+        request_text="Keep saving on Windows.",
+        repo_path=str(tmp_path),
+    )
+    store = FileJobStore(jobs_dir)
+    record = store.create(spec)
+
+    original_replace = Path.replace
+    monkeypatch.setattr("packages.orchestrator.job_store.time.sleep", lambda _: None)
+
+    def deny_temp_replace(self: Path, target: Path) -> Path:
+        if self.name.startswith(".job-win-replace.") and self.suffix == ".tmp":
+            raise PermissionError("[WinError 5] Access is denied")
+        return original_replace(self, target)
+
+    monkeypatch.setattr(Path, "replace", deny_temp_replace)
+
+    record.status = JobStatus.TESTING
+    store.update(record)
+
+    assert FileJobStore(jobs_dir).get("job-win-replace").status == JobStatus.TESTING
+
+
 def test_file_job_store_quarantines_invalid_records_on_load(tmp_path: Path) -> None:
     jobs_dir = tmp_path / "jobs"
     jobs_dir.mkdir()

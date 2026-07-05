@@ -281,7 +281,8 @@ class AgentRunner:
                 "Structured output contract. "
                 f"Return only one JSON object with exactly these top-level keys: "
                 f"{', '.join(response_model.model_fields.keys())}. "
-                "Do not include markdown, code fences, commentary, or extra keys."
+                "The first character must be { and the last character must be }. "
+                "Do not include reasoning, analysis, markdown, code fences, commentary, or extra keys."
             ),
         }
 
@@ -298,7 +299,8 @@ class AgentRunner:
                 f"{error_detail} "
                 f"Return only repaired JSON with exactly these top-level keys: "
                 f"{', '.join(response_model.model_fields.keys())}. "
-                "Do not include markdown, code fences, commentary, or extra keys."
+                "The first character must be { and the last character must be }. "
+                "Do not include reasoning, analysis, markdown, code fences, commentary, or extra keys."
             ),
         }
 

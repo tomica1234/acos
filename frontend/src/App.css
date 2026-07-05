@@ -72,6 +72,114 @@ h2 {
   font-weight: 800;
 }
 
+.mobile-status-card {
+  display: none;
+  margin-bottom: 16px;
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel);
+  box-shadow: var(--shadow);
+}
+
+.mobile-status-card.live {
+  border-color: rgba(23, 107, 135, 0.32);
+  background: rgba(23, 107, 135, 0.07);
+}
+
+.mobile-status-card.good {
+  border-color: rgba(31, 154, 138, 0.34);
+  background: rgba(31, 154, 138, 0.08);
+}
+
+.mobile-status-card.warn {
+  border-color: rgba(163, 91, 0, 0.3);
+  background: rgba(163, 91, 0, 0.07);
+}
+
+.mobile-status-card.bad {
+  border-color: rgba(180, 35, 24, 0.26);
+  background: rgba(180, 35, 24, 0.07);
+}
+
+.mobile-status-main {
+  display: grid;
+  grid-template-columns: 1.1fr 0.8fr 0.9fr;
+  gap: 10px;
+}
+
+.mobile-status-main div {
+  min-width: 0;
+}
+
+.mobile-status-main span,
+.mobile-status-detail {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 900;
+}
+
+.mobile-status-main strong {
+  display: block;
+  overflow: hidden;
+  margin-top: 5px;
+  color: var(--ink);
+  font-size: 18px;
+  line-height: 1.25;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mobile-progress-bar {
+  overflow: hidden;
+  height: 12px;
+  margin-top: 12px;
+  border-radius: 999px;
+  background: rgba(103, 115, 134, 0.18);
+}
+
+.mobile-progress-bar div {
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, var(--brand), var(--brand-2));
+}
+
+.mobile-status-detail {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  margin-top: 8px;
+}
+
+.mobile-status-card p {
+  margin: 10px 0 0;
+  color: var(--ink);
+  font-size: 13px;
+  line-height: 1.55;
+  word-break: break-word;
+}
+
+.mobile-status-card .mobile-error {
+  color: var(--danger);
+  font-weight: 800;
+}
+
+.mobile-status-card .mobile-diagnosis {
+  color: var(--warn);
+}
+
+.mobile-actions {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.danger-action {
+  color: var(--danger);
+  background: rgba(180, 35, 24, 0.08);
+}
+
 .layout {
   display: grid;
   grid-template-columns: minmax(0, 1fr) 380px;
@@ -236,6 +344,168 @@ pre {
   line-height: 1.7;
 }
 
+.progress-overview {
+  display: grid;
+  gap: 12px;
+  margin: 16px 18px 0;
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel-2);
+}
+
+.progress-overview.live {
+  border-color: rgba(23, 107, 135, 0.32);
+  background: rgba(23, 107, 135, 0.07);
+}
+
+.progress-overview.good {
+  border-color: rgba(31, 154, 138, 0.34);
+  background: rgba(31, 154, 138, 0.08);
+}
+
+.progress-overview.warn {
+  border-color: rgba(163, 91, 0, 0.3);
+  background: rgba(163, 91, 0, 0.07);
+}
+
+.progress-overview.bad {
+  border-color: rgba(180, 35, 24, 0.26);
+  background: rgba(180, 35, 24, 0.07);
+}
+
+.progress-headline {
+  display: grid;
+  grid-template-columns: 1.5fr 0.8fr 0.9fr 0.9fr;
+  gap: 10px;
+}
+
+.progress-headline div {
+  min-width: 0;
+}
+
+.progress-headline span,
+.progress-caption span {
+  display: block;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 900;
+}
+
+.progress-headline strong {
+  display: block;
+  overflow: hidden;
+  margin-top: 5px;
+  color: var(--ink);
+  font-size: 18px;
+  line-height: 1.25;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.progress-bar {
+  overflow: hidden;
+  height: 12px;
+  border-radius: 999px;
+  background: rgba(103, 115, 134, 0.18);
+}
+
+.progress-bar div {
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, var(--brand), var(--brand-2));
+  transition: width 180ms ease;
+}
+
+.progress-caption {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.stage-strip {
+  display: grid;
+  grid-template-columns: repeat(11, minmax(0, 1fr));
+  gap: 6px;
+  margin: 14px 18px 0;
+}
+
+.stage {
+  display: grid;
+  justify-items: center;
+  gap: 7px;
+  min-width: 0;
+}
+
+.stage span {
+  width: 100%;
+  height: 8px;
+  border-radius: 999px;
+  background: rgba(103, 115, 134, 0.22);
+}
+
+.stage strong {
+  overflow: hidden;
+  width: 100%;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.25;
+  text-align: center;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.stage.done span {
+  background: rgba(31, 154, 138, 0.78);
+}
+
+.stage.current span {
+  background: var(--brand);
+  box-shadow: 0 0 0 3px rgba(23, 107, 135, 0.12);
+}
+
+.stage.done strong,
+.stage.current strong {
+  color: var(--ink);
+}
+
+.live-error {
+  margin: 14px 18px 0;
+  min-height: 0;
+}
+
+.diagnosis-card {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  margin: 14px 18px 0;
+  padding: 12px;
+  border: 1px solid rgba(163, 91, 0, 0.28);
+  border-radius: 8px;
+  background: rgba(163, 91, 0, 0.07);
+}
+
+.diagnosis-card div {
+  min-width: 0;
+}
+
+.diagnosis-card span {
+  display: block;
+  margin-bottom: 6px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 900;
+}
+
+.diagnosis-card strong {
+  display: block;
+  color: var(--ink);
+  font-size: 14px;
+  line-height: 1.45;
+  word-break: break-word;
+}
+
 .live-metrics,
 .progress-detail {
   display: grid;
@@ -324,7 +594,7 @@ pre {
 
 .event-list div {
   display: grid;
-  grid-template-columns: 92px minmax(0, 150px) minmax(0, 1fr) 90px;
+  grid-template-columns: 78px 92px minmax(0, 150px) 80px minmax(0, 1fr);
   align-items: center;
   gap: 10px;
   min-height: 42px;
@@ -337,7 +607,8 @@ pre {
 .event-list span,
 .event-list strong,
 .event-list em,
-.event-list b {
+.event-list b,
+.event-list small {
   overflow: hidden;
   font-size: 12px;
   line-height: 1.35;
@@ -361,6 +632,10 @@ pre {
 
 .event-list b {
   color: #0e5e54;
+}
+
+.event-list small {
+  color: var(--muted);
 }
 
 .result-card {
@@ -444,8 +719,17 @@ pre {
   .metrics,
   .planning-list,
   .live-metrics,
-  .progress-detail {
+  .progress-detail,
+  .diagnosis-card {
     grid-template-columns: 1fr 1fr;
+  }
+
+  .progress-headline {
+    grid-template-columns: 1fr 1fr;
+  }
+
+  .stage-strip {
+    grid-template-columns: repeat(6, minmax(0, 1fr));
   }
 }
 
@@ -458,6 +742,11 @@ pre {
   .topbar {
     align-items: flex-start;
     flex-direction: column;
+    padding-bottom: 14px;
+  }
+
+  .mobile-status-card {
+    display: block;
   }
 
   .split,
@@ -465,12 +754,22 @@ pre {
   .planning-list,
   .live-metrics,
   .progress-detail,
+  .diagnosis-card,
+  .progress-headline,
   .pm-decision div,
   .event-list div {
     grid-template-columns: 1fr;
   }
 
+  .stage-strip {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
   .requirement-panel textarea {
     min-height: 420px;
+  }
+
+  .command-panel {
+    display: none;
   }
 }

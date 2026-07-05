@@ -3,6 +3,7 @@
 from packages.llm.errors import UnknownRoleError
 from packages.agents import (
     architect,
+    diagnoser,
     fixer,
     implementer,
     planner,
@@ -20,6 +21,7 @@ ROLE_PROMPTS = {
     "planner": planner.SYSTEM_PROMPT,
     "implementer": implementer.SYSTEM_PROMPT,
     "test_writer": test_writer.SYSTEM_PROMPT,
+    "diagnoser": diagnoser.SYSTEM_PROMPT,
     "reviewer": reviewer.SYSTEM_PROMPT,
     "security_reviewer": security_reviewer.SYSTEM_PROMPT,
     "fixer": fixer.SYSTEM_PROMPT,

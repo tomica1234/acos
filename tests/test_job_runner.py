@@ -4746,6 +4746,89 @@ def test_job_runner_adds_recovery_guidance_to_agent_logs(
     assert captured["logs"][2] == "existing log"
 
 
+def test_job_runner_adds_pm_recovery_playbook_to_agent_logs(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    registry = ModelRegistry.from_paths(
+        provider_path=config_dir() / "model_providers.yaml",
+        agents_path=config_dir() / "agents.yaml",
+        routing_path=config_dir() / "model_routing.yaml",
+    )
+    attach_mock_adapter(
+        registry,
+        {
+            "implementer": ImplementationResult(
+                status=ImplementationStatus.IMPLEMENTED,
+                summary="Recovered dependency setup",
+                patches=[],
+            ).model_dump(),
+        },
+    )
+    policy = PolicyEngine.from_path(config_dir() / "policies.yaml")
+    environment = FakeMCPEnvironment(
+        workspace_root=workspace,
+        memory_db_path=workspace / ".memory.sqlite3",
+    )
+    runner = JobRunner(registry=registry, policy=policy, router=environment.build_router())
+    spec = JobSpec(
+        request_text="Recover dependencies",
+        repo_path=str(workspace),
+        metadata={
+            "constraints": {
+                "pm_stall_recovery": True,
+                "pm_strategy_change": True,
+                "pm_strategy": "dependency_alignment_first",
+                "pm_next_actor": "implementer",
+                "pm_reason": "diagnosed_repeated_failure",
+                "pm_recovery_playbook": (
+                    "inspect dependency manifests before touching application logic"
+                ),
+                "pm_success_criteria": "dependency import smoke test passes",
+            }
+        },
+    )
+    store = InMemoryJobStore()
+    record = store.create(spec)
+    record.status = JobStatus.PLANNING
+    runner.store = store
+    captured: dict[str, object] = {}
+    original_run = runner.agent_runner.run
+
+    def capture_run(*args, **kwargs):
+        if kwargs.get("role") == "implementer":
+            captured["logs"] = list(kwargs["context_packet"].logs)
+        return original_run(*args, **kwargs)
+
+    monkeypatch.setattr(runner.agent_runner, "run", capture_run)
+
+    runner._run_structured_role(
+        record,
+        "implementer",
+        ImplementationResult,
+        "Recover the failed task",
+    )
+
+    assert captured["logs"][0].startswith(
+        "pm_stall_recovery: strategy=dependency_alignment_first;"
+    )
+    assert "next_actor=implementer" in captured["logs"][0]
+    assert captured["logs"][1] == (
+        "pm_recovery_playbook: inspect dependency manifests before touching "
+        "application logic"
+    )
+    assert captured["logs"][2] == (
+        "pm_recovery_success_criteria: dependency import smoke test passes"
+    )
+    assert captured["logs"][3] == (
+        "pm_stall_instruction: execute the PM recovery playbook before normal "
+        "feature work; success means the diagnosed signature is removed, not merely "
+        "that a new patch was attempted."
+    )
+
+
 def test_job_runner_adds_planning_repair_guidance_to_pm_logs(
     tmp_path: Path,
     monkeypatch,

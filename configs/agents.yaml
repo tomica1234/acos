@@ -5,8 +5,8 @@ agents:
       - mock_structured
     temperature: 0.0
     top_p: 0.8
-    max_output_tokens: 2048
-    context_budget_tokens: 2048
+    max_output_tokens: 8192
+    context_budget_tokens: 49152
     allow_tools: true
     allowed_tools:
       - memory_server.write_memory
@@ -22,8 +22,8 @@ agents:
       - mock_structured
     temperature: 0.1
     top_p: 0.8
-    max_output_tokens: 2048
-    context_budget_tokens: 2048
+    max_output_tokens: 8192
+    context_budget_tokens: 49152
     allow_tools: true
     allowed_tools:
       - memory_server.read_memory
@@ -41,8 +41,8 @@ agents:
       - mock_structured
     temperature: 0.2
     top_p: 0.8
-    max_output_tokens: 2048
-    context_budget_tokens: 2048
+    max_output_tokens: 8192
+    context_budget_tokens: 49152
     allow_tools: true
     allowed_tools:
       - memory_server.read_memory
@@ -59,8 +59,8 @@ agents:
       - mock_structured
     temperature: 0.1
     top_p: 0.8
-    max_output_tokens: 2048
-    context_budget_tokens: 2048
+    max_output_tokens: 8192
+    context_budget_tokens: 49152
     allow_tools: true
     allowed_tools:
       - repo_server.read_file
@@ -78,8 +78,8 @@ agents:
       - mock_structured
     temperature: 0.1
     top_p: 0.8
-    max_output_tokens: 2048
-    context_budget_tokens: 2048
+    max_output_tokens: 8192
+    context_budget_tokens: 49152
     allow_tools: true
     allowed_tools:
       - repo_server.read_file
@@ -90,14 +90,33 @@ agents:
     escalation_policy: {}
     output_schema: TestWriterResult
 
+  diagnoser:
+    primary_model: ornith_35b_q4
+    fallback_models:
+      - mock_structured
+    temperature: 0.0
+    top_p: 0.8
+    max_output_tokens: 8192
+    context_budget_tokens: 49152
+    allow_tools: true
+    allowed_tools:
+      - repo_server.read_file
+      - repo_server.search_text
+      - git_server.diff
+      - memory_server.read_memory
+    require_json_schema: true
+    escalation_policy:
+      repeated_failures_gte: 2
+    output_schema: FailureDiagnosis
+
   reviewer:
     primary_model: ornith_35b_q4
     fallback_models:
       - mock_structured
     temperature: 0.0
     top_p: 0.8
-    max_output_tokens: 2048
-    context_budget_tokens: 2048
+    max_output_tokens: 8192
+    context_budget_tokens: 49152
     allow_tools: true
     allowed_tools:
       - repo_server.read_file
@@ -113,8 +132,8 @@ agents:
       - mock_structured
     temperature: 0.0
     top_p: 0.8
-    max_output_tokens: 2048
-    context_budget_tokens: 2048
+    max_output_tokens: 8192
+    context_budget_tokens: 49152
     allow_tools: true
     allowed_tools:
       - repo_server.read_file
@@ -131,8 +150,8 @@ agents:
       - mock_structured
     temperature: 0.1
     top_p: 0.8
-    max_output_tokens: 2048
-    context_budget_tokens: 2048
+    max_output_tokens: 8192
+    context_budget_tokens: 49152
     allow_tools: true
     allowed_tools:
       - repo_server.read_file
@@ -152,8 +171,8 @@ agents:
       - mock_structured
     temperature: 0.0
     top_p: 0.8
-    max_output_tokens: 2048
-    context_budget_tokens: 2048
+    max_output_tokens: 8192
+    context_budget_tokens: 49152
     allow_tools: true
     allowed_tools:
       - git_server.status
@@ -171,8 +190,8 @@ agents:
       - mock_structured
     temperature: 0.0
     top_p: 0.8
-    max_output_tokens: 2048
-    context_budget_tokens: 2048
+    max_output_tokens: 8192
+    context_budget_tokens: 49152
     allow_tools: true
     allowed_tools:
       - memory_server.read_memory
