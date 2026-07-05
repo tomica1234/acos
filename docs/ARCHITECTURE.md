@@ -6,11 +6,20 @@
 job through explicit states and owns retries, policy checks, quality gates,
 tool execution, and model selection inputs.
 
+`packages.orchestrator.autonomy_governor.AutonomyGovernor` decides how ACOS
+recovers from non-policy stops. Its default is to keep the job moving by
+recording a PM strategy change, adding recovery constraints to the job record,
+and passing that plan into the next agent context. Only policy hard stops are
+converted into human inspection paths.
+
 ## Data Plane
 
 - `packages.schemas.*` define every durable and agent-facing structure.
 - `packages.llm.registry.ModelRegistry` loads provider, model, and role config.
 - `packages.llm.routing.ModelRouter` selects the model for each role.
+- `configs/model_routing.yaml` escalates repeated implementation and fixer
+  failures from the default Ornith model to `ncmoe40_q4`; config validation
+  rejects no-op escalation rules that point back to the role primary model.
 - `packages.agents.runner.AgentRunner` reads the role config, asks
   `ModelRouter` for a `ModelSelection`, resolves the concrete adapter through
   `ModelRegistry`, executes policy-approved MCP tools, retries invalid JSON once
@@ -31,6 +40,12 @@ tool execution, and model selection inputs.
 8. Fixer proposes corrective patches if tests fail.
 9. Release Manager proposes the release artifact and commit message.
 10. Summarizer stores memory and prepares a user-facing summary.
+
+When tests, planning quality gates, completion integrity, stage limits, or
+supervision stalls fail, ACOS records `failure_analysis`,
+`failure_diagnosis` when available, `autonomous_recovery_plan`, and
+`pm_interventions`. The next run uses those records as context instead of
+asking the user to choose a recovery path.
 
 ## Tooling Boundary
 

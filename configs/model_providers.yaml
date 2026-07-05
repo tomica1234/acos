@@ -37,6 +37,17 @@ models:
     supports_json_repair: true
     tags: ["coding", "gguf", "quantized", "agentic"]
 
+  ncmoe40_q4:
+    provider: local_ornith
+    model: "ncmoe40"
+    display_name: "NCMOE 40B"
+    max_context_tokens: 65536
+    max_output_tokens: 8192
+    supports_tool_calling: true
+    supports_structured_output: false
+    supports_json_repair: true
+    tags: ["coding", "gguf", "quantized", "agentic", "escalation"]
+
   mock_structured:
     provider: mock_provider
     model: "mock/structured"

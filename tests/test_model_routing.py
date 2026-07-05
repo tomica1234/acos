@@ -28,14 +28,14 @@ def test_model_router_default_fallback_escalation_and_budget() -> None:
     implementer_escalation = router.select_model(
         RoutingContext(role="implementer", failure_count=2)
     )
-    assert implementer_escalation.model_id == "ornith_35b_q4"
+    assert implementer_escalation.model_id == "ncmoe40_q4"
     assert implementer_escalation.reason == RoutingReason.ESCALATION
     assert implementer_escalation.details["repeated_failures"] == 2
 
     escalation_selection = router.select_model(
         RoutingContext(role="fixer", failure_count=2)
     )
-    assert escalation_selection.model_id == "ornith_35b_q4"
+    assert escalation_selection.model_id == "ncmoe40_q4"
     assert escalation_selection.reason == RoutingReason.ESCALATION
     assert escalation_selection.details["repeated_failures"] == 2
 

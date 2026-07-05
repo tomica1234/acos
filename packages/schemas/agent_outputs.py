@@ -23,9 +23,14 @@ class FilePatch(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     path: str
-    content: str
-    operation: Literal["create", "update"] = "update"
+    content: str | None = None
+    operation: Literal["create", "update", "delete", "rename"] = "update"
     rationale: str | None = None
+    new_path: str | None = None
+    unified_diff: str | None = None
+    base_sha256: str | None = None
+    expected_old_content: str | None = None
+    executable: bool | None = None
 
     @model_validator(mode="before")
     @classmethod
@@ -39,6 +44,14 @@ class FilePatch(BaseModel):
                     normalized["path"] = normalized.pop(alias)
                     break
         return normalized
+
+    @model_validator(mode="after")
+    def validate_operation_payload(self) -> "FilePatch":
+        if self.operation in {"create", "update"} and self.content is None and self.unified_diff is None:
+            raise ValueError("create/update patches require content or unified_diff")
+        if self.operation == "rename" and not self.new_path:
+            raise ValueError("rename patches require new_path")
+        return self
 
 
 class PRD(BaseModel):

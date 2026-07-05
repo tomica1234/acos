@@ -8,23 +8,23 @@ routing:
         same_test_failure_gte: 2
         changed_files_gte: 8
         task_complexity_in: ["high", "critical"]
-      escalated_model: ornith_35b_q4
+      escalated_model: ncmoe40_q4
 
     fixer:
       escalate_when:
         repeated_failures_gte: 2
         same_test_failure_gte: 2
-      escalated_model: ornith_35b_q4
+      escalated_model: ncmoe40_q4
 
     reviewer:
       escalate_when:
         security_sensitive: true
-      escalated_model: ornith_35b_q4
+      escalated_model: ncmoe40_q4
 
     security_reviewer:
       escalate_when:
         security_sensitive: true
-      escalated_model: ornith_35b_q4
+      escalated_model: ncmoe40_q4
 
   fallback:
     on_errors:

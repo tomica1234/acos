@@ -67,6 +67,7 @@ agents:
       - repo_server.search_text
       - repo_server.apply_patch
       - git_server.diff
+    max_tool_steps: 24
     require_json_schema: true
     escalation_policy:
       repeated_failures_gte: 2
@@ -86,6 +87,7 @@ agents:
       - repo_server.search_text
       - repo_server.apply_patch
       - git_server.diff
+    max_tool_steps: 24
     require_json_schema: true
     escalation_policy: {}
     output_schema: TestWriterResult
@@ -104,6 +106,7 @@ agents:
       - repo_server.search_text
       - git_server.diff
       - memory_server.read_memory
+    max_tool_steps: 18
     require_json_schema: true
     escalation_policy:
       repeated_failures_gte: 2
@@ -160,6 +163,7 @@ agents:
       - git_server.diff
       - memory_server.read_memory
       - memory_server.write_memory
+    max_tool_steps: 24
     require_json_schema: true
     escalation_policy:
       repeated_failures_gte: 2

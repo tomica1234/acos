@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.metadata
+import hashlib
 import os
 import re
 import shutil
@@ -80,24 +81,108 @@ class RepoServer:
         content = content[:max_chars]
         return {"path": path, "content": content}
 
-    def search_text(self, query: str) -> dict[str, object]:
-        matches: list[dict[str, str]] = []
+    def search_text(
+        self,
+        query: str,
+        glob: str | None = None,
+        max_results: int = 50,
+        context_lines: int = 2,
+        case_sensitive: bool = False,
+    ) -> dict[str, object]:
+        matches: list[dict[str, object]] = []
+        needle = query if case_sensitive else query.lower()
         for relative_path in self.repo_tree()["files"]:
+            if glob and not Path(str(relative_path)).match(glob):
+                continue
             file_path = self._resolve(str(relative_path))
-            content = file_path.read_text(encoding="utf-8")
-            if query in content:
-                matches.append({"path": str(relative_path), "snippet": query})
+            try:
+                content = file_path.read_text(encoding="utf-8")
+            except UnicodeDecodeError:
+                continue
+            haystack = content if case_sensitive else content.lower()
+            if needle not in haystack:
+                continue
+            lines = content.splitlines()
+            for index, line in enumerate(lines, start=1):
+                search_line = line if case_sensitive else line.lower()
+                if needle not in search_line:
+                    continue
+                start = max(1, index - context_lines)
+                end = min(len(lines), index + context_lines)
+                snippet = "\n".join(lines[start - 1 : end])
+                matches.append(
+                    {
+                        "path": str(relative_path),
+                        "line": index,
+                        "snippet": snippet,
+                    }
+                )
+                if len(matches) >= max_results:
+                    return {"matches": matches}
         return {"matches": matches}
 
-    def apply_patch(self, path: str, content: str, operation: str = "update") -> dict[str, object]:
+    def apply_patch(
+        self,
+        path: str,
+        content: str | None = None,
+        operation: str = "update",
+        new_path: str | None = None,
+        unified_diff: str | None = None,
+        base_sha256: str | None = None,
+        expected_old_content: str | None = None,
+        executable: bool | None = None,
+    ) -> dict[str, object]:
         file_path = self._resolve(path)
+        if unified_diff is not None:
+            raise ValueError("unified_diff patches are not supported by the fake repo server yet")
+        if base_sha256 is not None and file_path.exists():
+            digest = hashlib.sha256(file_path.read_bytes()).hexdigest()
+            if digest != base_sha256:
+                raise ValueError("base_sha256 mismatch")
+        if expected_old_content is not None:
+            if not file_path.exists():
+                raise ValueError("expected_old_content provided but file does not exist")
+            if file_path.read_text(encoding="utf-8") != expected_old_content:
+                raise ValueError("expected_old_content mismatch")
         if operation == "create":
+            if content is None:
+                raise ValueError("create operation requires content")
             file_path.parent.mkdir(parents=True, exist_ok=True)
-        elif not file_path.exists():
-            file_path.parent.mkdir(parents=True, exist_ok=True)
-        file_path.write_text(content, encoding="utf-8")
+            if file_path.exists():
+                raise ValueError(f"create operation would overwrite existing file: {path}")
+            file_path.write_text(content, encoding="utf-8")
+        elif operation == "update":
+            if content is None:
+                raise ValueError("update operation requires content")
+            if not file_path.exists():
+                file_path.parent.mkdir(parents=True, exist_ok=True)
+            file_path.write_text(content, encoding="utf-8")
+        elif operation == "delete":
+            if not file_path.exists():
+                raise ValueError(f"delete operation target does not exist: {path}")
+            file_path.unlink()
+        elif operation == "rename":
+            if not new_path:
+                raise ValueError("rename operation requires new_path")
+            if not file_path.exists():
+                raise ValueError(f"rename operation source does not exist: {path}")
+            new_file_path = self._resolve(new_path)
+            if new_file_path.exists():
+                raise ValueError(f"rename operation target already exists: {new_path}")
+            new_file_path.parent.mkdir(parents=True, exist_ok=True)
+            file_path.rename(new_file_path)
+            self.modified_files.add(new_path)
+        else:
+            raise ValueError(f"unsupported patch operation: {operation}")
+        if executable is not None and operation != "delete":
+            target_path = self._resolve(new_path if operation == "rename" and new_path else path)
+            mode = target_path.stat().st_mode
+            if executable:
+                target_path.chmod(mode | 0o111)
+            else:
+                target_path.chmod(mode & ~0o111)
         self.modified_files.add(path)
-        return {"path": path, "operation": operation}
+        return {"path": path, "operation": operation, "new_path": new_path}
 
 
 class GitServer:

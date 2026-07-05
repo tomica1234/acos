@@ -70,10 +70,6 @@ class JobRunner:
         "pm",
         "architect",
         "planner",
-        "implementer",
-        "test_writer",
-        "diagnoser",
-        "fixer",
     }
     IMPLEMENTATION_TASK_ROLES = {"architect", "implementer"}
     TEST_TASK_ROLES = {"test_writer"}
@@ -411,17 +407,50 @@ class JobRunner:
         can_read = self.policy.is_tool_allowed(role, "repo_server.read_file")
         candidates: list[str] = []
         if can_tree:
-            candidates = list(self._call_tool(role, "repo_server.repo_tree").get("files", []))[:5]
+            tree_files = list(self._call_tool(role, "repo_server.repo_tree").get("files", []))
+            candidates = self._prioritized_context_files(tree_files)
         else:
             status = self._call_tool("release_manager", "git_server.status")
-            candidates = list(status.get("modified_files", []))[:5]
+            candidates = self._prioritized_context_files(list(status.get("modified_files", [])))
         if can_read:
             for path in candidates:
                 payload = self._call_tool(role, "repo_server.read_file", path=path)
                 files[path] = str(payload["content"])
+            if candidates:
+                files["__retrieval_trace__.txt"] = "\n".join(
+                    f"read_file:{path}:prioritized repository context" for path in candidates
+                )
         elif candidates:
             files["__repo_tree__.txt"] = "\n".join(candidates)
         return files
+
+    @staticmethod
+    def _prioritized_context_files(paths: list[str], limit: int = 40) -> list[str]:
+        priority_names = {
+            "pyproject.toml",
+            "package.json",
+            "requirements.txt",
+            "README.md",
+            "Makefile",
+            "pytest.ini",
+            "vite.config.ts",
+            "tsconfig.json",
+        }
+
+        def score(path: str) -> tuple[int, str]:
+            name = Path(path).name
+            if name in priority_names:
+                return (0, path)
+            if "/tests/" in f"/{path}" or path.startswith("tests/"):
+                return (1, path)
+            if path.endswith((".py", ".ts", ".tsx", ".js", ".jsx")):
+                return (2, path)
+            if path.endswith((".md", ".yaml", ".yml", ".toml", ".json")):
+                return (3, path)
+            return (4, path)
+
+        unique = list(dict.fromkeys(str(path) for path in paths if str(path).strip()))
+        return sorted(unique, key=score)[:limit]
 
     def _allowed_tools_for_role(self, role: str) -> list[str]:
         agent_cfg = self.registry.get_agent(role)
@@ -691,6 +720,11 @@ class JobRunner:
                 path=patch.path,
                 content=patch.content,
                 operation=patch.operation,
+                new_path=patch.new_path,
+                unified_diff=patch.unified_diff,
+                base_sha256=patch.base_sha256,
+                expected_old_content=patch.expected_old_content,
+                executable=patch.executable,
             )
         self.store.update(record)
 

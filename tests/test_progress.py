@@ -82,7 +82,7 @@ def test_summarize_job_progress_reports_pending_and_failed_stage(tmp_path) -> No
         "failed_task_id": "extra",
         "failed_stage": 2,
         "auto_continue_blocked": True,
-        "manual_intervention_recommended": True,
+            "manual_intervention_recommended": False,
         "recommended_recovery": {
             "strategy": "escalated_retry",
             "reason": (
@@ -103,9 +103,9 @@ def test_summarize_job_progress_reports_pending_and_failed_stage(tmp_path) -> No
         "recommended_fix_strategy": "Import Base from models.py",
         "retry_mode": "targeted_fix",
     }
-    assert payload["resume"]["action"] == "inspect_repeated_failure"
+    assert payload["resume"]["action"] == "recover_repeated_failure"
     assert payload["resume"]["task_id"] == "extra"
-    assert payload["resume"]["can_auto_continue"] is False
+    assert payload["resume"]["can_auto_continue"] is True
     assert payload["resume"]["suggested_continue_cli_args"] == []
     assert payload["progress_ratio"] == 0.6667
     assert payload["change_summary"]["changed_files"] == ["feature.py", "tests/test_feature.py"]
@@ -153,7 +153,7 @@ def test_summarize_job_progress_reports_diagnosis_guided_recovery(tmp_path) -> N
         "diagnosis_guided_retry"
     )
     assert payload["resume"]["action"] == "diagnosis_guided_recovery"
-    assert payload["resume"]["can_auto_continue"] is False
+    assert payload["resume"]["can_auto_continue"] is True
     assert payload["failure_diagnosis"]["root_cause"] == (
         "pydantic-settings and pydantic versions are incompatible"
     )
@@ -707,8 +707,8 @@ def test_summarize_job_progress_detects_recurring_failure_after_recovery(tmp_pat
         "require_task_acceptance_criteria": True,
         "stage_review": True,
     }
-    assert payload["resume"]["action"] == "inspect_recurring_failure"
-    assert payload["resume"]["can_auto_continue"] is False
+    assert payload["resume"]["action"] == "split_or_clarify_task"
+    assert payload["resume"]["can_auto_continue"] is True
 
 
 def test_summarize_job_progress_recommends_recovery_by_failure_type(tmp_path) -> None:
@@ -812,11 +812,11 @@ def test_summarize_job_progress_includes_completion_integrity_report(tmp_path) -
         "completion_audit"
     )
     assert payload["resume"] == {
-        "action": "inspect_completion_integrity",
+        "action": "completion_audit_recovery",
         "task_id": None,
         "stage": None,
         "reason": "completion_integrity_failed:missing_test_evidence",
-        "can_auto_continue": False,
+        "can_auto_continue": True,
         "suggested_cli_args": [],
         "suggested_continue_cli_args": [],
     }

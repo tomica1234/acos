@@ -21,6 +21,10 @@ from packages.llm.registry import ModelRegistry
 from packages.llm.routing import ModelRouter, RoutingContext
 from packages.orchestrator.job_runner import JobRunner, build_default_runner
 from packages.orchestrator.job_store import FileJobStore
+from packages.orchestrator.autonomy_governor import (
+    AutonomyGovernor,
+    apply_recovery_plan,
+)
 from packages.orchestrator.policy import PolicyEngine
 from packages.orchestrator.progress import summarize_job_progress
 from packages.mcp_client.fake import FakeMCPEnvironment
@@ -201,6 +205,7 @@ def build_parser() -> argparse.ArgumentParser:
     run_supervised.add_argument("--preflight-timeout", type=float, default=5.0)
     run_supervised.add_argument("--plan-first", action="store_true")
     run_supervised.add_argument("--pm-stall-recovery", action="store_true")
+    run_supervised.add_argument("--autonomous-until-done", action="store_true")
     run_supervised.add_argument(
         "--allow-blocked-recovery",
         "--allow-repeated-failure-recovery",
@@ -259,6 +264,7 @@ def build_parser() -> argparse.ArgumentParser:
     supervise_job.add_argument("--preflight-provider", default=None)
     supervise_job.add_argument("--preflight-timeout", type=float, default=5.0)
     supervise_job.add_argument("--pm-stall-recovery", action="store_true")
+    supervise_job.add_argument("--autonomous-until-done", action="store_true")
     supervise_job.add_argument(
         "--allow-blocked-recovery",
         "--allow-repeated-failure-recovery",
@@ -885,6 +891,7 @@ def continue_persisted_job(
     stage_review: bool = False,
     test_timeout_seconds: int | None = None,
     allow_repeated_failure_recovery: bool = False,
+    autonomous_recovery: bool = False,
 ) -> tuple[JobRecord, int, dict[str, object] | None, list[dict[str, Any]]]:
     steps_run = 0
     record = store.get(job_id)
@@ -901,9 +908,16 @@ def continue_persisted_job(
         if action == "none":
             no_action_summary = summary if steps_run == 0 else None
             break
-        if not can_auto_continue and not allow_repeated_failure_recovery:
-            no_action_summary = summary if steps_run == 0 else None
-            break
+        governor_decision = None
+        if not can_auto_continue:
+            governor_decision = AutonomyGovernor().decide(record, summary)
+            if governor_decision.action == "inspect":
+                no_action_summary = summary if steps_run == 0 else None
+                break
+            if not (allow_repeated_failure_recovery or autonomous_recovery):
+                no_action_summary = summary if steps_run == 0 else None
+                break
+            apply_recovery_plan(record, governor_decision)
         event: dict[str, Any] = {
             "step": steps_run + 1,
             "action": action,
@@ -918,6 +932,8 @@ def continue_persisted_job(
             )
         if not bool(can_auto_continue):
             event["forced_recovery"] = True
+        if governor_decision is not None:
+            event["autonomous_recovery_plan"] = governor_decision.as_plan()
         recovery = apply_recovery_overrides(record, summary)
         if recovery is not None:
             event["recovery_strategy"] = recovery.get("strategy")
@@ -1154,6 +1170,7 @@ def supervise_persisted_job(
     preflight_timeout: float | None = None,
     allow_repeated_failure_recovery: bool = False,
     pm_stall_recovery: bool = False,
+    autonomous_until_done: bool = False,
 ) -> dict[str, Any]:
     record = store.get(job_id)
     cycles_run = 0
@@ -1171,7 +1188,8 @@ def supervise_persisted_job(
     cycle_summaries: list[dict[str, Any]] = []
     pm_stall_recoveries = 0
     latest_pm_decision: dict[str, Any] | None = None
-    for cycle_index in range(max_cycles):
+    effective_max_cycles = 1_000_000 if autonomous_until_done else max_cycles
+    for cycle_index in range(effective_max_cycles):
         provider_preflight = maybe_probe_provider(
             config_dir=config_dir,
             provider_name=preflight_provider,
@@ -1200,8 +1218,11 @@ def supervise_persisted_job(
             stage_review=stage_review,
             test_timeout_seconds=test_timeout_seconds,
             allow_repeated_failure_recovery=(
-                allow_repeated_failure_recovery or pm_stall_recovery
+                allow_repeated_failure_recovery
+                or pm_stall_recovery
+                or autonomous_until_done
             ),
+            autonomous_recovery=autonomous_until_done or pm_stall_recovery,
         )
         if steps_run == 0 and no_action_summary is not None:
             cycle_payload = autonomous_result_payload(
@@ -1253,7 +1274,10 @@ def supervise_persisted_job(
             cycle_payload["provider_preflight"] = provider_preflight
         pm_recovery_applied = False
         if stalled_cycle_count >= max_stalled_cycles:
-            can_apply_pm_recovery = pm_stall_recovery and cycle_index + 1 < max_cycles
+            can_apply_pm_recovery = (
+                (pm_stall_recovery or autonomous_until_done)
+                and cycle_index + 1 < effective_max_cycles
+            )
             stall_analysis = _supervision_stall_analysis(
                 cycle_summaries=[*cycle_summaries, cycle_payload],
                 stalled=True,
@@ -1318,7 +1342,7 @@ def supervise_persisted_job(
             stalled_cycle_count = 0
             previous_progress_marker = None
             continue
-        if stalled_cycle_count >= max_stalled_cycles:
+        if stalled_cycle_count >= max_stalled_cycles and not autonomous_until_done:
             stopped_for_stall = True
             break
         if max_runtime_seconds is not None and elapsed_seconds >= max_runtime_seconds:
@@ -1329,7 +1353,7 @@ def supervise_persisted_job(
     final_payload = autonomous_result_payload(
         record,
         steps_run=total_steps_run,
-        max_steps=max_cycles * steps_per_cycle,
+        max_steps=effective_max_cycles * steps_per_cycle,
         started=False,
         config_dir=config_dir,
         jobs_dir=jobs_dir,
@@ -1368,6 +1392,7 @@ def supervise_persisted_job(
         {
             "cycles_run": cycles_run,
             "max_cycles": max_cycles,
+            "autonomous_until_done": autonomous_until_done,
             "steps_per_cycle": steps_per_cycle,
             "stalled": stopped_for_stall,
             "stalled_cycle_count": stalled_cycle_count,
@@ -1417,6 +1442,7 @@ def supervise_persisted_job(
                     preflight_timeout=preflight_timeout,
                     allow_repeated_failure_recovery=allow_repeated_failure_recovery,
                     pm_stall_recovery=pm_stall_recovery,
+                    autonomous_until_done=autonomous_until_done,
                 )
                 if can_supervise_continue
                 else []
@@ -1491,6 +1517,8 @@ def _operator_decision_payload(
     failure_analysis = summary.get("failure_analysis", {})
     if not isinstance(failure_analysis, dict):
         failure_analysis = {}
+    last_error = str(summary.get("last_error") or resume.get("reason") or "")
+    policy_hard_stop = AutonomyGovernor.is_policy_hard_stop(last_error)
 
     if done:
         action = "done"
@@ -1501,17 +1529,29 @@ def _operator_decision_payload(
         command = next_continue_command
         requires_explicit_override = False
     elif can_blocked_recovery_continue:
-        action = "blocked_recovery"
+        action = "continue"
         command = blocked_recovery_continue_command
-        requires_explicit_override = True
+        requires_explicit_override = False
     elif can_supervise_continue:
         action = "supervise"
         command = next_supervise_command
         requires_explicit_override = False
-    else:
+    elif policy_hard_stop:
         action = "inspect"
         command = None
-        requires_explicit_override = bool(stall_analysis.get("stalled"))
+        requires_explicit_override = True
+    elif stall_analysis.get("stalled"):
+        action = "supervise"
+        command = next_supervise_command
+        requires_explicit_override = False
+    elif runtime_analysis.get("runtime_limited"):
+        action = "supervise"
+        command = next_supervise_command
+        requires_explicit_override = False
+    else:
+        action = "continue"
+        command = None
+        requires_explicit_override = False
 
     blocking_items = autonomy_readiness.get("blocking_items", [])
     if not isinstance(blocking_items, list):
@@ -1528,11 +1568,11 @@ def _operator_decision_payload(
             planning_repair.get("strategy_change_recommended")
         ),
     }
-    if stall_analysis.get("stalled"):
+    if stall_analysis.get("stalled") and policy_hard_stop:
         decision["inspection_reason"] = "stalled"
         decision["stall_analysis"] = stall_analysis
     if runtime_analysis.get("runtime_limited"):
-        if action == "inspect":
+        if action == "inspect" and policy_hard_stop:
             decision["inspection_reason"] = "runtime_limit"
         decision["runtime_analysis"] = runtime_analysis
     failure_classification = failure_analysis.get("classification")
@@ -1565,6 +1605,7 @@ def _next_supervise_cli_args(
     preflight_timeout: float | None,
     allow_repeated_failure_recovery: bool = False,
     pm_stall_recovery: bool = False,
+    autonomous_until_done: bool = False,
 ) -> list[str]:
     args = [
         "supervise-job",
@@ -1607,6 +1648,8 @@ def _next_supervise_cli_args(
         args.append("--allow-blocked-recovery")
     if pm_stall_recovery:
         args.append("--pm-stall-recovery")
+    if autonomous_until_done:
+        args.append("--autonomous-until-done")
     return args
 
 
@@ -2434,6 +2477,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 stage_review=args.stage_review,
                 test_timeout_seconds=args.test_timeout_seconds,
                 allow_repeated_failure_recovery=args.allow_repeated_failure_recovery,
+                autonomous_recovery=True,
             )
         if args.json_summary:
             payload = autonomous_result_payload(
@@ -2555,7 +2599,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 preflight_provider=args.preflight_provider,
                 preflight_timeout=args.preflight_timeout,
                 allow_repeated_failure_recovery=args.allow_repeated_failure_recovery,
-                pm_stall_recovery=args.pm_stall_recovery,
+                pm_stall_recovery=args.pm_stall_recovery or args.autonomous_until_done,
+                autonomous_until_done=args.autonomous_until_done,
             )
             payload["started"] = True
             payload["initial_status"] = initial_status
@@ -2618,6 +2663,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             stage_review=args.stage_review,
             test_timeout_seconds=args.test_timeout_seconds,
             allow_repeated_failure_recovery=args.allow_repeated_failure_recovery,
+            autonomous_recovery=args.allow_repeated_failure_recovery,
         )
         if steps_run == 0 and no_action_summary is not None:
             if args.json_summary:
@@ -2680,7 +2726,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                     preflight_provider=args.preflight_provider,
                     preflight_timeout=args.preflight_timeout,
                     allow_repeated_failure_recovery=args.allow_repeated_failure_recovery,
-                    pm_stall_recovery=args.pm_stall_recovery,
+                    pm_stall_recovery=args.pm_stall_recovery or args.autonomous_until_done,
+                    autonomous_until_done=args.autonomous_until_done,
                 ),
             )
             emit_json_summary(payload, args.summary_file)
@@ -2706,7 +2753,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             preflight_provider=args.preflight_provider,
             preflight_timeout=args.preflight_timeout,
             allow_repeated_failure_recovery=args.allow_repeated_failure_recovery,
-            pm_stall_recovery=args.pm_stall_recovery,
+            pm_stall_recovery=args.pm_stall_recovery or args.autonomous_until_done,
+            autonomous_until_done=args.autonomous_until_done,
         )
         if provider_preflight is not None:
             payload.setdefault("provider_preflight", provider_preflight)

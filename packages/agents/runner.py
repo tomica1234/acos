@@ -121,8 +121,9 @@ class AgentRunner:
         last_selection: ModelSelection | None = None
         last_record: ModelCallRecord | None = None
         transient_retry_counts: dict[str, int] = {}
+        effective_max_steps = agent_config.max_tool_steps or max_steps
 
-        for _ in range(max_steps):
+        for _ in range(effective_max_steps):
             step_context = RoutingContext(
                 role=role,
                 task_complexity=base_context.task_complexity,
@@ -269,7 +270,7 @@ class AgentRunner:
 
         last_model = last_selection.model_key if last_selection is not None else "unknown"
         raise StructuredOutputError(
-            f"Agent {role} exceeded max_steps={max_steps} without a valid structured response; "
+            f"Agent {role} exceeded max_steps={effective_max_steps} without a valid structured response; "
             f"last_model={last_model}; last_status={last_record.status.value if last_record else 'none'}"
         )
 

@@ -62,6 +62,15 @@ def _base_provider_config() -> dict:
                 "supports_tool_calling": True,
                 "supports_structured_output": False,
             },
+            "ncmoe40_q4": {
+                "provider": "local_ornith",
+                "model": "ncmoe40",
+                "display_name": "NCMOE 40B",
+                "max_context_tokens": 262144,
+                "max_output_tokens": 32768,
+                "supports_tool_calling": True,
+                "supports_structured_output": False,
+            },
             "mock_structured": {
                 "provider": "mock_provider",
                 "model": "mock/structured",
@@ -111,7 +120,7 @@ def _base_routing_config() -> dict:
             "escalation": {
                 "implementer": {
                     "escalate_when": {"repeated_failures_gte": 2},
-                    "escalated_model": "ornith_35b_q4",
+                    "escalated_model": "ncmoe40_q4",
                 }
             },
             "fallback": {"on_errors": ["timeout", "invalid_json"]},
@@ -219,6 +228,29 @@ def test_model_registry_rejects_missing_fallback_model(tmp_path) -> None:
         ModelRegistry.from_paths(provider_path, agents_path, routing_path)
 
     assert "Agent implementer references unknown model missing_model" in str(exc.value)
+
+
+def test_model_registry_rejects_noop_escalation_model(tmp_path) -> None:
+    providers = _base_provider_config()
+    agents = _base_agents_config()
+    routing = _base_routing_config()
+    routing["routing"]["escalation"]["implementer"]["escalated_model"] = "ornith_35b_q4"
+    provider_path, agents_path, routing_path = _write_configs(
+        tmp_path,
+        providers,
+        agents,
+        routing,
+    )
+
+    registry = ModelRegistry.load_from_paths(provider_path, agents_path, routing_path)
+
+    with pytest.raises(ConfigValidationError) as exc:
+        registry.validate_or_raise(PolicyEngine.from_path(config_dir() / "policies.yaml"))
+
+    assert (
+        "Routing escalation for implementer must use a different model than primary ornith_35b_q4"
+        in str(exc.value)
+    )
 
 
 def test_model_registry_rejects_tool_incompatible_model_for_tool_role(tmp_path) -> None:

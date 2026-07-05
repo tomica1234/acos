@@ -13,6 +13,8 @@ layer so providers and model sizes remain interchangeable.
 ## Features
 
 - Orchestrator-owned state machine with retries, blocked and stuck handling
+- AutonomyGovernor recovery that keeps jobs moving until completion unless a
+  policy hard stop is reached
 - Role-specific model configuration and dynamic model escalation
 - OpenAI-compatible provider support plus a deterministic mock adapter
 - Pydantic-validated agent outputs and context packets
@@ -74,7 +76,7 @@ Each model includes:
 - Reviewer uses a strict low-temperature model
 - Summarizer uses the same local Ornith model for memory updates
 - Fixer can escalate repeated failures through routing policy while staying on
-  Ornith by default
+  Ornith by default, and escalates repeated failures to `ncmoe40_q4`
 
 `configs/model_routing.yaml` controls:
 
@@ -136,6 +138,7 @@ acos run-autonomous --file job.yaml --jobs-dir .acos/jobs --max-steps 3
 acos run-supervised --file job.yaml --jobs-dir .acos/jobs --max-cycles 10 --steps-per-cycle 1 --max-stalled-cycles 3 --max-runtime-seconds 3600 --summary-file .acos/final-summary.json --summary-dir .acos/cycles
 acos run-supervised --request "Build a project tracker with auth and tests" --repo-path . --jobs-dir .acos/jobs --plan-first --max-cycles 10 --steps-per-cycle 1 --summary-file .acos/final-summary.json --summary-dir .acos/cycles --preflight-provider local_ornith
 acos run-supervised --request "Build a project tracker with auth and tests" --repo-path . --jobs-dir .acos/jobs --max-cycles 10
+acos run-supervised --request "Build the app from this PRD" --repo-path . --jobs-dir .acos/jobs --autonomous-until-done --summary-file .acos/final-summary.json --summary-dir .acos/cycles --preflight-provider local_ornith
 acos run-supervised --request "Build a project tracker" --repo-path . --preflight-provider local_ornith
 acos run-job --file job.yaml --jobs-dir .acos/jobs --large-autonomous
 acos job-status --job-id <job-id> --jobs-dir .acos/jobs
@@ -143,6 +146,7 @@ acos continue-job --job-id <job-id> --jobs-dir .acos/jobs --max-steps 3
 acos continue-job --job-id <job-id> --jobs-dir .acos/jobs --max-steps 3 --json-summary
 acos continue-job --job-id <job-id> --jobs-dir .acos/jobs --max-steps 3 --json-summary --summary-file .acos/last-summary.json
 acos supervise-job --job-id <job-id> --jobs-dir .acos/jobs --max-cycles 10 --steps-per-cycle 1 --max-stalled-cycles 3 --summary-file .acos/final-summary.json --summary-dir .acos/cycles
+acos supervise-job --job-id <job-id> --jobs-dir .acos/jobs --autonomous-until-done --summary-file .acos/final-summary.json --summary-dir .acos/cycles
 acos job-status --job-id <job-id> --jobs-dir .acos/jobs --next-supervise-command --supervise-max-cycles 10 --supervise-steps-per-cycle 1 --supervise-summary-file .acos/final-summary.json --supervise-preflight-provider local_ornith
 acos job-status --job-id <job-id> --jobs-dir .acos/jobs --next-continue-command --continue-max-steps 3 --continue-json-summary
 acos job-status --job-id <job-id> --jobs-dir .acos/jobs --next-command
@@ -159,6 +163,14 @@ declared `small_parts` item, so large requests are decomposed into verifiable
 units before coding begins. Task graph validation records `small_part_coverage`
 and `acceptance_test_coverage` so supervisors can audit which implementation
 task is responsible for each requirement slice and acceptance check.
+
+`--autonomous-until-done` changes supervision from operator-assisted progress to
+PM-owned recovery. Repeated test failures, completion integrity failures, PRD
+quality failures, invalid task graphs, stage limits, stalls, and runtime
+limits are treated as recoverable strategy-change events. The job record stores
+`autonomous_recovery_plan` and `pm_interventions` so the next agent context sees
+why ACOS changed approach. Only `policy_hard_stop:*` style errors require human
+inspection.
 Use `plan-job` when you want ACOS to spend a separate pass on PRD, architecture,
 task graph validation, and planning evidence before any implementation patches
 are applied. A successful planning run remains resumable through `continue-job`
@@ -179,8 +191,9 @@ supervised implementation loop. Pass either `--file job.yaml` or a direct `--req
 supervision when repeated cycles produce the same progress marker, avoiding
 unbounded retry loops that are not changing task completion or patch progress.
 When this happens, the final JSON includes `stall_analysis`, and
-`operator_decision` switches to `action: inspect` with `inspection_reason:
-stalled` so automation can stop instead of blindly relaunching the same loop.
+`operator_decision` returns a supervision recovery path. With
+`--autonomous-until-done`, ACOS records a PM strategy change and continues
+instead of returning to the user.
 `--max-runtime-seconds` stops supervision after the current cycle once the
 runtime budget is reached and returns `terminal_reason: runtime_limit`.
 Use `--preflight-provider local_ornith` on `run-supervised` or `supervise-job`

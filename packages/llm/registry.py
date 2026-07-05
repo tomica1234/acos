@@ -255,9 +255,16 @@ class ModelRegistry:
         for role, config in self.routing.escalation.items():
             if role not in self.agents:
                 errors.append(f"Routing escalation references unknown role {role}")
+                continue
             if config.escalated_model not in self.models:
                 errors.append(
                     f"Routing escalation for {role} references unknown model {config.escalated_model}"
+                )
+                continue
+            agent = self.agents[role]
+            if config.escalated_model == agent.primary_model:
+                errors.append(
+                    f"Routing escalation for {role} must use a different model than primary {agent.primary_model}"
                 )
         return errors
 

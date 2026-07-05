@@ -173,6 +173,7 @@ class AgentModelConfig(BaseModel):
     allow_tools: bool = True
     allowed_tools: list[str] = Field(default_factory=list)
     require_json_schema: bool = True
+    max_tool_steps: int | None = None
     escalation_policy: dict[str, Any] = Field(default_factory=dict)
     output_schema: str
 

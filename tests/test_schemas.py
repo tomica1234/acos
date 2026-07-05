@@ -156,6 +156,33 @@ def test_file_patch_still_rejects_unknown_extra_keys() -> None:
         )
 
 
+def test_file_patch_supports_delete_rename_and_integrity_metadata() -> None:
+    delete_patch = FilePatch.model_validate(
+        {
+            "path": "old.py",
+            "operation": "delete",
+            "base_sha256": "abc123",
+        }
+    )
+    rename_patch = FilePatch.model_validate(
+        {
+            "path": "old.py",
+            "operation": "rename",
+            "new_path": "new.py",
+            "expected_old_content": "VALUE = 1\n",
+        }
+    )
+
+    assert delete_patch.content is None
+    assert rename_patch.new_path == "new.py"
+
+    with pytest.raises(ValidationError):
+        FilePatch.model_validate({"path": "old.py", "operation": "rename"})
+
+    with pytest.raises(ValidationError):
+        FilePatch.model_validate({"path": "old.py", "operation": "update"})
+
+
 def test_prd_captures_strict_incremental_requirements() -> None:
     prd = PRD(
         title="Notes",

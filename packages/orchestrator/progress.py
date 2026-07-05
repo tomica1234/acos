@@ -272,24 +272,64 @@ def _resume_recommendation(
     failure_analysis: dict[str, Any],
     autonomy_readiness: dict[str, Any],
 ) -> dict[str, Any]:
-    if failure_analysis.get("auto_continue_blocked"):
-        action = (
-            "inspect_recurring_failure"
-            if failure_analysis.get("classification") == "recurring_stage_failure"
-            else "inspect_repeated_failure"
-        )
-        if failure_analysis.get("classification") == "diagnosed_repeated_failure":
-            action = "diagnosis_guided_recovery"
-        if failure_analysis.get("classification") == "completion_integrity_failed":
-            action = "inspect_completion_integrity"
+    if _is_policy_hard_stop(record.last_error):
         return {
-            "action": action,
-            "task_id": failure_analysis.get("failed_task_id"),
-            "stage": failure_analysis.get("failed_stage"),
+            "action": "inspect_policy_hard_stop",
+            "task_id": None,
+            "stage": None,
             "reason": record.last_error,
             "can_auto_continue": False,
             "suggested_cli_args": [],
             "suggested_continue_cli_args": [],
+        }
+    if failure_analysis.get("auto_continue_blocked"):
+        classification = failure_analysis.get("classification")
+        action = (
+            "split_or_clarify_task"
+            if classification == "recurring_stage_failure"
+            else "recover_repeated_failure"
+        )
+        task_id = failure_analysis.get("failed_task_id")
+        stage = failure_analysis.get("failed_stage")
+        suggested_cli_args: list[str] = []
+        suggested_continue_cli_args: list[str] = []
+        extra: dict[str, Any] = {}
+        if classification == "diagnosed_repeated_failure":
+            action = "diagnosis_guided_recovery"
+        if classification == "completion_integrity_failed":
+            action = "completion_audit_recovery"
+        if classification == "autonomous_stage_limit_reached":
+            action = "raise_stage_limit_or_resume"
+            stage_limit = execution_limits.get("autonomous_stage_limit")
+            if isinstance(stage_limit, dict):
+                suggested_next_limit = stage_limit.get("suggested_next_max_autonomous_stages")
+                task_id = pending_ids[0] if pending_ids else task_id
+                stage = stage_limit.get("completed_stage_count")
+                extra["limit"] = stage_limit
+                extra["suggested_max_autonomous_stages"] = suggested_next_limit
+                suggested_cli_args = _resume_cli_args(
+                    record.job_id,
+                    suggested_max_autonomous_stages=suggested_next_limit,
+                )
+                suggested_continue_cli_args = _continue_cli_args(record.job_id)
+        if classification in {
+            "prd_quality_gate_failed",
+            "invalid_task_graph",
+        }:
+            action = "improve_planning_quality"
+            blocking_items = autonomy_readiness.get("blocking_items", [])
+            extra["blocking_items"] = blocking_items if isinstance(blocking_items, list) else []
+            suggested_cli_args = _resume_cli_args(record.job_id)
+            suggested_continue_cli_args = _continue_cli_args(record.job_id)
+        return {
+            "action": action,
+            "task_id": task_id,
+            "stage": stage,
+            "reason": record.last_error,
+            "can_auto_continue": True,
+            "suggested_cli_args": suggested_cli_args,
+            "suggested_continue_cli_args": suggested_continue_cli_args,
+            **extra,
         }
     stage_limit = execution_limits.get("autonomous_stage_limit")
     if record.last_error == "autonomous_stage_limit_reached" and isinstance(stage_limit, dict):
@@ -375,6 +415,9 @@ def _failure_analysis(
         "diagnosed_repeated_failure",
         "recurring_stage_failure",
         "completion_integrity_failed",
+        "prd_quality_gate_failed",
+        "invalid_task_graph",
+        "autonomous_stage_limit_reached",
     }
     recommended_recovery = _recommended_recovery(
         classification=classification,
@@ -389,7 +432,7 @@ def _failure_analysis(
         "failed_task_id": failed_task_id,
         "failed_stage": failed_stage_number,
         "auto_continue_blocked": auto_continue_blocked,
-        "manual_intervention_recommended": auto_continue_blocked,
+        "manual_intervention_recommended": False,
         "recommended_recovery": recommended_recovery,
     }
     if prior_recoveries:
@@ -403,6 +446,8 @@ def _failure_analysis(
 def _failure_classification(last_error: str | None) -> str | None:
     if last_error is None:
         return None
+    if _is_policy_hard_stop(last_error):
+        return "policy_hard_stop"
     if last_error == "same_failure_threshold_reached":
         return "repeated_test_failure"
     if last_error.startswith("diagnosed_repeated_failure:"):
@@ -421,7 +466,32 @@ def _failure_classification(last_error: str | None) -> str | None:
         return "test_writer_blocked"
     if last_error.startswith("completion_integrity_failed:"):
         return "completion_integrity_failed"
+    if last_error.startswith("prd_quality_gate_failed:"):
+        return "prd_quality_gate_failed"
+    if last_error == "invalid_task_graph":
+        return "invalid_task_graph"
+    if last_error == "autonomous_stage_limit_reached":
+        return "autonomous_stage_limit_reached"
     return "other"
+
+
+def _is_policy_hard_stop(last_error: str | None) -> bool:
+    if not last_error:
+        return False
+    lowered = last_error.lower()
+    return lowered.startswith(
+        (
+            "policy_hard_stop",
+            "policy_denied",
+            "blocked_operation",
+            "secret_access",
+            "direct_main_write",
+            "direct_master_write",
+            "force_push",
+            "production_deploy",
+            "unsafe_shell",
+        )
+    )
 
 
 def _task_id_from_error(last_error: str | None) -> str | None:
@@ -557,6 +627,35 @@ def _recommended_recovery(
                 "require_completion_integrity": True,
                 "require_test_evidence": True,
                 "require_stage_test_patches": True,
+            },
+        },
+        "prd_quality_gate_failed": {
+            "strategy": "planning_repair_strategy_change",
+            "reason": "PRD quality gate failed and needs autonomous PM refinement",
+            "preserve_failure_counts_for_model_escalation": False,
+            "constraints": {
+                "recovery_mode": "prd_quality_repair",
+                "recovery_strategy": "planning_repair_strategy_change",
+                "require_prd_quality": True,
+            },
+        },
+        "invalid_task_graph": {
+            "strategy": "task_graph_replanning",
+            "reason": "task graph validation failed and needs autonomous replanning",
+            "preserve_failure_counts_for_model_escalation": False,
+            "constraints": {
+                "recovery_mode": "task_graph_replanning",
+                "recovery_strategy": "task_graph_replanning",
+                "require_task_acceptance_criteria": True,
+            },
+        },
+        "autonomous_stage_limit_reached": {
+            "strategy": "raise_stage_limit",
+            "reason": "autonomous stage limit was reached and can be bumped",
+            "preserve_failure_counts_for_model_escalation": False,
+            "constraints": {
+                "recovery_mode": "stage_limit",
+                "recovery_strategy": "raise_stage_limit",
             },
         },
     }

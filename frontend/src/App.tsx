@@ -94,47 +94,16 @@ type BackgroundRun = {
   error?: string
 }
 
-const englishVocabTemplate = `英単語テストアプリを作りたい。
+const defaultRequestTemplate = `作りたいアプリや機能をここに書いてください。
 
-対象:
-- 生徒が英単語を覚えるための Web アプリ
-- 先生が単語セットとテストを管理できる
-
-生徒向け機能:
-- 日英、英日、それぞれ4択問題を出す
-- 文章の空欄に入るべき英単語を4択で選ばせる
-- 英日では択一だけでなく、日本語を自由入力して答える問題を出す
-- 日本語自由入力は、漢字・ひらがな・言い換えで不当に不正解にならないよう、軽量LLMで意味採点する
-- LLM採点が使えない場合は、同義語・表記ゆれを少し許容するフォールバックを用意する
-- 生徒ごとに、単語を覚えたか、苦手か、最後に解いた日、正答率を管理する
-- 覚えていない単語は何度も出題する
-- 忘却曲線に沿って、時間が経つと復習対象に戻す
-- 学習画面では今日やるべき単語、正答率、復習予定を見られる
-
-先生向け機能:
-- 単語セットを複数管理できる
-- セットごとに単語、英語、日本語訳、例文、選択肢用の誤答候補を編集できる
-- クラスまたは生徒ごとの進捗を見られる
-- テストに使う単語セットを指定できる
-- 生徒が苦手な単語を確認できる
-
-LLM採点:
-- 軽い OpenAI-compatible なローカルモデルを想定する
-- 採点APIのURL、モデル名、APIキーは環境変数で変更できる
-- 採点結果は correct, confidence, reason を返す
-- 採点時は正解例、日本語訳、学習者の回答を渡し、意味が合っているかを見る
-
-実装要件:
-- フロントエンドつき
+要件:
 - まず最小の動く核を作る
 - 機能を小さく分割して追加する
 - 各ステップでテストを書く
-- バックエンド、フロントエンド、READMEを含める
-- 開発用にサンプル単語セットを複数用意する
-- ローカルで起動できる手順をREADMEに書く
+- README にローカル起動手順を書く
 `
 
-const defaultRepoPath = '\\\\wsl.localhost\\Ubuntu\\home\\jalan\\wip\\acos-runs\\english-vocab-test-app'
+const defaultRepoPath = '\\\\wsl.localhost\\Ubuntu\\home\\jalan\\wip\\acos-runs\\new-acos-app'
 
 function compactJson(value: unknown) {
   return JSON.stringify(value, null, 2)
@@ -215,9 +184,9 @@ function describeProgressGap(
 }
 
 function App() {
-  const [requestText, setRequestText] = useState(englishVocabTemplate)
+  const [requestText, setRequestText] = useState(defaultRequestTemplate)
   const [repoPath, setRepoPath] = useState(defaultRepoPath)
-  const [jobId, setJobId] = useState('english-vocab-test-app')
+  const [jobId, setJobId] = useState('new-acos-app')
   const [maxCycles, setMaxCycles] = useState(12)
   const [unlimitedCycles, setUnlimitedCycles] = useState(false)
   const [batchesRun, setBatchesRun] = useState(0)
@@ -236,9 +205,9 @@ function App() {
       request_text: requestText,
       repo_path: repoPath,
       workspace_root: repoPath,
-      target_branch: 'acos/english-vocab-test-app',
+      target_branch: `acos/${jobId || 'new-acos-app'}`,
       job_id: jobId || undefined,
-      title: 'English Vocabulary Test App',
+      title: jobId || 'New ACOS App',
       jobs_dir: '.acos/jobs-ui',
       max_cycles: maxCycles,
       steps_per_cycle: 1,
@@ -543,7 +512,7 @@ function App() {
               <button
                 className="ghost-button"
                 type="button"
-                onClick={() => setRequestText(englishVocabTemplate)}
+                onClick={() => setRequestText(defaultRequestTemplate)}
               >
                 テンプレート
               </button>
