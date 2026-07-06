@@ -290,6 +290,7 @@ function App() {
       max_stalled_cycles: 3,
       pm_stall_recovery: true,
       max_runtime_seconds: 3600,
+      max_autonomous_stages: 256,
       summary_file: '.acos/ui-last-summary.json',
       summary_dir: '.acos/ui-cycles',
       plan_first: planFirst,
