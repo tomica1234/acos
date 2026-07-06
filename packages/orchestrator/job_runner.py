@@ -12,6 +12,7 @@ from typing import Any
 from packages.agents.runner import AgentRunner
 from packages.llm.budget import estimate_tokens
 from packages.llm.client import LLMClient
+from packages.llm.errors import StructuredOutputError
 from packages.llm.registry import ModelRegistry
 from packages.llm.routing import ModelRouter, RoutingContext
 from packages.mcp_client.fake import FakeMCPEnvironment
@@ -164,6 +165,9 @@ class JobRunner:
                 error=self._quality_gate_recovery_error(exc),
             )
             return self.store.update(record)
+        except StructuredOutputError as exc:
+            self._recover_record(record, error=str(exc))
+            return self.store.update(record)
         except Exception as exc:  # pragma: no cover - top-level safety net
             record.status = JobStatus.FAILED
             record.last_error = str(exc)
@@ -285,6 +289,9 @@ class JobRunner:
                 record,
                 error=self._quality_gate_recovery_error(exc),
             )
+            return self.store.update(record)
+        except StructuredOutputError as exc:
+            self._recover_record(record, error=str(exc))
             return self.store.update(record)
         except Exception as exc:  # pragma: no cover - top-level safety net
             record.status = JobStatus.FAILED
@@ -788,6 +795,13 @@ class JobRunner:
                     "diagnosis_retry_policy: "
                     f"retry_mode={retry_mode}; should_retry={should_retry}"
                 )
+        if strategy == "RETRY_AGENT_WITH_STRUCTURED_OUTPUT_GUARD":
+            exceeded_role = constraints.get("max_steps_exceeded_role", "unknown")
+            guidance.append(
+                "structured_output_recovery: "
+                f"previous_role={exceeded_role}; avoid_tool_loop=true; "
+                "return_schema_first=true; retry_small_scope=true"
+            )
         return guidance
 
     def _recovery_history_logs(self, record: JobRecord, role: str) -> list[str]:
@@ -979,6 +993,18 @@ class JobRunner:
                 "Change method before retrying: adjust dependency policy, split the failed "
                 "task, or rewrite the smallest setup surface needed by the diagnosed root "
                 "cause. Do not continue with the same patch loop."
+            )
+        if strategy == "RETRY_AGENT_WITH_STRUCTURED_OUTPUT_GUARD" and role in {
+            "implementer",
+            "fixer",
+            "test_writer",
+            "diagnoser",
+        }:
+            return (
+                "recovery_instruction: the previous agent exhausted tool steps without returning "
+                "valid JSON. Inspect only files already named in the diagnosis or retrieval trace, "
+                "make the smallest necessary patch, then return the required structured JSON. "
+                "Do not continue broad repository exploration."
             )
         return None
 

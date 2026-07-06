@@ -78,6 +78,28 @@ def test_recovery_governor_maps_max_attempts_to_replanning() -> None:
     ]
 
 
+def test_recovery_governor_maps_agent_max_steps_to_strategy_change() -> None:
+    record = _record(
+        "Agent fixer exceeded max_steps=24 without a valid structured response; "
+        "last_model=ornith_35b_q4; last_status=success"
+    )
+    RecoveryGovernor().recover(record)
+
+    plan = record.runtime_state["recovery_plan"]
+    assert record.status == JobStatus.STRATEGY_CHANGE
+    assert plan["trigger"] == "agent_max_steps_exceeded"
+    assert plan["strategy"] == "RETRY_AGENT_WITH_STRUCTURED_OUTPUT_GUARD"
+    assert plan["next_actor"] == "fixer"
+    assert plan["constraints"] == {
+        "recovery_mode": "agent_max_steps_structured_output",
+        "max_steps_exceeded_role": "fixer",
+        "avoid_tool_loop": True,
+        "force_structured_output": True,
+        "retry_small_scope": True,
+        "expand_context": True,
+    }
+
+
 def test_recovery_governor_maps_review_attempts_to_revision_paths() -> None:
     governor = RecoveryGovernor()
     design = _record("design_review_max_attempts_exceeded")

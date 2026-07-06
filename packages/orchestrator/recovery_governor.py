@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
@@ -207,6 +208,29 @@ class RecoveryGovernor:
     ) -> RecoveryPlan | None:
         lowered = last_error.lower()
         trigger = self._trigger(last_error, "recoverable_failure")
+        max_step_role = self._agent_max_steps_role(last_error)
+        if max_step_role is not None:
+            return RecoveryPlan(
+                trigger="agent_max_steps_exceeded",
+                strategy="RETRY_AGENT_WITH_STRUCTURED_OUTPUT_GUARD",
+                next_status=JobStatus.STRATEGY_CHANGE,
+                next_actor=max_step_role,
+                steps=[
+                    "SUMMARIZE_TOOL_FINDINGS",
+                    "RETRY_WITH_SMALLER_SCOPE",
+                    "RETURN_VALID_STRUCTURED_OUTPUT",
+                ],
+                reason=last_error,
+                checkpoint_policy="invalidate_failed_stage",
+                constraints={
+                    "recovery_mode": "agent_max_steps_structured_output",
+                    "max_steps_exceeded_role": max_step_role,
+                    "avoid_tool_loop": True,
+                    "force_structured_output": True,
+                    "retry_small_scope": True,
+                    "expand_context": True,
+                },
+            )
         if trigger in {"max_attempts_exceeded", "tests_failed_after_retries"}:
             return RecoveryPlan(
                 trigger=trigger,
@@ -357,6 +381,17 @@ class RecoveryGovernor:
         if runtime_state.get("provider_unavailable") is True:
             return self.build_plan(record, error="provider_unavailable", runtime_state={})
         return None
+
+    @staticmethod
+    def _agent_max_steps_role(last_error: str) -> str | None:
+        match = re.search(
+            r"Agent\s+([A-Za-z0-9_-]+)\s+exceeded\s+max_steps=",
+            last_error,
+            flags=re.IGNORECASE,
+        )
+        if match is None or "without a valid structured response" not in last_error:
+            return None
+        return match.group(1)
 
     @staticmethod
     def _invalidate_checkpoints(record: JobRecord, plan: RecoveryPlan) -> None:

@@ -1,5 +1,6 @@
 from pathlib import Path
 
+from packages.llm.errors import StructuredOutputError
 from packages.llm.registry import ModelRegistry
 from packages.mcp_client.fake import FakeMCPEnvironment
 from packages.orchestrator.job_runner import JobRunner
@@ -5100,4 +5101,124 @@ def test_job_runner_adds_recovery_history_to_agent_logs(
             "failed_files=feature.py; resolved_files=feature.py,tests/test_feature.py; "
             "failed_patch_count=1; resolved_patch_count=2"
         )
+    ]
+
+
+def test_job_runner_recovers_structured_output_max_steps_error(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    registry = ModelRegistry.from_paths(
+        provider_path=config_dir() / "model_providers.yaml",
+        agents_path=config_dir() / "agents.yaml",
+        routing_path=config_dir() / "model_routing.yaml",
+    )
+    policy = PolicyEngine.from_path(config_dir() / "policies.yaml")
+    environment = FakeMCPEnvironment(
+        workspace_root=workspace,
+        memory_db_path=workspace / ".memory.sqlite3",
+    )
+    store = InMemoryJobStore()
+    runner = JobRunner(
+        registry=registry,
+        policy=policy,
+        router=environment.build_router(),
+        store=store,
+    )
+    spec = JobSpec(request_text="Recover structured output", repo_path=str(workspace))
+    record = store.create(spec)
+
+    def fail_with_max_steps(_record):
+        raise StructuredOutputError(
+            "Agent fixer exceeded max_steps=24 without a valid structured response; "
+            "last_model=ornith_35b_q4; last_status=success"
+        )
+
+    monkeypatch.setattr(runner, "_load_or_refine_prd_for_autonomy", fail_with_max_steps)
+
+    recovered = runner._run_record(record, resume=True)
+
+    assert recovered.status == JobStatus.STRATEGY_CHANGE
+    assert recovered.last_error.startswith("Agent fixer exceeded max_steps=24")
+    assert recovered.runtime_state["recovery_plan"]["strategy"] == (
+        "RETRY_AGENT_WITH_STRUCTURED_OUTPUT_GUARD"
+    )
+    assert recovered.spec.metadata["constraints"]["max_steps_exceeded_role"] == "fixer"
+
+
+def test_job_runner_adds_structured_output_recovery_guidance_to_fixer_logs(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    registry = ModelRegistry.from_paths(
+        provider_path=config_dir() / "model_providers.yaml",
+        agents_path=config_dir() / "agents.yaml",
+        routing_path=config_dir() / "model_routing.yaml",
+    )
+    attach_mock_adapter(
+        registry,
+        {
+            "fixer": FixResult(
+                status=FixStatus.FIXED,
+                summary="Small structured retry",
+                patches=[],
+            ).model_dump(),
+        },
+    )
+    policy = PolicyEngine.from_path(config_dir() / "policies.yaml")
+    environment = FakeMCPEnvironment(
+        workspace_root=workspace,
+        memory_db_path=workspace / ".memory.sqlite3",
+    )
+    runner = JobRunner(registry=registry, policy=policy, router=environment.build_router())
+    spec = JobSpec(
+        request_text="Recover fixer output",
+        repo_path=str(workspace),
+        metadata={
+            "constraints": {
+                "recovery_mode": "agent_max_steps_structured_output",
+                "recovery_strategy": "RETRY_AGENT_WITH_STRUCTURED_OUTPUT_GUARD",
+                "max_steps_exceeded_role": "fixer",
+                "avoid_tool_loop": True,
+                "force_structured_output": True,
+                "retry_small_scope": True,
+            }
+        },
+    )
+    store = InMemoryJobStore()
+    record = store.create(spec)
+    record.status = JobStatus.TESTING
+    runner.store = store
+    captured: dict[str, object] = {}
+    original_run = runner.agent_runner.run
+
+    def capture_run(*args, **kwargs):
+        if kwargs.get("role") == "fixer":
+            captured["logs"] = list(kwargs["context_packet"].logs)
+        return original_run(*args, **kwargs)
+
+    monkeypatch.setattr(runner.agent_runner, "run", capture_run)
+
+    runner._run_structured_role(record, "fixer", FixResult, "Retry with structured output")
+
+    assert captured["logs"][:3] == [
+        (
+            "recovery_context: mode=agent_max_steps_structured_output; "
+            "strategy=RETRY_AGENT_WITH_STRUCTURED_OUTPUT_GUARD; attempt=1; "
+            "failed_task_id=unknown; failed_stage=unknown; reason=unspecified"
+        ),
+        (
+            "recovery_instruction: the previous agent exhausted tool steps without returning "
+            "valid JSON. Inspect only files already named in the diagnosis or retrieval trace, "
+            "make the smallest necessary patch, then return the required structured JSON. "
+            "Do not continue broad repository exploration."
+        ),
+        (
+            "structured_output_recovery: previous_role=fixer; avoid_tool_loop=true; "
+            "return_schema_first=true; retry_small_scope=true"
+        ),
     ]
