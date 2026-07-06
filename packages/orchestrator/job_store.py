@@ -7,7 +7,7 @@ import time
 from pathlib import Path
 from uuid import uuid4
 
-from packages.schemas.jobs import JobRecord, JobSpec, utc_now
+from packages.schemas.jobs import JobRecord, JobSpec, utc_now, validate_job_id_string
 
 
 class InMemoryJobStore:
@@ -62,9 +62,11 @@ class FileJobStore(InMemoryJobStore):
             self._records[record.job_id] = record
 
     def _path_for(self, job_id: str) -> Path:
+        validate_job_id_string(job_id)
         return self.root / f"{job_id}.json"
 
     def _temp_path_for(self, job_id: str) -> Path:
+        validate_job_id_string(job_id)
         return self.root / f".{job_id}.{os.getpid()}.{uuid4().hex}.json.tmp"
 
     def _write_atomic(self, temp_path: Path, path: Path, payload: str) -> None:

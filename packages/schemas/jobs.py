@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from typing import Any
 from uuid import uuid4
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from packages.schemas.audit import AuditEvent
 from packages.schemas.models import JobStatus
@@ -14,6 +14,27 @@ from packages.schemas.models import JobStatus
 
 def utc_now() -> datetime:
     return datetime.now(timezone.utc)
+
+
+_ALLOWED_JOB_ID_CHARACTERS = set(
+    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-"
+)
+
+
+def validate_job_id_string(value: str) -> str:
+    """Validate a job id before it is used as a persisted file name."""
+
+    if not value:
+        raise ValueError("job_id must not be empty")
+    if len(value) > 128:
+        raise ValueError("job_id must be 128 characters or fewer")
+    if any(part in value for part in ("/", "\\", ":", "\x00")):
+        raise ValueError("job_id must not contain path separators or ':'")
+    if value in {".", ".."}:
+        raise ValueError("job_id must not be a path segment")
+    if any(character not in _ALLOWED_JOB_ID_CHARACTERS for character in value):
+        raise ValueError("job_id may only contain letters, numbers, '.', '_', and '-'")
+    return value
 
 
 class JobSpec(BaseModel):
@@ -28,6 +49,11 @@ class JobSpec(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
     workspace_root: str | None = None
     title: str | None = None
+
+    @field_validator("job_id")
+    @classmethod
+    def validate_job_id(cls, value: str) -> str:
+        return validate_job_id_string(value)
 
 
 class JobRecord(BaseModel):

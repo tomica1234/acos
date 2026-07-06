@@ -1,5 +1,7 @@
 from pathlib import Path
 
+import pytest
+
 from packages.orchestrator.job_store import FileJobStore
 from packages.schemas.jobs import JobSpec
 from packages.schemas.models import JobStatus
@@ -91,3 +93,13 @@ def test_file_job_store_quarantines_invalid_records_on_load(tmp_path: Path) -> N
     assert reloaded.get("job-valid").spec.request_text == "Keep loading healthy jobs."
     assert not (jobs_dir / "broken.json").exists()
     assert (jobs_dir / "broken.json.invalid").exists()
+
+
+def test_file_job_store_rejects_path_like_job_ids(tmp_path: Path) -> None:
+    store = FileJobStore(tmp_path / "jobs")
+
+    with pytest.raises(ValueError):
+        store._path_for("\\english_vocab-app")
+
+    with pytest.raises(ValueError):
+        store._temp_path_for("../english_vocab-app")

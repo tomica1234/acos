@@ -11,7 +11,7 @@ from typing import Any
 import uvicorn
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from apps.cli import (
     apply_constraint_overrides,
@@ -30,7 +30,7 @@ from packages.orchestrator.job_store import FileJobStore
 from packages.orchestrator.policy import PolicyEngine
 from packages.orchestrator.progress import summarize_job_progress
 from packages.schemas.models import JobStatus
-from packages.schemas.jobs import JobRecord, JobSpec
+from packages.schemas.jobs import JobRecord, JobSpec, validate_job_id_string
 
 
 class SubmitJobRequest(BaseModel):
@@ -64,6 +64,13 @@ class SupervisedJobRequest(BaseModel):
     allow_blocked_recovery: bool = False
     pm_stall_recovery: bool = True
     metadata: dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("job_id")
+    @classmethod
+    def validate_job_id(cls, value: str | None) -> str | None:
+        if value is None:
+            return value
+        return validate_job_id_string(value)
 
 
 class SuperviseExistingJobRequest(BaseModel):

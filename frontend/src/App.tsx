@@ -94,6 +94,18 @@ type BackgroundRun = {
   error?: string
 }
 
+type PersistedUiState = {
+  requestText?: string
+  repoPath?: string
+  jobId?: string
+  backgroundRunId?: string
+  unlimitedCycles?: boolean
+  planFirst?: boolean
+  usePreflight?: boolean
+  maxCycles?: number
+  preflightTimeout?: number
+}
+
 const defaultRequestTemplate = `作りたいアプリや機能をここに書いてください。
 
 要件:
@@ -104,6 +116,38 @@ const defaultRequestTemplate = `作りたいアプリや機能をここに書い
 `
 
 const defaultRepoPath = '\\\\wsl.localhost\\Ubuntu\\home\\jalan\\wip\\acos-runs\\new-acos-app'
+const defaultJobId = 'new-acos-app'
+const uiStateStorageKey = 'acos.frontend.uiState.v1'
+
+function normalizeJobId(value: string) {
+  const normalized = value
+    .trim()
+    .replace(/^[\\/]+/, '')
+    .replace(/[\\/:\s]+/g, '-')
+    .replace(/[^A-Za-z0-9._-]/g, '-')
+    .replace(/-+/g, '-')
+    .replace(/^[.-]+|[.-]+$/g, '')
+  return normalized.slice(0, 128) || defaultJobId
+}
+
+function readPersistedUiState(): PersistedUiState {
+  if (typeof window === 'undefined') return {}
+  try {
+    const raw = window.localStorage.getItem(uiStateStorageKey)
+    if (!raw) return {}
+    const parsed = JSON.parse(raw) as PersistedUiState
+    return parsed && typeof parsed === 'object' ? parsed : {}
+  } catch {
+    return {}
+  }
+}
+
+function persistUiState(state: PersistedUiState) {
+  if (typeof window === 'undefined') return
+  window.localStorage.setItem(uiStateStorageKey, JSON.stringify(state))
+}
+
+const initialUiState = readPersistedUiState()
 
 function compactJson(value: unknown) {
   return JSON.stringify(value, null, 2)
@@ -123,8 +167,16 @@ const stageOrder = [
   { key: 'done', label: '完了' },
 ]
 
-const activeStatuses = new Set(['queued', 'running', 'stopping'])
-const terminalStatuses = new Set(['done', 'paused', 'stopped', 'error', 'failed', 'blocked', 'stuck'])
+const activeStatuses = new Set([
+  'queued',
+  'running',
+  'stopping',
+  'recovering',
+  'diagnosing',
+  'replanning',
+  'strategy_change',
+])
+const terminalStatuses = new Set(['done', 'paused', 'stopped', 'error', 'cancelled', 'policy_hard_stop'])
 
 function progressPercent(progress: ProgressResult | null, result: RunResult | null) {
   const ratio = progress?.summary?.progress_ratio ?? result?.summary?.progress_ratio
@@ -149,9 +201,29 @@ function currentStatus(
 
 function statusTone(status: string) {
   if (['done'].includes(status)) return 'good'
-  if (['failed', 'error', 'blocked', 'stuck'].includes(status)) return 'bad'
-  if (['paused', 'stopped', 'stopping'].includes(status)) return 'warn'
-  if (['running', 'queued', 'submitted', 'analyzing', 'designing', 'planning', 'implementing', 'writing_tests', 'reviewing', 'testing', 'fixing', 'finalizing'].includes(status)) return 'live'
+  if (['error', 'policy_hard_stop'].includes(status)) return 'bad'
+  if (['paused', 'stopped', 'stopping', 'blocked', 'stuck', 'failed'].includes(status)) return 'warn'
+  if (
+    [
+      'running',
+      'queued',
+      'submitted',
+      'analyzing',
+      'designing',
+      'planning',
+      'replanning',
+      'recovering',
+      'diagnosing',
+      'strategy_change',
+      'implementing',
+      'writing_tests',
+      'reviewing',
+      'testing',
+      'fixing',
+      'finalizing',
+    ].includes(status)
+  )
+    return 'live'
   return 'idle'
 }
 
@@ -184,19 +256,23 @@ function describeProgressGap(
 }
 
 function App() {
-  const [requestText, setRequestText] = useState(defaultRequestTemplate)
-  const [repoPath, setRepoPath] = useState(defaultRepoPath)
-  const [jobId, setJobId] = useState('new-acos-app')
-  const [maxCycles, setMaxCycles] = useState(12)
-  const [unlimitedCycles, setUnlimitedCycles] = useState(false)
+  const [requestText, setRequestText] = useState(initialUiState.requestText || defaultRequestTemplate)
+  const [repoPath, setRepoPath] = useState(initialUiState.repoPath || defaultRepoPath)
+  const [jobId, setJobId] = useState(normalizeJobId(initialUiState.jobId || defaultJobId))
+  const [maxCycles, setMaxCycles] = useState(initialUiState.maxCycles || 12)
+  const [unlimitedCycles, setUnlimitedCycles] = useState(initialUiState.unlimitedCycles ?? false)
   const [batchesRun, setBatchesRun] = useState(0)
-  const [preflightTimeout, setPreflightTimeout] = useState(180)
-  const [usePreflight, setUsePreflight] = useState(true)
-  const [planFirst, setPlanFirst] = useState(true)
+  const [preflightTimeout, setPreflightTimeout] = useState(initialUiState.preflightTimeout || 180)
+  const [usePreflight, setUsePreflight] = useState(initialUiState.usePreflight ?? true)
+  const [planFirst, setPlanFirst] = useState(initialUiState.planFirst ?? true)
   const [isRunning, setIsRunning] = useState(false)
   const [result, setResult] = useState<RunResult | null>(null)
   const [progress, setProgress] = useState<ProgressResult | null>(null)
-  const [backgroundRun, setBackgroundRun] = useState<BackgroundRun | null>(null)
+  const [backgroundRun, setBackgroundRun] = useState<BackgroundRun | null>(
+    initialUiState.backgroundRunId
+      ? { run_id: initialUiState.backgroundRunId, status: 'queued' }
+      : null,
+  )
   const [progressError, setProgressError] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
 
@@ -205,9 +281,9 @@ function App() {
       request_text: requestText,
       repo_path: repoPath,
       workspace_root: repoPath,
-      target_branch: `acos/${jobId || 'new-acos-app'}`,
-      job_id: jobId || undefined,
-      title: jobId || 'New ACOS App',
+      target_branch: `acos/${normalizeJobId(jobId)}`,
+      job_id: normalizeJobId(jobId),
+      title: normalizeJobId(jobId),
       jobs_dir: '.acos/jobs-ui',
       max_cycles: maxCycles,
       steps_per_cycle: 1,
@@ -230,6 +306,7 @@ function App() {
   )
 
   const command = useMemo(() => {
+    const commandJobId = normalizeJobId(jobId)
     const args = [
       'acos',
       'run-supervised',
@@ -238,7 +315,7 @@ function App() {
       '--repo-path',
       repoPath,
       '--job-id',
-      jobId,
+      commandJobId,
       '--jobs-dir',
       '.acos/jobs-ui',
       '--max-cycles',
@@ -263,6 +340,25 @@ function App() {
 
   async function runJob(event: FormEvent) {
     event.preventDefault()
+    const jobIdForRun = normalizeJobId(jobId)
+    setJobId(jobIdForRun)
+    const runPayload = {
+      ...payload,
+      target_branch: `acos/${jobIdForRun}`,
+      job_id: jobIdForRun,
+      title: jobIdForRun,
+    }
+    persistUiState({
+      requestText,
+      repoPath,
+      jobId: jobIdForRun,
+      unlimitedCycles,
+      planFirst,
+      usePreflight,
+      maxCycles,
+      preflightTimeout,
+      backgroundRunId: undefined,
+    })
     setIsRunning(true)
     setBatchesRun(0)
     setError(null)
@@ -275,13 +371,24 @@ function App() {
         const response = await fetch('/api/jobs/supervised/background', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ ...payload, max_batches: null }),
+          body: JSON.stringify({ ...runPayload, max_batches: null }),
         })
         const body = await response.json()
         if (!response.ok) {
           throw new Error(body.detail || 'ACOS background request failed')
         }
         setBackgroundRun(body)
+        persistUiState({
+          requestText,
+          repoPath,
+          jobId: jobIdForRun,
+          unlimitedCycles,
+          planFirst,
+          usePreflight,
+          maxCycles,
+          preflightTimeout,
+          backgroundRunId: body.run_id,
+        })
         setBatchesRun(body.batches_run ?? 0)
         void refreshProgress()
       } catch (caught) {
@@ -294,13 +401,24 @@ function App() {
       const response = await fetch('/api/jobs/supervised', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload),
+        body: JSON.stringify(runPayload),
       })
       const body = await response.json()
       if (!response.ok) {
         throw new Error(body.detail || 'ACOS API request failed')
       }
       setResult(body)
+      persistUiState({
+        requestText,
+        repoPath,
+        jobId: jobIdForRun,
+        unlimitedCycles,
+        planFirst,
+        usePreflight,
+        maxCycles,
+        preflightTimeout,
+        backgroundRunId: undefined,
+      })
       setBatchesRun(1)
       void refreshProgress()
     } catch (caught) {
@@ -318,13 +436,20 @@ function App() {
         throw new Error(body.detail || 'background status request failed')
       }
       setBackgroundRun(body)
+      if (body.job_id) {
+        setJobId(normalizeJobId(body.job_id))
+      }
       setBatchesRun(body.batches_run ?? 0)
       if (body.last_result) setResult(body.last_result)
-      if (body.status && ['done', 'paused', 'stopped', 'error'].includes(body.status)) {
+      const nextStatus = String(body.status || '')
+      if (terminalStatuses.has(nextStatus)) {
         setIsRunning(false)
+      } else if (activeStatuses.has(nextStatus)) {
+        setIsRunning(true)
       }
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : 'background status error')
+      setBackgroundRun(null)
       setIsRunning(false)
     }
   }
@@ -332,8 +457,9 @@ function App() {
   async function reconnectBackgroundRun() {
     if (!jobId.trim()) return
     try {
+      const currentJobId = normalizeJobId(jobId)
       const response = await fetch(
-        `/api/background-runs?job_id=${encodeURIComponent(jobId.trim())}`,
+        `/api/background-runs?job_id=${encodeURIComponent(currentJobId)}`,
       )
       const body = await response.json()
       if (!response.ok) {
@@ -342,9 +468,12 @@ function App() {
       const latest = Array.isArray(body) ? body[0] : null
       if (!latest) return
       setBackgroundRun(latest)
+      if (latest.job_id) {
+        setJobId(normalizeJobId(latest.job_id))
+      }
       setBatchesRun(latest.batches_run ?? 0)
       if (latest.last_result) setResult(latest.last_result)
-      setIsRunning(['queued', 'running', 'stopping'].includes(String(latest.status)))
+      setIsRunning(activeStatuses.has(String(latest.status)))
     } catch (caught) {
       setProgressError(caught instanceof Error ? caught.message : 'background reconnect error')
     }
@@ -368,10 +497,11 @@ function App() {
   }
 
   async function refreshProgress() {
-    if (!jobId.trim()) return
+    const currentJobId = normalizeJobId(jobId)
+    if (!currentJobId) return
     try {
       const response = await fetch(
-        `/api/jobs/${encodeURIComponent(jobId.trim())}/progress?jobs_dir=${encodeURIComponent(
+        `/api/jobs/${encodeURIComponent(currentJobId)}/progress?jobs_dir=${encodeURIComponent(
           payload.jobs_dir,
         )}`,
       )
@@ -413,6 +543,30 @@ function App() {
     void reconnectBackgroundRun()
     void refreshProgress()
   }, [])
+
+  useEffect(() => {
+    persistUiState({
+      requestText,
+      repoPath,
+      jobId: normalizeJobId(jobId),
+      unlimitedCycles,
+      planFirst,
+      usePreflight,
+      maxCycles,
+      preflightTimeout,
+      backgroundRunId: backgroundRun?.run_id,
+    })
+  }, [
+    backgroundRun?.run_id,
+    jobId,
+    maxCycles,
+    planFirst,
+    preflightTimeout,
+    repoPath,
+    requestText,
+    unlimitedCycles,
+    usePreflight,
+  ])
 
   useEffect(() => {
     if (isRunning || backgroundRun?.run_id) return
@@ -532,7 +686,11 @@ function App() {
             </label>
             <label>
               job_id
-              <input value={jobId} onChange={(event) => setJobId(event.target.value)} />
+              <input
+                value={jobId}
+                onBlur={() => setJobId(normalizeJobId(jobId))}
+                onChange={(event) => setJobId(event.target.value)}
+              />
             </label>
             <div className="split">
               <label>

@@ -386,6 +386,23 @@ def test_background_supervised_job_runs_until_done(
     assert captured["resume_count"] == 1
 
 
+def test_background_supervised_job_rejects_path_like_job_id(tmp_path: Path) -> None:
+    client = TestClient(api_main.create_app())
+    response = client.post(
+        "/jobs/supervised/background",
+        json={
+            "request_text": "Build something useful.",
+            "repo_path": str(tmp_path / "workspace"),
+            "job_id": "\\english_vocab-app",
+            "jobs_dir": str(tmp_path / "jobs"),
+            "plan_first": False,
+        },
+    )
+
+    assert response.status_code == 422
+    assert client.get("/background-runs").json() == []
+
+
 def test_background_run_stop_marks_stop_requested(tmp_path: Path) -> None:
     client = TestClient(api_main.create_app())
     response = client.post(

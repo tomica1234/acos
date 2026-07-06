@@ -120,6 +120,23 @@ def test_invalid_schema_values_raise_validation_error() -> None:
         )
 
 
+def test_job_spec_rejects_path_like_job_ids() -> None:
+    invalid_job_ids = [
+        "\\english_vocab-app",
+        "/english_vocab-app",
+        "../english_vocab-app",
+        "english/vocab-app",
+        "english:vocab-app",
+        ".",
+        "..",
+        "english vocab app",
+    ]
+
+    for job_id in invalid_job_ids:
+        with pytest.raises(ValidationError):
+            JobSpec(job_id=job_id, request_text="Build it.", repo_path=".")
+
+
 def test_file_patch_accepts_common_model_path_aliases() -> None:
     fix = FixResult.model_validate(
         {
