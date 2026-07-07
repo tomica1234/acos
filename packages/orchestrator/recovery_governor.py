@@ -236,6 +236,25 @@ class RecoveryGovernor:
             return fallback
         return last_error.split(":", 1)[0]
 
+    @staticmethod
+    def _missing_patch_path(last_error: str, runtime_state: dict[str, Any]) -> str:
+        candidate = runtime_state.get("failed_patch_path")
+        if isinstance(candidate, str) and candidate.strip():
+            return candidate.strip()
+        marker = "update target does not exist:"
+        if marker in last_error:
+            return last_error.rsplit(marker, 1)[-1].strip()
+        candidate = runtime_state.get("missing_target_file")
+        if isinstance(candidate, str) and candidate.strip():
+            return candidate.strip()
+        return ""
+
+    @staticmethod
+    def _looks_like_test_path(path: str) -> bool:
+        normalized = path.replace("\\", "/")
+        name = normalized.rsplit("/", 1)[-1]
+        return "/tests/" in f"/{normalized}" or name.startswith("test_")
+
     def _strategy_mapping(
         self,
         record: JobRecord,
@@ -316,6 +335,30 @@ class RecoveryGovernor:
                 constraints={"recovery_mode": "acceptance_review_split"},
             )
         if trigger in {"required_artifacts_missing", "completion_integrity_failed"}:
+            missing_artifacts = runtime_state.get("missing_artifacts")
+            if runtime_state.get("force_project_setup_scaffold") is True and isinstance(
+                missing_artifacts,
+                list,
+            ):
+                return RecoveryPlan(
+                    trigger=trigger,
+                    strategy="RETURN_TO_IMPLEMENTER",
+                    next_status=JobStatus.IMPLEMENTING,
+                    next_actor="implementer",
+                    steps=["RETURN_TO_IMPLEMENTER", "RECREATE_TARGET_FILES"],
+                    reason=last_error,
+                    checkpoint_policy="invalidate_failed_stage",
+                    constraints={
+                        "recovery_mode": "project_setup_required_artifacts",
+                        "required_artifacts": [
+                            str(item) for item in missing_artifacts if str(item).strip()
+                        ],
+                        "target_files": [
+                            str(item) for item in missing_artifacts if str(item).strip()
+                        ],
+                        "force_project_setup_scaffold": True,
+                    },
+                )
             return RecoveryPlan(
                 trigger=trigger,
                 strategy="REPLAN_TASK_WITH_REQUIRED_ARTIFACTS",
@@ -363,15 +406,44 @@ class RecoveryGovernor:
                 },
             )
         if trigger in {"target_files_missing", "target_file_missing"} or "target file" in lowered:
+            missing_path = self._missing_patch_path(last_error, runtime_state)
+            failed_role = str(runtime_state.get("failed_patch_role") or "")
+            if not failed_role:
+                failed_role = "test_writer" if self._looks_like_test_path(missing_path) else "implementer"
+            if failed_role == "test_writer" or self._looks_like_test_path(missing_path):
+                next_status = JobStatus.WRITING_TESTS
+                next_actor = "test_writer"
+                strategy = "RETURN_TO_TEST_WRITER"
+                steps = ["RETURN_TO_TEST_WRITER", "RECREATE_TARGET_FILES"]
+            elif failed_role == "fixer":
+                next_status = JobStatus.FIXING
+                next_actor = "fixer"
+                strategy = "RETURN_TO_FIXER"
+                steps = ["RETURN_TO_FIXER", "RECREATE_TARGET_FILES"]
+            else:
+                next_status = JobStatus.IMPLEMENTING
+                next_actor = "implementer"
+                strategy = "RETURN_TO_IMPLEMENTER"
+                steps = ["RETURN_TO_IMPLEMENTER", "RECREATE_TARGET_FILES"]
+            constraints: dict[str, Any] = {
+                "recovery_mode": "target_files_missing",
+                "return_to_role": next_actor,
+            }
+            if missing_path:
+                constraints["missing_target_file"] = missing_path
+                constraints["required_artifacts"] = [missing_path]
+                constraints["target_files"] = [missing_path]
+            if runtime_state.get("failed_patch_operation") == "update":
+                constraints["patch_operation_hint"] = "create"
             return RecoveryPlan(
                 trigger=trigger,
-                strategy="RETURN_TO_IMPLEMENTER",
-                next_status=JobStatus.IMPLEMENTING,
-                next_actor="implementer",
-                steps=["RETURN_TO_IMPLEMENTER", "RECREATE_TARGET_FILES"],
+                strategy=strategy,
+                next_status=next_status,
+                next_actor=next_actor,
+                steps=steps,
                 reason=last_error,
                 checkpoint_policy="invalidate_failed_stage",
-                constraints={"recovery_mode": "target_files_missing"},
+                constraints=constraints,
             )
         if trigger in {"test_patch_quality_failed", "fixer_attempted_to_weaken_tests"} or "weaken tests" in lowered:
             return RecoveryPlan(

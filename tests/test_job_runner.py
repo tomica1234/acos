@@ -2323,11 +2323,11 @@ def test_job_runner_blocks_unsupported_autonomous_task_role_before_implementatio
     assert validation["unsupported_task_role_count"] == 1
     assert validation["errors"] == [
         {
-            "type": "unsupported_autonomous_task_roles",
-            "items": [{"task_id": "release-notes", "role": "release_manager"}],
-            "allowed_roles": ["architect", "implementer", "test_writer"],
-        }
-    ]
+                "type": "unsupported_autonomous_task_roles",
+                "items": [{"task_id": "release-notes", "role": "release_manager"}],
+                "allowed_roles": ["implementer", "scaffold", "test_writer"],
+            }
+        ]
     assert "completion_integrity" not in record.outputs
     assert "test_run" not in record.outputs
     assert not (workspace / "feature.py").exists()

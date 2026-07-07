@@ -43,6 +43,7 @@ from packages.schemas.approvals import ApprovalStatus, PolicyAction
 from packages.schemas.agent_outputs import (
     ArchitecturePlan,
     FailureDiagnosis,
+    FilePatch,
     FixResult,
     ImplementationResult,
     PRD,
@@ -60,6 +61,7 @@ from packages.schemas.models import (
     FixStatus,
     ImplementationStatus,
     JobStatus,
+    ReviewDecision,
     TaskComplexity,
     TestWriterStatus,
 )
@@ -88,8 +90,30 @@ class JobRunner:
         "architect",
         "planner",
     }
-    IMPLEMENTATION_TASK_ROLES = {"architect", "implementer"}
+    IMPLEMENTATION_TASK_ROLES = {"implementer", "scaffold"}
     TEST_TASK_ROLES = {"test_writer"}
+    PROJECT_SETUP_REQUIRED_ARTIFACTS = [
+        "backend/main.py",
+        "backend/requirements.txt",
+        "backend/tests/test_project_setup.py",
+        "frontend/package.json",
+        "frontend/vite.config.js",
+        "frontend/src/main.tsx",
+        "frontend/src/App.tsx",
+        "shared/.gitkeep",
+        ".gitignore",
+        "package.json",
+        "README.md",
+        ".env.example",
+    ]
+    PROJECT_SETUP_KEYWORDS = (
+        "project-setup",
+        "project setup",
+        "verify-project-setup",
+        "monorepo",
+        "backend/frontend/shared",
+        "backend frontend shared",
+    )
 
     def __init__(
         self,
@@ -975,6 +999,13 @@ class JobRunner:
                 f"previous_role={exceeded_role}; avoid_tool_loop=true; "
                 "return_schema_first=true; retry_small_scope=true"
             )
+        patch_operation_hint = constraints.get("patch_operation_hint")
+        missing_target_file = constraints.get("missing_target_file")
+        if patch_operation_hint == "create" and isinstance(missing_target_file, str):
+            guidance.append(
+                "patch_operation_recovery: "
+                f"file does not exist, use create not update; path={missing_target_file}"
+            )
         return guidance
 
     def _recovery_history_logs(self, record: JobRecord, role: str) -> list[str]:
@@ -1190,19 +1221,52 @@ class JobRunner:
         for patch in patches:
             self.policy.assert_patch_target_allowed(role, patch.path)
             self._ensure_patch_approved_or_pause(record, role, patch)
-            self._call_tool(
-                role,
-                "repo_server.apply_patch",
-                path=patch.path,
-                content=patch.content,
-                operation=patch.operation,
-                new_path=patch.new_path,
-                unified_diff=patch.unified_diff,
-                base_sha256=patch.base_sha256,
-                expected_old_content=patch.expected_old_content,
-                executable=patch.executable,
-            )
+            try:
+                self._call_tool(
+                    role,
+                    "repo_server.apply_patch",
+                    path=patch.path,
+                    content=patch.content,
+                    operation=patch.operation,
+                    new_path=patch.new_path,
+                    unified_diff=patch.unified_diff,
+                    base_sha256=patch.base_sha256,
+                    expected_old_content=patch.expected_old_content,
+                    executable=patch.executable,
+                )
+            except RuntimeError as exc:
+                if self._recover_missing_patch_target(record, role, patch, exc):
+                    return
+                raise
         self.store.update(record)
+
+    def _recover_missing_patch_target(
+        self,
+        record: JobRecord,
+        role: str,
+        patch: Any,
+        exc: RuntimeError,
+    ) -> bool:
+        message = str(exc)
+        if "target_files_missing:update target does not exist:" not in message:
+            return False
+        missing_path = message.rsplit(":", 1)[-1].strip()
+        if not missing_path:
+            missing_path = str(getattr(patch, "path", ""))
+        self._recover_record(
+            record,
+            error=f"target_files_missing:{message}",
+            runtime_state={
+                **record.runtime_state,
+                "failed_patch_role": role,
+                "failed_patch_path": missing_path,
+                "failed_patch_operation": getattr(patch, "operation", "update"),
+                "required_artifacts": [missing_path],
+                "target_files": [missing_path],
+                "missing_artifacts": [missing_path],
+            },
+        )
+        return True
 
     def _resume_approval_if_ready(self, record: JobRecord) -> bool:
         if record.status != JobStatus.WAITING_APPROVAL or not record.pending_approval_id:
@@ -1621,6 +1685,338 @@ class JobRunner:
             ],
         )
 
+    def _normalize_project_setup_task_graph(
+        self,
+        record: JobRecord,
+        task_graph: TaskGraph,
+    ) -> TaskGraph:
+        tasks: list[PlannedTask] = []
+        normalized_task_ids: list[str] = []
+        for task in task_graph.tasks:
+            if self._is_project_setup_task(task):
+                artifacts = self._unique_paths(
+                    [
+                        *task.target_files,
+                        *task.required_artifacts,
+                        *self.PROJECT_SETUP_REQUIRED_ARTIFACTS,
+                    ]
+                )
+                tasks.append(
+                    task.model_copy(
+                        update={
+                            "role": "scaffold",
+                            "target_files": artifacts,
+                            "required_artifacts": artifacts,
+                            "acceptance_criteria": self._non_empty_items(
+                                task.acceptance_criteria
+                            )
+                            or [
+                                "Backend, frontend, shared, root manifest, README, gitignore, and env example scaffold files exist.",
+                                "Project setup smoke test exists before test_writer tries to update it.",
+                            ],
+                        }
+                    )
+                )
+                normalized_task_ids.append(task.id)
+                continue
+            if task.role == "architect":
+                tasks.append(task.model_copy(update={"role": "implementer"}))
+                normalized_task_ids.append(task.id)
+                continue
+            tasks.append(task)
+
+        if not normalized_task_ids:
+            return task_graph
+
+        normalized = TaskGraph(
+            goal=task_graph.goal,
+            tasks=tasks,
+            notes=[
+                *task_graph.notes,
+                "ACOS normalized executable architect/project-setup tasks into deterministic scaffold/implementer tasks.",
+            ],
+        )
+        record.outputs["task_graph"] = normalized.model_dump()
+        record.outputs["task_graph_normalization"] = {
+            "applied": True,
+            "normalized_task_ids": normalized_task_ids,
+            "required_artifacts": list(self.PROJECT_SETUP_REQUIRED_ARTIFACTS),
+        }
+        self.store.update(record)
+        return normalized
+
+    @classmethod
+    def _is_project_setup_task(cls, task: PlannedTask | None) -> bool:
+        if task is None:
+            return False
+        haystack = " ".join(
+            [
+                task.id,
+                task.title,
+                task.description,
+                " ".join(task.target_files),
+                " ".join(task.required_artifacts),
+            ]
+        ).lower()
+        if any(keyword in haystack for keyword in cls.PROJECT_SETUP_KEYWORDS):
+            return True
+        has_backend = "backend" in haystack
+        has_frontend = "frontend" in haystack
+        has_shared = "shared" in haystack
+        return has_backend and has_frontend and has_shared
+
+    def _project_setup_artifacts_ready(
+        self,
+        record: JobRecord,
+        task: PlannedTask | None,
+    ) -> bool:
+        return not self._missing_project_setup_artifacts(record, task)
+
+    def _missing_project_setup_artifacts(
+        self,
+        record: JobRecord,
+        task: PlannedTask | None,
+    ) -> list[str]:
+        if not self._is_project_setup_task(task):
+            return []
+        artifacts = self._unique_paths(
+            [
+                *(task.target_files if task is not None else []),
+                *(task.required_artifacts if task is not None else []),
+                *self.PROJECT_SETUP_REQUIRED_ARTIFACTS,
+            ]
+        )
+        root = self._workspace_root(record)
+        return [artifact for artifact in artifacts if not (root / artifact).exists()]
+
+    def _ensure_project_setup_ready_before_test_writer(
+        self,
+        record: JobRecord,
+        task: PlannedTask | None,
+    ) -> bool:
+        missing = self._missing_project_setup_artifacts(record, task)
+        if not missing:
+            return True
+        self._recover_record(
+            record,
+            error="required_artifacts_missing:project_setup_artifacts_missing",
+            runtime_state={
+                "required_artifacts": list(task.required_artifacts if task else missing),
+                "target_files": list(task.target_files if task else missing),
+                "missing_artifacts": missing,
+                "failed_task_id": task.id if task is not None else "project-setup",
+                "force_project_setup_scaffold": True,
+            },
+        )
+        return False
+
+    def _run_project_setup_scaffold(
+        self,
+        record: JobRecord,
+        task: PlannedTask,
+    ) -> ImplementationResult:
+        patches = [
+            FilePatch(
+                path=artifact,
+                operation=(
+                    "update"
+                    if (self._workspace_root(record) / artifact).exists()
+                    else "create"
+                ),
+                content=self._project_setup_file_content(artifact, record),
+            )
+            for artifact in self._unique_paths(
+                [*task.required_artifacts, *self.PROJECT_SETUP_REQUIRED_ARTIFACTS]
+            )
+        ]
+        result = ImplementationResult(
+            status=ImplementationStatus.IMPLEMENTED,
+            summary="Created deterministic project setup scaffold.",
+            changed_files=[patch.path for patch in patches],
+            patches=patches,
+        )
+        self._record_task_output(record, "implementation_tasks", task, result)
+        self._apply_project_setup_scaffold_patches(record, patches)
+        evidence = self._project_setup_artifact_evidence(record, task)
+        record.outputs["project_setup_scaffold"] = {
+            "task_id": task.id,
+            "artifact_evidence": evidence,
+            "missing_artifacts": [
+                item["path"] for item in evidence if not item["exists"]
+            ],
+        }
+        self.store.update(record)
+        missing = [item["path"] for item in evidence if not item["exists"]]
+        if missing:
+            self._recover_record(
+                record,
+                error="required_artifacts_missing:project_setup_scaffold_incomplete",
+                runtime_state={
+                    "required_artifacts": list(task.required_artifacts),
+                    "target_files": list(task.target_files),
+                    "missing_artifacts": missing,
+                    "failed_task_id": task.id,
+                    "force_project_setup_scaffold": True,
+                },
+            )
+        return result
+
+    def _apply_project_setup_scaffold_patches(
+        self,
+        record: JobRecord,
+        patches: list[FilePatch],
+    ) -> None:
+        allowed = set(self.PROJECT_SETUP_REQUIRED_ARTIFACTS)
+        for patch in patches:
+            if patch.path not in allowed:
+                raise QualityGateError(
+                    f"policy_denied:unexpected_project_setup_scaffold_path:{patch.path}"
+                )
+            result = self.router.call(
+                "repo_server.apply_patch",
+                path=patch.path,
+                content=patch.content,
+                operation=patch.operation,
+                new_path=patch.new_path,
+                unified_diff=patch.unified_diff,
+                base_sha256=patch.base_sha256,
+                expected_old_content=patch.expected_old_content,
+                executable=patch.executable,
+            )
+            event = self.audit.tool_event(
+                role="orchestrator",
+                tool_name="repo_server.apply_patch",
+                input_payload={
+                    "path": patch.path,
+                    "operation": patch.operation,
+                    "deterministic_scaffold": True,
+                },
+                output_payload=result.data,
+                status="success" if result.ok else "failed",
+            )
+            record.audit_events.append(event)
+            if not result.ok:
+                raise RuntimeError(result.error or "project setup scaffold patch failed")
+        self.store.update(record)
+
+    def _project_setup_artifact_evidence(
+        self,
+        record: JobRecord,
+        task: PlannedTask,
+    ) -> list[dict[str, Any]]:
+        root = self._workspace_root(record)
+        artifacts = self._unique_paths(
+            [*task.required_artifacts, *self.PROJECT_SETUP_REQUIRED_ARTIFACTS]
+        )
+        return [
+            {
+                "path": artifact,
+                "exists": (root / artifact).exists(),
+                "size": (root / artifact).stat().st_size
+                if (root / artifact).exists()
+                else 0,
+            }
+            for artifact in artifacts
+        ]
+
+    @staticmethod
+    def _project_setup_file_content(path: str, record: JobRecord) -> str:
+        title = record.spec.title or record.job_id
+        contents = {
+            "backend/main.py": (
+                "from fastapi import FastAPI\n\n"
+                "app = FastAPI(title=\"ACOS generated app\")\n\n\n"
+                "@app.get(\"/health\")\n"
+                "def health() -> dict[str, str]:\n"
+                "    return {\"status\": \"ok\"}\n"
+            ),
+            "backend/requirements.txt": "fastapi\nuvicorn\npytest\n",
+            "backend/tests/test_project_setup.py": (
+                "from pathlib import Path\n\n\n"
+                "def test_project_setup_artifacts_exist() -> None:\n"
+                "    root = Path(__file__).resolve().parents[2]\n"
+                "    assert (root / \"backend\" / \"main.py\").exists()\n"
+                "    assert (root / \"frontend\" / \"package.json\").exists()\n"
+                "    assert (root / \"shared\" / \".gitkeep\").exists()\n"
+            ),
+            "frontend/package.json": (
+                "{\n"
+                f"  \"name\": \"{JobRunner._safe_package_name(title)}-frontend\",\n"
+                "  \"private\": true,\n"
+                "  \"version\": \"0.1.0\",\n"
+                "  \"type\": \"module\",\n"
+                "  \"scripts\": {\n"
+                "    \"dev\": \"vite --host 0.0.0.0\",\n"
+                "    \"build\": \"tsc -b && vite build\",\n"
+                "    \"preview\": \"vite preview --host 0.0.0.0\"\n"
+                "  },\n"
+                "  \"dependencies\": {\n"
+                "    \"@vitejs/plugin-react\": \"latest\",\n"
+                "    \"typescript\": \"latest\",\n"
+                "    \"vite\": \"latest\",\n"
+                "    \"react\": \"latest\",\n"
+                "    \"react-dom\": \"latest\"\n"
+                "  },\n"
+                "  \"devDependencies\": {}\n"
+                "}\n"
+            ),
+            "frontend/vite.config.js": (
+                "import react from '@vitejs/plugin-react'\n"
+                "import { defineConfig } from 'vite'\n\n"
+                "export default defineConfig({\n"
+                "  plugins: [react()],\n"
+                "})\n"
+            ),
+            "frontend/src/main.tsx": (
+                "import React from 'react'\n"
+                "import ReactDOM from 'react-dom/client'\n"
+                "import App from './App'\n\n"
+                "ReactDOM.createRoot(document.getElementById('root')!).render(\n"
+                "  <React.StrictMode>\n"
+                "    <App />\n"
+                "  </React.StrictMode>,\n"
+                ")\n"
+            ),
+            "frontend/src/App.tsx": (
+                "function App() {\n"
+                "  return <main>ACOS project scaffold is ready.</main>\n"
+                "}\n\n"
+                "export default App\n"
+            ),
+            "shared/.gitkeep": "",
+            ".gitignore": (
+                ".venv/\n"
+                "__pycache__/\n"
+                ".pytest_cache/\n"
+                "node_modules/\n"
+                "dist/\n"
+                ".env\n"
+            ),
+            "package.json": (
+                "{\n"
+                f"  \"name\": \"{JobRunner._safe_package_name(title)}\",\n"
+                "  \"private\": true,\n"
+                "  \"version\": \"0.1.0\",\n"
+                "  \"scripts\": {\n"
+                "    \"dev\": \"npm --prefix frontend run dev\",\n"
+                "    \"build\": \"npm --prefix frontend run build\"\n"
+                "  }\n"
+                "}\n"
+            ),
+            "README.md": f"# {title}\n\nACOS deterministic project scaffold.\n",
+            ".env.example": "LOCAL_ORNITH_BASE_URL=http://127.0.0.1:8000/v1\n",
+        }
+        return contents.get(path, "")
+
+    @staticmethod
+    def _safe_package_name(value: str) -> str:
+        normalized = re.sub(r"[^a-z0-9-]+", "-", value.lower()).strip("-")
+        return normalized or "acos-generated-app"
+
+    @staticmethod
+    def _workspace_root(record: JobRecord) -> Path:
+        return Path(record.spec.workspace_root or record.spec.repo_path).resolve()
+
     @staticmethod
     def _criteria_for_task_from_prd(
         task: PlannedTask,
@@ -1654,6 +2050,7 @@ class JobRunner:
             memory_key="task_graph",
         )
         task_graph = self._refine_task_graph_for_autonomy(record, prd, task_graph)
+        task_graph = self._normalize_project_setup_task_graph(record, task_graph)
         validation = self._build_task_graph_validation(
             task_graph,
             prd=prd,
@@ -1709,6 +2106,7 @@ class JobRunner:
             )
             self._write_memory_item(record, "planner", "task_graph", task_graph.model_dump_json())
             task_graph = self._refine_task_graph_for_autonomy(record, prd, task_graph)
+            task_graph = self._normalize_project_setup_task_graph(record, task_graph)
             validation = self._build_task_graph_validation(
                 task_graph,
                 prd=prd,
@@ -2092,6 +2490,7 @@ class JobRunner:
                 stage_review = self._run_stage_review_gate(record, task)
                 if stage_review is not None:
                     stage_result["stage_review"] = stage_review
+                    self._annotate_stage_status_for_recovery(record, stage_result)
                     self.store.update(record)
                     if self._should_pause_for_recovery(record):
                         return implementation_results, test_writer_results, last_test_result, stage_results
@@ -2123,20 +2522,26 @@ class JobRunner:
                     error=f"unmet_task_dependencies:{','.join(unmet_dependencies)}",
                 )
                 return implementation_results, test_writer_results, last_test_result, stage_results
-            implementation = self._run_structured_role(
-                record,
-                "implementer",
-                ImplementationResult,
-                f"Implement the next autonomous stage task {task.id}: {task.title}",
-                task=task,
-                logs=implementation_summaries,
-            )
+            if self._is_project_setup_task(task):
+                implementation = self._run_project_setup_scaffold(record, task)
+            else:
+                implementation = self._run_structured_role(
+                    record,
+                    "implementer",
+                    ImplementationResult,
+                    f"Implement the next autonomous stage task {task.id}: {task.title}",
+                    task=task,
+                    logs=implementation_summaries,
+                )
+                self._record_task_output(record, "implementation_tasks", task, implementation)
             implementation_results.append(implementation)
             implementation_summaries.append(f"{task.id}: {implementation.summary}")
-            self._record_task_output(record, "implementation_tasks", task, implementation)
             if not self._implementation_allows_progress(record, task, implementation):
                 return implementation_results, test_writer_results, last_test_result, stage_results
-            self._apply_patches(record, "implementer", implementation.patches)
+            if not self._is_project_setup_task(task):
+                self._apply_patches(record, "implementer", implementation.patches)
+            if self._should_pause_for_recovery(record):
+                return implementation_results, test_writer_results, last_test_result, stage_results
             ready_task_ids.add(task.id)
 
             stage_test_pairs = self._run_ready_test_tasks(
@@ -2185,6 +2590,7 @@ class JobRunner:
             stage_review = self._run_stage_review_gate(record, task)
             if stage_review is not None:
                 stage_result["stage_review"] = stage_review
+                self._annotate_stage_status_for_recovery(record, stage_result)
                 self.store.update(record)
                 if self._should_pause_for_recovery(record):
                     return implementation_results, test_writer_results, last_test_result, stage_results
@@ -2331,6 +2737,11 @@ class JobRunner:
         implementation_results: list[ImplementationResult],
         previous_test_writer_results: list[TestWriterResult],
     ) -> TestWriterResult:
+        if not self._ensure_project_setup_ready_before_test_writer(record, task):
+            return TestWriterResult(
+                status=TestWriterStatus.BLOCKED,
+                summary="Project setup artifacts are missing; deterministic scaffold must run before test_writer.",
+            )
         logs = [f"implementation: {item.summary}" for item in implementation_results]
         logs.extend(f"existing tests: {item.summary}" for item in previous_test_writer_results)
         test_writer = self._run_structured_role(
@@ -2354,6 +2765,11 @@ class JobRunner:
         implementation_results: list[ImplementationResult],
         previous_test_writer_results: list[TestWriterResult],
     ) -> TestWriterResult:
+        if not self._ensure_project_setup_ready_before_test_writer(record, task):
+            return TestWriterResult(
+                status=TestWriterStatus.BLOCKED,
+                summary="Project setup artifacts are missing; deterministic scaffold must run before test_writer.",
+            )
         logs = [f"implementation: {item.summary}" for item in implementation_results]
         logs.extend(f"existing tests: {item.summary}" for item in previous_test_writer_results)
         test_writer = self._run_structured_role(
@@ -2763,20 +3179,26 @@ class JobRunner:
         summaries: list[str] = []
         for task in self._tasks_for_roles(task_graph, self.IMPLEMENTATION_TASK_ROLES):
             objective = f"Implement planned task {task.id}: {task.title}"
-            implementation = self._run_structured_role(
-                record,
-                "implementer",
-                ImplementationResult,
-                objective,
-                task=task,
-                logs=summaries,
-            )
+            if self._is_project_setup_task(task):
+                implementation = self._run_project_setup_scaffold(record, task)
+            else:
+                implementation = self._run_structured_role(
+                    record,
+                    "implementer",
+                    ImplementationResult,
+                    objective,
+                    task=task,
+                    logs=summaries,
+                )
+                self._record_task_output(record, "implementation_tasks", task, implementation)
             results.append(implementation)
             summaries.append(f"{task.id}: {implementation.summary}")
-            self._record_task_output(record, "implementation_tasks", task, implementation)
             if not self._implementation_allows_progress(record, task, implementation):
                 return results
-            self._apply_patches(record, "implementer", implementation.patches)
+            if not self._is_project_setup_task(task):
+                self._apply_patches(record, "implementer", implementation.patches)
+            if self._should_pause_for_recovery(record):
+                return results
         if results:
             return results
         if task_graph.tasks:
@@ -2997,6 +3419,7 @@ class JobRunner:
         record: JobRecord,
         stage_result: dict[str, Any],
     ) -> None:
+        self._annotate_stage_status_for_recovery(record, stage_result)
         stages = record.outputs.setdefault("autonomous_stages", [])
         if isinstance(stages, list):
             stages.append(stage_result)
@@ -3010,6 +3433,64 @@ class JobRunner:
             }
         )
         self.store.update(record)
+
+    def _annotate_stage_status_for_recovery(
+        self,
+        record: JobRecord,
+        stage_result: dict[str, Any],
+    ) -> None:
+        task = stage_result.get("task")
+        task_role = task.get("role") if isinstance(task, dict) else None
+        change_summary = stage_result.get("change_summary")
+        if not isinstance(change_summary, dict):
+            change_summary = {}
+        implementation = stage_result.get("implementation")
+        if (
+            isinstance(implementation, dict)
+            and task_role in self.IMPLEMENTATION_TASK_ROLES
+            and int(change_summary.get("implementation_patch_count") or 0) == 0
+            and not change_summary.get("implementation_files")
+        ):
+            stage_result["status"] = "failed_for_recovery"
+            stage_result["failure_reason"] = "implementation_produced_no_changes"
+        missing_artifacts = self._missing_artifacts_for_stage(record, task)
+        if missing_artifacts:
+            stage_result["status"] = "failed_for_recovery"
+            stage_result["failure_reason"] = "required_artifacts_missing"
+            stage_result["missing_artifacts"] = missing_artifacts
+        review = stage_result.get("stage_review")
+        if isinstance(review, dict) and review.get("decision") in {
+            ReviewDecision.REJECT.value,
+            ReviewDecision.REQUEST_CHANGES.value,
+            "reject",
+            "request_changes",
+        }:
+            stage_result["status"] = "failed_for_recovery"
+            stage_result["failure_reason"] = "review_rejected"
+        if "status" not in stage_result:
+            test_run = stage_result.get("test_run")
+            if isinstance(test_run, dict) and test_run.get("success") is True:
+                stage_result["status"] = "passed"
+            else:
+                stage_result["status"] = "failed_for_recovery"
+                stage_result["failure_reason"] = "tests_failed"
+
+    def _missing_artifacts_for_stage(
+        self,
+        record: JobRecord,
+        task: Any,
+    ) -> list[str]:
+        if not isinstance(task, dict):
+            return []
+        artifacts = [
+            str(item)
+            for item in task.get("required_artifacts", [])
+            if str(item).strip()
+        ]
+        if not artifacts:
+            return []
+        root = self._workspace_root(record)
+        return [artifact for artifact in artifacts if not (root / artifact).exists()]
 
     def _validate_completion_integrity(
         self,

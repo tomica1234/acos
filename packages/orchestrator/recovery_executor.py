@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 from packages.orchestrator.statuses import is_hard_terminal_status, is_waiting_status
@@ -34,6 +35,14 @@ class RecoveryExecutor:
         current_index = int(plan.get("current_step_index") or 0)
         while current_index < len(steps):
             step = steps[current_index]
+            if step == "RECREATE_TARGET_FILES" and not self._target_files_recreated(
+                record,
+                plan,
+            ):
+                plan["status"] = "running"
+                plan["current_step_index"] = current_index
+                self._touch_plan(plan)
+                break
             self._checkpoint(record, plan, step)
             self._apply_step(record, plan, step)
             executed = plan.setdefault("executed_steps", [])
@@ -57,6 +66,65 @@ class RecoveryExecutor:
         record.updated_at = datetime.now(timezone.utc)
         self._persist(record)
         return record
+
+    def _target_files_recreated(
+        self,
+        record: JobRecord,
+        plan: dict[str, Any],
+    ) -> bool:
+        constraints = plan.setdefault("constraints", {})
+        if not isinstance(constraints, dict):
+            constraints = {}
+            plan["constraints"] = constraints
+        paths = self._recreate_target_paths(record, constraints)
+        if not paths:
+            return True
+        root = Path(record.spec.workspace_root or record.spec.repo_path).resolve()
+        missing = [path for path in paths if not (root / path).exists()]
+        if not missing:
+            constraints["missing_artifacts"] = []
+            return True
+
+        constraints["missing_artifacts"] = missing
+        runtime = record.runtime_state
+        attempts = runtime.setdefault("recreate_target_files_attempts", {})
+        if isinstance(attempts, dict):
+            key = "|".join(missing)
+            attempts[key] = int(attempts.get(key, 0)) + 1
+            constraints["recreate_target_files_attempt"] = attempts[key]
+            if attempts[key] >= 3:
+                constraints["force_project_setup_scaffold"] = True
+                metadata_constraints = record.spec.metadata.setdefault("constraints", {})
+                if not isinstance(metadata_constraints, dict):
+                    metadata_constraints = {}
+                    record.spec.metadata["constraints"] = metadata_constraints
+                metadata_constraints["force_project_setup_scaffold"] = True
+        return False
+
+    @staticmethod
+    def _recreate_target_paths(
+        record: JobRecord,
+        constraints: dict[str, Any],
+    ) -> list[str]:
+        paths: list[str] = []
+        for key in ("required_artifacts", "target_files", "missing_artifacts"):
+            value = constraints.get(key)
+            if isinstance(value, list):
+                paths.extend(str(item) for item in value if str(item).strip())
+        missing_target_file = constraints.get("missing_target_file")
+        if isinstance(missing_target_file, str) and missing_target_file.strip():
+            paths.append(missing_target_file.strip())
+        runtime_missing = record.runtime_state.get("missing_artifacts")
+        if isinstance(runtime_missing, list):
+            paths.extend(str(item) for item in runtime_missing if str(item).strip())
+        seen: set[str] = set()
+        unique: list[str] = []
+        for path in paths:
+            normalized = path.replace("\\", "/")
+            if normalized and normalized not in seen:
+                unique.append(normalized)
+                seen.add(normalized)
+        return unique
 
     def _apply_step(self, record: JobRecord, plan: dict[str, Any], step: str) -> None:
         constraints = record.spec.metadata.setdefault("constraints", {})

@@ -1,0 +1,210 @@
+from __future__ import annotations
+
+from pathlib import Path
+
+from packages.llm.registry import ModelRegistry
+from packages.mcp_client.fake import FakeMCPEnvironment
+from packages.orchestrator.job_runner import JobRunner
+from packages.orchestrator.job_store import InMemoryJobStore
+from packages.orchestrator.policy import PolicyEngine
+from packages.orchestrator.recovery_executor import RecoveryExecutor
+from packages.schemas.agent_outputs import FilePatch, ImplementationResult, TestRunResult
+from packages.schemas.jobs import JobRecord, JobSpec
+from packages.schemas.models import ImplementationStatus, JobStatus
+from packages.schemas.tasks import PlannedTask, TaskGraph
+
+from tests.conftest import config_dir
+
+
+def _runner(tmp_path: Path) -> tuple[JobRunner, FakeMCPEnvironment, JobRecord]:
+    registry = ModelRegistry.from_paths(
+        provider_path=config_dir() / "model_providers.yaml",
+        agents_path=config_dir() / "agents.yaml",
+        routing_path=config_dir() / "model_routing.yaml",
+    )
+    policy = PolicyEngine.from_path(config_dir() / "policies.yaml")
+    environment = FakeMCPEnvironment(
+        workspace_root=tmp_path,
+        memory_db_path=tmp_path / ".memory.sqlite3",
+    )
+    runner = JobRunner(
+        registry=registry,
+        policy=policy,
+        router=environment.build_router(),
+        store=InMemoryJobStore(),
+    )
+    spec = JobSpec(
+        request_text="Build an English vocabulary test app",
+        repo_path=str(tmp_path),
+        workspace_root=str(tmp_path),
+        target_branch="acos/project-setup-regression",
+    )
+    record = JobRecord(job_id=spec.job_id, spec=spec, status=JobStatus.RUNNING)
+    runner.store.update(record)
+    return runner, environment, record
+
+
+def _bad_project_setup_graph() -> TaskGraph:
+    return TaskGraph(
+        goal="Build English vocabulary test app",
+        tasks=[
+            PlannedTask(
+                id="project-setup",
+                title="Project setup",
+                description="Create monorepo backend/frontend/shared project setup",
+                role="architect",
+                target_files=[],
+                required_artifacts=[],
+            )
+        ],
+    )
+
+
+def test_project_setup_architect_empty_task_is_normalized_to_scaffold(
+    tmp_path: Path,
+) -> None:
+    runner, _environment, record = _runner(tmp_path)
+
+    normalized = runner._normalize_project_setup_task_graph(
+        record,
+        _bad_project_setup_graph(),
+    )
+    task = normalized.tasks[0]
+
+    assert task.id == "project-setup"
+    assert task.role in {"scaffold", "implementer"}
+    assert "architect" not in JobRunner.IMPLEMENTATION_TASK_ROLES
+    assert task.target_files
+    assert task.required_artifacts
+    assert set(JobRunner.PROJECT_SETUP_REQUIRED_ARTIFACTS).issubset(
+        set(task.required_artifacts)
+    )
+
+
+def test_project_setup_cannot_enter_test_writer_before_required_artifacts_exist(
+    tmp_path: Path,
+) -> None:
+    runner, _environment, record = _runner(tmp_path)
+    task = runner._normalize_project_setup_task_graph(
+        record,
+        _bad_project_setup_graph(),
+    ).tasks[0]
+
+    assert not runner._project_setup_artifacts_ready(record, task)
+    assert not runner._ensure_project_setup_ready_before_test_writer(record, task)
+    assert record.runtime_state["recovery_plan"]["trigger"] == "required_artifacts_missing"
+    assert record.runtime_state["recovery_plan"]["status"] != "completed"
+
+
+def test_update_missing_test_file_recovery_returns_to_test_writer_with_create_hint(
+    tmp_path: Path,
+) -> None:
+    runner, _environment, record = _runner(tmp_path)
+    patch = FilePatch(
+        path="backend/tests/test_project_setup.py",
+        operation="update",
+        content="def test_project_setup() -> None:\n    assert True\n",
+    )
+
+    runner._apply_patches(record, "test_writer", [patch])
+
+    plan = record.runtime_state["recovery_plan"]
+    constraints = plan["constraints"]
+    assert plan["strategy"] == "RETURN_TO_TEST_WRITER"
+    assert plan["next_actor"] == "test_writer"
+    assert record.status == JobStatus.WRITING_TESTS
+    assert constraints["patch_operation_hint"] == "create"
+    assert constraints["missing_target_file"] == "backend/tests/test_project_setup.py"
+
+
+def test_recreate_target_files_recovery_waits_until_artifacts_exist(
+    tmp_path: Path,
+) -> None:
+    spec = JobSpec(
+        request_text="Build it",
+        repo_path=str(tmp_path),
+        workspace_root=str(tmp_path),
+        target_branch="acos/recovery-executor",
+    )
+    record = JobRecord(job_id=spec.job_id, spec=spec, status=JobStatus.RECOVERING)
+    record.runtime_state["recovery_plan"] = {
+        "id": "plan-1",
+        "trigger": "target_files_missing",
+        "strategy": "RETURN_TO_TEST_WRITER",
+        "next_status": JobStatus.WRITING_TESTS.value,
+        "next_actor": "test_writer",
+        "steps": ["RETURN_TO_TEST_WRITER", "RECREATE_TARGET_FILES"],
+        "current_step_index": 0,
+        "status": "pending",
+        "constraints": {
+            "required_artifacts": ["backend/tests/test_project_setup.py"],
+            "missing_target_file": "backend/tests/test_project_setup.py",
+        },
+    }
+
+    RecoveryExecutor().execute_until_ready(record)
+
+    plan = record.runtime_state["recovery_plan"]
+    assert plan["status"] != "completed"
+    assert plan["constraints"]["missing_artifacts"] == [
+        "backend/tests/test_project_setup.py"
+    ]
+    assert record.status == JobStatus.WRITING_TESTS
+
+
+def test_project_setup_scaffold_creates_required_files(tmp_path: Path) -> None:
+    runner, _environment, record = _runner(tmp_path)
+    task = runner._normalize_project_setup_task_graph(
+        record,
+        _bad_project_setup_graph(),
+    ).tasks[0]
+
+    result = runner._run_project_setup_scaffold(record, task)
+
+    assert result.status == ImplementationStatus.IMPLEMENTED
+    for artifact in JobRunner.PROJECT_SETUP_REQUIRED_ARTIFACTS:
+        assert (tmp_path / artifact).exists(), artifact
+    evidence = record.outputs["project_setup_scaffold"]["artifact_evidence"]
+    assert all(item["exists"] for item in evidence)
+
+
+def test_zero_patch_implementation_stage_is_failed_for_recovery_even_if_tests_pass(
+    tmp_path: Path,
+) -> None:
+    runner, _environment, record = _runner(tmp_path)
+    implementation = ImplementationResult(
+        status=ImplementationStatus.IMPLEMENTED,
+        summary="No files changed",
+        changed_files=[],
+        patches=[],
+    )
+    stage_result = {
+        "stage": 1,
+        "task": PlannedTask(
+            id="core",
+            title="Core",
+            description="Build core",
+            role="implementer",
+            required_artifacts=["backend/main.py"],
+        ).model_dump(),
+        "implementation": implementation.model_dump(),
+        "test_writer_results": [],
+        "change_summary": runner._build_stage_change_summary(implementation, []),
+        "test_run": TestRunResult(success=True).model_dump(),
+    }
+
+    runner._record_stage_checkpoint(record, stage_result)
+
+    assert stage_result["status"] == "failed_for_recovery"
+    assert stage_result["failure_reason"] in {
+        "implementation_produced_no_changes",
+        "required_artifacts_missing",
+    }
+
+
+def test_frontend_unlimited_mode_sets_autonomous_until_done() -> None:
+    source = Path("frontend/src/App.tsx").read_text(encoding="utf-8")
+
+    assert "autonomous_until_done: unlimitedCycles" in source
+    assert "'--autonomous-until-done'" in source
+    assert "autonomous_until_done: true" in source

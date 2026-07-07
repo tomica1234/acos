@@ -18,6 +18,7 @@ type RunResult = {
   stop_summary?: Record<string, unknown>
   pm_decision?: PmDecision | null
   pm_interventions?: PmDecision[]
+  autonomous_until_done?: boolean
   summary?: {
     progress_ratio?: number
     pending_task_count?: number
@@ -395,6 +396,7 @@ function App() {
       pm_stall_recovery: true,
       max_runtime_seconds: 3600,
       max_autonomous_stages: 256,
+      autonomous_until_done: unlimitedCycles,
       summary_file: '.acos/ui-last-summary.json',
       summary_dir: '.acos/ui-cycles',
       plan_first: planFirst,
@@ -407,7 +409,7 @@ function App() {
         requested_app: 'english_vocab_test',
       },
     }),
-    [jobId, maxCycles, planFirst, preflightTimeout, repoPath, requestText, usePreflight],
+    [jobId, maxCycles, planFirst, preflightTimeout, repoPath, requestText, unlimitedCycles, usePreflight],
   )
 
   const command = useMemo(() => {
@@ -434,6 +436,7 @@ function App() {
       '.acos/ui-cycles',
     ]
     if (planFirst) args.push('--plan-first')
+    if (unlimitedCycles) args.push('--autonomous-until-done')
     if (usePreflight) {
       args.push('--preflight-provider', 'local_ornith')
       args.push('--preflight-timeout', String(preflightTimeout))
@@ -476,13 +479,18 @@ function App() {
         const response = await fetch('/api/jobs/supervised/background', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ ...runPayload, max_batches: null }),
+          body: JSON.stringify({
+            ...runPayload,
+            max_batches: null,
+            autonomous_until_done: true,
+          }),
         })
         const body = await readJsonResponse(response)
         if (!response.ok) {
           throw new Error(responseDetail(body, 'ACOS background request failed'))
         }
         setBackgroundRun(body)
+        setResult({ ...body, autonomous_until_done: true })
         persistUiState({
           requestText,
           repoPath,
