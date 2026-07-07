@@ -253,7 +253,13 @@ class RecoveryGovernor:
     def _looks_like_test_path(path: str) -> bool:
         normalized = path.replace("\\", "/")
         name = normalized.rsplit("/", 1)[-1]
-        return "/tests/" in f"/{normalized}" or name.startswith("test_")
+        return (
+            "/tests/" in f"/{normalized}"
+            or "/test/" in f"/{normalized}"
+            or name.startswith("test_")
+            or ".test." in name
+            or ".spec." in name
+        )
 
     def _strategy_mapping(
         self,
@@ -344,7 +350,7 @@ class RecoveryGovernor:
                     trigger=trigger,
                     strategy="RETURN_TO_IMPLEMENTER",
                     next_status=JobStatus.IMPLEMENTING,
-                    next_actor="implementer",
+                    next_actor="scaffold",
                     steps=["RETURN_TO_IMPLEMENTER", "RECREATE_TARGET_FILES"],
                     reason=last_error,
                     checkpoint_policy="invalidate_failed_stage",
@@ -405,7 +411,15 @@ class RecoveryGovernor:
                     "auto_bump_stage_limit": True,
                 },
             )
-        if trigger in {"target_files_missing", "target_file_missing"} or "target file" in lowered:
+        if (
+            trigger in {
+                "target_files_missing",
+                "target_file_missing",
+                "PATCH_OPERATION_MISMATCH",
+            }
+            or "target file" in lowered
+            or "patch_operation_mismatch" in lowered
+        ):
             missing_path = self._missing_patch_path(last_error, runtime_state)
             failed_role = str(runtime_state.get("failed_patch_role") or "")
             if not failed_role:
@@ -433,7 +447,10 @@ class RecoveryGovernor:
                 constraints["missing_target_file"] = missing_path
                 constraints["required_artifacts"] = [missing_path]
                 constraints["target_files"] = [missing_path]
-            if runtime_state.get("failed_patch_operation") == "update":
+            if (
+                runtime_state.get("failed_patch_operation") == "update"
+                or trigger == "PATCH_OPERATION_MISMATCH"
+            ):
                 constraints["patch_operation_hint"] = "create"
             return RecoveryPlan(
                 trigger=trigger,

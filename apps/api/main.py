@@ -68,6 +68,7 @@ class SupervisedJobRequest(BaseModel):
     test_timeout_seconds: int | None = None
     allow_blocked_recovery: bool = False
     pm_stall_recovery: bool = True
+    autonomous_until_done: bool = False
     metadata: dict[str, Any] = Field(default_factory=dict)
 
     @field_validator("job_id")
@@ -95,6 +96,7 @@ class SuperviseExistingJobRequest(BaseModel):
     test_timeout_seconds: int | None = None
     allow_blocked_recovery: bool = False
     pm_stall_recovery: bool = True
+    autonomous_until_done: bool = False
 
 
 class BackgroundSupervisedJobRequest(SupervisedJobRequest):
@@ -291,7 +293,8 @@ def create_app(
             stage_review=payload.stage_review,
             test_timeout_seconds=payload.test_timeout_seconds,
             allow_blocked_recovery=payload.allow_blocked_recovery,
-            pm_stall_recovery=payload.pm_stall_recovery,
+            pm_stall_recovery=payload.pm_stall_recovery or payload.autonomous_until_done,
+            autonomous_until_done=payload.autonomous_until_done,
         )
 
     def _run_background_supervised_job(
@@ -475,6 +478,7 @@ def create_app(
                     "provider_events": [],
                     "cycle_summaries": [],
                     "initial_status": record.status.value,
+                    "autonomous_until_done": payload.autonomous_until_done,
                 }
             )
         else:
@@ -499,7 +503,8 @@ def create_app(
                 preflight_provider=payload.preflight_provider,
                 preflight_timeout=payload.preflight_timeout,
                 allow_repeated_failure_recovery=payload.allow_blocked_recovery,
-                pm_stall_recovery=payload.pm_stall_recovery,
+                pm_stall_recovery=payload.pm_stall_recovery or payload.autonomous_until_done,
+                autonomous_until_done=payload.autonomous_until_done,
             )
             result["started"] = True
             result["initial_status"] = initial_status
@@ -553,7 +558,8 @@ def create_app(
             preflight_provider=payload.preflight_provider,
             preflight_timeout=payload.preflight_timeout,
             allow_repeated_failure_recovery=payload.allow_blocked_recovery,
-            pm_stall_recovery=payload.pm_stall_recovery,
+            pm_stall_recovery=payload.pm_stall_recovery or payload.autonomous_until_done,
+            autonomous_until_done=payload.autonomous_until_done,
         )
         result["started"] = False
         result["resumed_existing_job"] = True

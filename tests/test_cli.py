@@ -15,6 +15,7 @@ from apps.cli import (
     probe_provider,
 )
 from packages.orchestrator.job_runner import build_default_runner
+from packages.orchestrator.job_store import FileJobStore
 from packages.schemas.jobs import JobRecord, JobSpec
 from packages.schemas.models import JobStatus
 from packages.schemas.tasks import PlannedTask, TaskGraph
@@ -4478,6 +4479,79 @@ def test_supervise_job_stops_after_runtime_limit(
         "provider_event_count": len(payload["provider_events"]),
         "last_provider_event": payload["provider_events"][-1],
     }
+
+
+def test_supervise_job_preserves_autonomous_until_done_in_raw_json_and_next_args(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    jobs_dir = tmp_path / "jobs"
+    spec = JobSpec(
+        job_id="supervise-autonomous-until-done-job",
+        request_text="Build continuously.",
+        repo_path=str(workspace),
+        metadata={"constraints": {"max_autonomous_stages": 1}},
+    )
+    store = FileJobStore(jobs_dir)
+    record = store.create(spec)
+    record.status = JobStatus.BLOCKED
+    record.last_error = "autonomous_stage_limit_reached"
+    record.outputs["autonomous_stage_limit"] = {
+        "max_autonomous_stages": 1,
+        "completed_stage_count": 1,
+    }
+    store.update(record)
+    captured: dict[str, object] = {"resume_count": 0}
+    summary_file = tmp_path / "summaries" / "autonomous-until-done.json"
+    times = iter([100.0, 101.5])
+
+    class DummyRunner:
+        def resume_job(self, job_id: str) -> JobRecord:
+            captured["resume_count"] += 1
+            resumed = captured["store"].get(job_id)
+            resumed.status = JobStatus.BLOCKED
+            resumed.last_error = "autonomous_stage_limit_reached"
+            captured["store"].update(resumed)
+            return resumed
+
+    def fake_build_default_runner(config_dir: str | Path, workspace_root: str | Path, store=None):
+        captured["store"] = store
+        return DummyRunner(), None
+
+    monkeypatch.setattr("apps.cli.build_default_runner", fake_build_default_runner)
+    monkeypatch.setattr("apps.cli.monotonic", lambda: next(times))
+
+    exit_code = main(
+        [
+            "supervise-job",
+            "--config-dir",
+            str(config_dir()),
+            "--jobs-dir",
+            str(jobs_dir),
+            "--job-id",
+            "supervise-autonomous-until-done-job",
+            "--max-cycles",
+            "3",
+            "--steps-per-cycle",
+            "1",
+            "--max-runtime-seconds",
+            "1",
+            "--summary-file",
+            str(summary_file),
+            "--autonomous-until-done",
+        ]
+    )
+
+    assert exit_code == 1
+    assert captured["resume_count"] == 1
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["autonomous_until_done"] is True
+    assert "--autonomous-until-done" in payload["next_supervise_cli_args"]
+    assert "--autonomous-until-done" in payload["next_supervise_command"]
+    assert json.loads(summary_file.read_text(encoding="utf-8")) == payload
 
 
 def test_supervise_job_suggests_supervise_command_after_max_cycles(

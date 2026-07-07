@@ -8,24 +8,37 @@ from packages.orchestrator.job_runner import JobRunner
 from packages.orchestrator.job_store import InMemoryJobStore
 from packages.orchestrator.policy import PolicyEngine
 from packages.orchestrator.recovery_executor import RecoveryExecutor
-from packages.schemas.agent_outputs import FilePatch, ImplementationResult, TestRunResult
+from packages.schemas.agent_outputs import (
+    FilePatch,
+    ImplementationResult,
+    TestRunResult,
+    TestWriterResult,
+)
 from packages.schemas.jobs import JobRecord, JobSpec
 from packages.schemas.models import ImplementationStatus, JobStatus
 from packages.schemas.tasks import PlannedTask, TaskGraph
 
-from tests.conftest import config_dir
+from tests.conftest import attach_mock_adapter, config_dir
 
 
-def _runner(tmp_path: Path) -> tuple[JobRunner, FakeMCPEnvironment, JobRecord]:
+def _runner(
+    tmp_path: Path,
+    *,
+    scenario: dict | None = None,
+    scripted_test_results: list[TestRunResult] | None = None,
+) -> tuple[JobRunner, FakeMCPEnvironment, JobRecord]:
     registry = ModelRegistry.from_paths(
         provider_path=config_dir() / "model_providers.yaml",
         agents_path=config_dir() / "agents.yaml",
         routing_path=config_dir() / "model_routing.yaml",
     )
+    if scenario is not None:
+        attach_mock_adapter(registry, scenario)
     policy = PolicyEngine.from_path(config_dir() / "policies.yaml")
     environment = FakeMCPEnvironment(
         workspace_root=tmp_path,
         memory_db_path=tmp_path / ".memory.sqlite3",
+        scripted_test_results=scripted_test_results,
     )
     runner = JobRunner(
         registry=registry,
@@ -96,6 +109,82 @@ def test_project_setup_cannot_enter_test_writer_before_required_artifacts_exist(
     assert record.runtime_state["recovery_plan"]["status"] != "completed"
 
 
+def test_project_scaffold_role_runs_deterministic_scaffold_before_test_writer(
+    tmp_path: Path,
+) -> None:
+    test_path = "frontend/test/project_scaffold.test.tsx"
+    runner, _environment, record = _runner(
+        tmp_path,
+        scenario={
+            "test_writer": TestWriterResult(
+                summary="Add project scaffold frontend smoke test.",
+                changed_files=[test_path],
+                patches=[
+                    FilePatch(
+                        path=test_path,
+                        operation="create",
+                        content=(
+                            "import { describe, expect, it } from 'vitest'\n\n"
+                            "describe('project scaffold', () => {\n"
+                            "  it('loads the scaffold smoke test', () => {\n"
+                            "    expect(true).toBe(true)\n"
+                            "  })\n"
+                            "})\n"
+                        ),
+                    )
+                ],
+            ).model_dump(),
+        },
+        scripted_test_results=[TestRunResult(success=True)],
+    )
+    task_graph = TaskGraph(
+        goal="Build English vocabulary test app",
+        tasks=[
+            PlannedTask(
+                id="project-scaffold-test",
+                title="Frontend scaffold smoke test",
+                description="Add the frontend scaffold smoke test.",
+                role="test_writer",
+                target_files=[test_path],
+            ),
+            PlannedTask(
+                id="project-scaffold",
+                title="Project scaffold",
+                description="Create monorepo backend/frontend/shared project scaffold",
+                role="scaffold",
+                target_files=list(JobRunner.PROJECT_SETUP_REQUIRED_ARTIFACTS),
+                required_artifacts=list(JobRunner.PROJECT_SETUP_REQUIRED_ARTIFACTS),
+            ),
+        ],
+    )
+
+    runner._active_record = record
+    try:
+        implementation_results, test_writer_results, _test_result, _stages = (
+            runner._run_autonomous_task_loop(record, task_graph)
+        )
+    finally:
+        runner._active_record = None
+
+    assert implementation_results[0].summary == "Created deterministic project setup scaffold."
+    assert test_writer_results[0].patches[0].path == test_path
+    for artifact in JobRunner.PROJECT_SETUP_REQUIRED_ARTIFACTS:
+        assert (tmp_path / artifact).exists(), artifact
+    assert (tmp_path / test_path).exists()
+    assert record.outputs["project_setup_scaffold"]["missing_artifacts"] == []
+    apply_patch_roles = [
+        event.role
+        for event in record.audit_events
+        if event.action == "repo_server.apply_patch"
+    ]
+    assert apply_patch_roles[: len(JobRunner.PROJECT_SETUP_REQUIRED_ARTIFACTS)] == [
+        "orchestrator"
+    ] * len(JobRunner.PROJECT_SETUP_REQUIRED_ARTIFACTS)
+    assert "test_writer" in apply_patch_roles[
+        len(JobRunner.PROJECT_SETUP_REQUIRED_ARTIFACTS) :
+    ]
+
+
 def test_update_missing_test_file_recovery_returns_to_test_writer_with_create_hint(
     tmp_path: Path,
 ) -> None:
@@ -115,6 +204,57 @@ def test_update_missing_test_file_recovery_returns_to_test_writer_with_create_hi
     assert record.status == JobStatus.WRITING_TESTS
     assert constraints["patch_operation_hint"] == "create"
     assert constraints["missing_target_file"] == "backend/tests/test_project_setup.py"
+
+
+def test_missing_frontend_test_file_create_hint_rewrites_update_to_create(
+    tmp_path: Path,
+) -> None:
+    test_path = "frontend/test/project_scaffold.test.tsx"
+    runner, _environment, record = _runner(
+        tmp_path,
+        scenario={
+            "test_writer": TestWriterResult(
+                summary="Create missing project scaffold frontend test.",
+                changed_files=[test_path],
+                patches=[
+                    FilePatch(
+                        path=test_path,
+                        operation="update",
+                        content=(
+                            "import { describe, expect, it } from 'vitest'\n\n"
+                            "describe('project scaffold', () => {\n"
+                            "  it('exists', () => {\n"
+                            "    expect(true).toBe(true)\n"
+                            "  })\n"
+                            "})\n"
+                        ),
+                    )
+                ],
+            ).model_dump(),
+        },
+    )
+    record.spec.metadata["constraints"] = {
+        "patch_operation_hint": "create",
+        "missing_target_file": test_path,
+    }
+    task = PlannedTask(
+        id="project-scaffold-test",
+        title="Frontend scaffold smoke test",
+        description="Create the missing frontend test file.",
+        role="test_writer",
+    )
+
+    result = runner._run_test_writer_task(record, task, [], [])
+
+    assert result.patches[0].operation == "create"
+    assert (tmp_path / test_path).exists()
+    saved_task = record.outputs["test_writer_tasks"][0]["task"]
+    assert test_path in saved_task["target_files"]
+    assert test_path in saved_task["required_artifacts"]
+    retrieval_trace = "\n".join(
+        item["action"] for item in record.outputs.get("retrieval_trace", [])
+    )
+    assert "missing_file_context" in retrieval_trace
 
 
 def test_recreate_target_files_recovery_waits_until_artifacts_exist(
@@ -150,6 +290,50 @@ def test_recreate_target_files_recovery_waits_until_artifacts_exist(
         "backend/tests/test_project_setup.py"
     ]
     assert record.status == JobStatus.WRITING_TESTS
+
+
+def test_repeated_missing_test_file_is_created_deterministically_after_two_failures(
+    tmp_path: Path,
+) -> None:
+    test_path = "frontend/test/project_scaffold.test.tsx"
+    spec = JobSpec(
+        request_text="Build it",
+        repo_path=str(tmp_path),
+        workspace_root=str(tmp_path),
+        target_branch="acos/repeated-missing-test",
+    )
+    record = JobRecord(job_id=spec.job_id, spec=spec, status=JobStatus.RECOVERING)
+    record.runtime_state["recovery_plan"] = {
+        "id": "plan-frontend-test",
+        "trigger": "target_files_missing",
+        "strategy": "RETURN_TO_TEST_WRITER",
+        "next_status": JobStatus.WRITING_TESTS.value,
+        "next_actor": "test_writer",
+        "steps": ["RETURN_TO_TEST_WRITER", "RECREATE_TARGET_FILES"],
+        "current_step_index": 0,
+        "status": "pending",
+        "constraints": {
+            "required_artifacts": [test_path],
+            "target_files": [test_path],
+            "missing_target_file": test_path,
+            "patch_operation_hint": "create",
+        },
+    }
+    executor = RecoveryExecutor()
+
+    executor.execute_until_ready(record)
+    assert not (tmp_path / test_path).exists()
+    assert record.runtime_state["recovery_plan"]["status"] == "running"
+
+    executor.execute_until_ready(record)
+
+    plan = record.runtime_state["recovery_plan"]
+    assert (tmp_path / test_path).exists()
+    assert plan["status"] == "completed"
+    assert plan["constraints"]["deterministically_created_files"] == [test_path]
+    assert plan["constraints"]["missing_artifacts"] == []
+    assert record.status == JobStatus.WRITING_TESTS
+    assert record.history.count(JobStatus.WRITING_TESTS) <= 2
 
 
 def test_project_setup_scaffold_creates_required_files(tmp_path: Path) -> None:

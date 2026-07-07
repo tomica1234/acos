@@ -410,6 +410,68 @@ def test_background_supervised_job_runs_until_done(
     assert captured["resume_count"] == 1
 
 
+def test_supervised_api_preserves_autonomous_until_done(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    class DummyRunner:
+        def run_job(self, spec: JobSpec) -> JobRecord:
+            captured["spec"] = spec
+            record = captured["store"].create(spec)
+            record.status = JobStatus.TESTING
+            captured["store"].update(record)
+            return record
+
+    def fake_build_default_runner(config_dir, workspace_root, store=None):
+        captured["store"] = store
+        return DummyRunner(), None
+
+    def fake_supervise_persisted_job(**kwargs):
+        captured["autonomous_until_done"] = kwargs["autonomous_until_done"]
+        return {
+            "job_id": kwargs["job_id"],
+            "status": "blocked",
+            "done": False,
+            "terminal_reason": "runtime_limit",
+            "autonomous_until_done": kwargs["autonomous_until_done"],
+            "next_supervise_cli_args": [
+                "supervise-job",
+                "--job-id",
+                kwargs["job_id"],
+                "--autonomous-until-done",
+            ],
+            "next_supervise_command": (
+                f"acos supervise-job --job-id {kwargs['job_id']} --autonomous-until-done"
+            ),
+        }
+
+    monkeypatch.setattr(api_main, "build_default_runner", fake_build_default_runner)
+    monkeypatch.setattr(api_main, "supervise_persisted_job", fake_supervise_persisted_job)
+
+    client = TestClient(api_main.create_app())
+    response = client.post(
+        "/jobs/supervised",
+        json={
+            "request_text": "Build something useful.",
+            "repo_path": str(tmp_path / "workspace"),
+            "job_id": "api-autonomous-until-done-job",
+            "jobs_dir": str(tmp_path / "jobs"),
+            "plan_first": False,
+            "max_cycles": 1,
+            "steps_per_cycle": 1,
+            "autonomous_until_done": True,
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert captured["autonomous_until_done"] is True
+    assert payload["autonomous_until_done"] is True
+    assert "--autonomous-until-done" in payload["next_supervise_cli_args"]
+
+
 def test_background_supervised_job_rejects_path_like_job_id(tmp_path: Path) -> None:
     client = TestClient(api_main.create_app())
     response = client.post(
