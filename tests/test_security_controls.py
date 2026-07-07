@@ -14,13 +14,14 @@ from packages.mcp_client.fake import FakeMCPEnvironment, RepoServer, TestServer
 from packages.mcp_client.router import MCPRouter
 from packages.memory.redaction import redact_text
 from packages.orchestrator.audit import AuditRecorder
-from packages.orchestrator.job_runner import JobRunner
+from packages.orchestrator.job_runner import JobRunner, build_default_runner
 from packages.orchestrator.policy import PolicyEngine
 from packages.schemas.runtime import RuntimeHttpCheck
 from packages.schemas.agent_outputs import FilePatch, ImplementationResult, TestRunResult
 from packages.schemas.context import ContextPacket
 from packages.schemas.jobs import JobRecord, JobSpec
-from packages.schemas.models import ImplementationStatus
+from packages.schemas.models import ImplementationStatus, JobStatus
+from packages.schemas.tasks import PlannedTask
 
 from tests.conftest import attach_mock_adapter, config_dir, load_registry
 
@@ -83,6 +84,40 @@ def test_repo_server_blocks_secret_paths_and_symlink_escape(tmp_path: Path) -> N
 
     with pytest.raises(ValueError):
         repo.read_file("link.txt")
+
+
+def test_default_runner_context_retrieval_blocks_secret_target_files(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / ".env.local").write_text("API_KEY=sk-this-should-not-be-read\n", encoding="utf-8")
+    (workspace / "inside.py").write_text("VALUE = 1\n", encoding="utf-8")
+    runner, _ = build_default_runner(
+        config_dir=config_dir(),
+        workspace_root=workspace,
+        memory_db_path=workspace / ".memory.sqlite3",
+    )
+    spec = JobSpec(
+        request_text="Inspect the workspace without reading secrets",
+        repo_path=str(workspace),
+        target_branch="acos/secret-context",
+    )
+    record = JobRecord(job_id=spec.job_id, spec=spec, status=JobStatus.SUBMITTED)
+    task = PlannedTask(
+        id="secret-target",
+        title="Secret target",
+        description="The planner incorrectly targeted a secret file.",
+        role="implementer",
+        target_files=[".env.local"],
+    )
+
+    files = runner._gather_relevant_files("implementer", record=record, task=task)
+
+    assert ".env.local" not in files
+    assert "sk-this-should-not-be-read" not in "\n".join(files.values())
+    assert any(
+        item["path"] == ".env.local" and item["action"].startswith("read_failed:")
+        for item in record.outputs["retrieval_trace"]
+    )
 
 
 def test_test_server_rejects_invalid_timeout_and_unknown_command(tmp_path: Path) -> None:

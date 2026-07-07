@@ -16,16 +16,19 @@ import tomllib
 import urllib.error
 import urllib.parse
 import urllib.request
+from fnmatch import fnmatch
 from http.cookiejar import CookieJar
 from pathlib import Path, PurePosixPath
-from typing import Iterable
+from typing import TYPE_CHECKING, Iterable
 
 from packages.memory.redaction import redact_text
 from packages.memory.store import SQLiteMemoryStore
 from packages.mcp_client.router import MCPRouter
-from packages.orchestrator.workspace import WorkspacePolicy
 from packages.schemas.agent_outputs import TestRunResult
 from packages.schemas.runtime import RuntimeHttpCheck
+
+if TYPE_CHECKING:
+    from packages.orchestrator.workspace import WorkspacePolicy
 
 FORBIDDEN_PATH_PARTS = {
     ".env",
@@ -35,6 +38,27 @@ FORBIDDEN_PATH_PARTS = {
     "id_ed25519",
     "token",
     "tokens",
+}
+FORBIDDEN_PATH_PATTERNS = {
+    ".env",
+    ".env.local",
+    ".env.*.local",
+    ".env.development",
+    ".env.*.development",
+    ".env.production",
+    ".env.*.production",
+    ".env.test",
+    ".env.*.test",
+    ".git",
+    ".git/**",
+    "**/.git/**",
+    "**/.ssh/**",
+    "**/.aws/**",
+    "**/id_rsa",
+    "**/id_ed25519",
+    "**/*credential*",
+    "**/*secret*",
+    "**/*token*",
 }
 
 TEST_COMMAND_ALLOWLIST: dict[str, list[str]] = {
@@ -96,13 +120,14 @@ class RepoServer:
         self.workspace_policy = workspace_policy
 
     def _resolve(self, relative_path: str) -> Path:
+        normalized = PurePosixPath(str(relative_path).replace("\\", "/")).as_posix()
         if self.workspace_policy is not None:
-            decision = self.workspace_policy.classify_path_access(relative_path, "read")
+            decision = self.workspace_policy.classify_path_access(normalized, "read")
             if decision.policy_action.value == "deny":
                 raise ValueError(decision.reason)
-        if any(part in FORBIDDEN_PATH_PARTS for part in Path(relative_path).parts):
+        if self._is_forbidden_path(normalized):
             raise ValueError("forbidden path access")
-        target = (self.workspace_root / relative_path).resolve()
+        target = (self.workspace_root / normalized).resolve()
         if self.workspace_root not in [target, *target.parents]:
             raise ValueError("workspace escape detected")
         if target.is_symlink():
@@ -110,6 +135,19 @@ class RepoServer:
             if self.workspace_root not in [resolved_target, *resolved_target.parents]:
                 raise ValueError("symlink escape detected")
         return target
+
+    @staticmethod
+    def _is_forbidden_path(path: str) -> bool:
+        normalized = PurePosixPath(path).as_posix()
+        parts = PurePosixPath(normalized).parts
+        basename = PurePosixPath(normalized).name
+        return (
+            any(part in FORBIDDEN_PATH_PARTS for part in parts)
+            or any(
+                fnmatch(normalized, pattern) or fnmatch(basename, pattern)
+                for pattern in FORBIDDEN_PATH_PATTERNS
+            )
+        )
 
     def repo_tree(self) -> dict[str, object]:
         files = []

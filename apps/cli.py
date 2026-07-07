@@ -3094,3 +3094,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(yaml.safe_dump(summary, sort_keys=False))
         return 0
     return 1
+
+
+if __name__ == "__main__":  # pragma: no cover
+    raise SystemExit(main())

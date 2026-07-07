@@ -336,5 +336,4 @@ pickup.
 - API mutation auth is enabled when `ACOS_API_TOKEN` is set; local dev can opt
   out with `ACOS_LOCAL_DEV_AUTH_DISABLED=1`
 
-See [docs/QUICKSTART.md](/Users/tachibanashunta/wip/acos/docs/QUICKSTART.md) for
-setup details.
+See [docs/QUICKSTART.md](docs/QUICKSTART.md) for setup details.

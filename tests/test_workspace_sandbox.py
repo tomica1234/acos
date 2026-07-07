@@ -72,3 +72,14 @@ def test_workspace_forbidden_path_pattern_is_denied(tmp_path: Path) -> None:
 
     assert decision.policy_action == PolicyAction.DENY
     assert decision.operation == "secret_file_read"
+
+
+def test_workspace_env_example_template_is_allowed(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    policy = PolicyEngine.from_path(config_dir() / "policies.yaml").build_workspace_policy(workspace)
+
+    decision = policy.classify_path_access(".env.example", "read")
+
+    assert decision.policy_action == PolicyAction.ALLOW
+    assert decision.operation == "workspace_file_read"

@@ -3905,7 +3905,11 @@ def build_default_runner(
         _disable_mock_fallback_models(registry)
     policy = PolicyEngine.from_path(config_path / "policies.yaml")
     registry.validate_or_raise(policy=policy)
-    env = FakeMCPEnvironment(workspace_root=workspace_path, memory_db_path=memory_db)
+    env = FakeMCPEnvironment(
+        workspace_root=workspace_path,
+        memory_db_path=memory_db,
+        workspace_policy=policy.build_workspace_policy(workspace_path),
+    )
     runner = JobRunner(
         registry=registry,
         policy=policy,
