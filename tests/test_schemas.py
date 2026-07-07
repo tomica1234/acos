@@ -37,12 +37,12 @@ def test_schema_instantiation() -> None:
         model="test/model",
         display_name="Test",
         max_context_tokens=8192,
-        max_output_tokens=2048,
+        max_output_tokens="auto",
     )
     agent = AgentModelConfig(
         role="implementer",
         primary_model="test-model",
-        max_output_tokens=1024,
+        max_output_tokens="auto",
         context_budget_tokens=4096,
         max_tool_steps=24,
         output_schema="ImplementationResult",
@@ -84,7 +84,9 @@ def test_schema_instantiation() -> None:
 
     assert provider.type == ProviderType.OPENAI_COMPATIBLE
     assert model.model_id == "test-model"
+    assert model.max_output_tokens == "auto"
     assert agent.role == "implementer"
+    assert agent.max_output_tokens == "auto"
     assert routing.default_strategy == "role_primary"
     assert graph.tasks[0].id == "t1"
     assert implementation.patches[0].path == "feature.py"

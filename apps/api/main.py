@@ -27,10 +27,13 @@ from apps.cli import (
     _provider_preflight_event,
 )
 from packages.llm.registry import ModelRegistry
+from packages.orchestrator.approval import ApprovalError
 from packages.orchestrator.job_runner import JobRunner, build_default_runner
 from packages.orchestrator.job_store import FileJobStore
 from packages.orchestrator.policy import PolicyEngine
 from packages.orchestrator.progress import summarize_job_progress
+from packages.orchestrator.provider_health import ProviderHealthChecker
+from packages.schemas.approvals import ApprovalActionPayload, ApprovalRequest
 from packages.schemas.models import JobStatus
 from packages.schemas.jobs import JobRecord, JobSpec, validate_job_id_string
 
@@ -103,7 +106,12 @@ class ProviderProbeRequest(BaseModel):
     timeout: float = 5.0
 
 
-def create_app(job_runner: JobRunner | None = None) -> FastAPI:
+def create_app(
+    job_runner: JobRunner | None = None,
+    *,
+    config_dir: str | Path | None = None,
+    workspace_root: str | Path = ".",
+) -> FastAPI:
     app = FastAPI(title="ACOS API", version="0.1.0")
     cors_origins = [
         origin.strip()
@@ -117,14 +125,16 @@ def create_app(job_runner: JobRunner | None = None) -> FastAPI:
         allow_methods=["*"],
         allow_headers=["*"],
     )
+    resolved_config_dir = Path(config_dir or (Path(__file__).resolve().parents[2] / "configs"))
     app.state.job_runner = job_runner
+    app.state.workspace_root = str(Path(workspace_root).resolve())
     app.state.background_runs = {}
     app.state.background_run_lock = threading.Lock()
     app.state.job_runner_factory = lambda: build_default_runner(
-        config_dir=Path(__file__).resolve().parents[2] / "configs",
-        workspace_root=Path("."),
+        config_dir=resolved_config_dir,
+        workspace_root=Path(app.state.workspace_root),
     )[0]
-    config_dir = Path(__file__).resolve().parents[2] / "configs"
+    config_dir = resolved_config_dir
     rate_limit: dict[str, list[float]] = {}
 
     @app.middleware("http")
@@ -141,6 +151,15 @@ def create_app(job_runner: JobRunner | None = None) -> FastAPI:
             runner = app.state.job_runner_factory()
             app.state.job_runner = runner
         return runner
+
+    def find_runner_for_approval(approval_id: str) -> tuple[JobRunner, ApprovalRequest]:
+        runner = get_runner()
+        if runner.approval_gateway is None:
+            raise HTTPException(status_code=404, detail="approval gateway not configured")
+        try:
+            return runner, runner.approval_gateway.get(approval_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="approval not found") from exc
 
     def _now_iso() -> str:
         return datetime.now(timezone.utc).isoformat()
@@ -605,7 +624,10 @@ def create_app(job_runner: JobRunner | None = None) -> FastAPI:
         recent_events: list[dict[str, Any]] = []
         for event in record.audit_events[-12:]:
             if hasattr(event, "model_dump"):
-                recent_events.append(event.model_dump(mode="json"))
+                payload = event.model_dump(mode="json")
+                if payload.get("tool_name") is None:
+                    payload.pop("tool_name", None)
+                recent_events.append(payload)
             elif isinstance(event, dict):
                 recent_events.append(event)
         return {
@@ -633,6 +655,138 @@ def create_app(job_runner: JobRunner | None = None) -> FastAPI:
             return get_runner().get(job_id)
         except KeyError as exc:
             raise HTTPException(status_code=404, detail="job not found") from exc
+
+    @app.get("/approvals")
+    def list_approvals(job_id: str | None = None) -> dict[str, list[dict[str, Any]]]:
+        approvals = get_runner().list_approvals(job_id=job_id)
+        return {"approvals": [item.model_dump(mode="json") for item in approvals]}
+
+    @app.get("/approvals/{approval_id}")
+    def get_approval(approval_id: str) -> dict[str, Any]:
+        _runner, approval = find_runner_for_approval(approval_id)
+        return approval.model_dump(mode="json")
+
+    @app.post("/approvals/{approval_id}/approve")
+    def approve_approval(
+        approval_id: str,
+        payload: ApprovalActionPayload,
+    ) -> dict[str, Any]:
+        runner, _approval = find_runner_for_approval(approval_id)
+        if runner.approval_gateway is None:
+            raise HTTPException(status_code=404, detail="approval gateway not configured")
+        try:
+            approval = runner.approval_gateway.approve(
+                approval_id,
+                token=payload.token,
+                approver=payload.approver,
+            )
+            record = runner.resume_job(approval.job_id)
+        except ApprovalError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return {
+            "approval": approval.model_dump(mode="json"),
+            "job": record.model_dump(mode="json"),
+        }
+
+    @app.post("/approvals/{approval_id}/reject")
+    def reject_approval(
+        approval_id: str,
+        payload: ApprovalActionPayload,
+    ) -> dict[str, Any]:
+        runner, _approval = find_runner_for_approval(approval_id)
+        if runner.approval_gateway is None:
+            raise HTTPException(status_code=404, detail="approval gateway not configured")
+        try:
+            approval = runner.approval_gateway.reject(
+                approval_id,
+                token=payload.token,
+                approver=payload.approver,
+                reason=payload.reason,
+            )
+            record = runner.resume_job(approval.job_id)
+        except ApprovalError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return {
+            "approval": approval.model_dump(mode="json"),
+            "job": record.model_dump(mode="json"),
+        }
+
+    @app.get("/approvals/{approval_id}/approve")
+    def approve_via_link(
+        approval_id: str,
+        token: str = Query(...),
+    ) -> dict[str, Any]:
+        return approve_approval(approval_id, ApprovalActionPayload(token=token))
+
+    @app.get("/approvals/{approval_id}/reject")
+    def reject_via_link(
+        approval_id: str,
+        token: str = Query(...),
+        reason: str | None = None,
+    ) -> dict[str, Any]:
+        return reject_approval(approval_id, ApprovalActionPayload(token=token, reason=reason))
+
+    @app.get("/worker/status")
+    def worker_status() -> dict[str, Any]:
+        heartbeats = get_runner().store.list_worker_heartbeats()
+        return {
+            "status": "alive" if heartbeats else "idle",
+            "heartbeats": [item.model_dump(mode="json") for item in heartbeats],
+        }
+
+    @app.get("/worker/heartbeats")
+    def worker_heartbeats() -> dict[str, Any]:
+        return {
+            "heartbeats": [
+                item.model_dump(mode="json") for item in get_runner().store.list_worker_heartbeats()
+            ]
+        }
+
+    @app.get("/runtime/status")
+    def runtime_status() -> dict[str, Any]:
+        runner = get_runner()
+        return {
+            "runtime_issues": [
+                issue.model_dump(mode="json") for issue in runner.store.list_runtime_issues()
+            ],
+            "waiting_jobs": [
+                item.model_dump(mode="json")
+                for item in runner.list_jobs(
+                    statuses=[
+                        JobStatus.WAITING_RUNTIME,
+                        JobStatus.PROVIDER_UNAVAILABLE,
+                        JobStatus.RETRYING_PROVIDER,
+                    ]
+                )
+            ],
+        }
+
+    @app.post("/runtime/check")
+    def runtime_check() -> dict[str, Any]:
+        runner = get_runner()
+        resumed = runner.runtime_manager.maybe_resume_waiting_jobs() if runner.runtime_manager else []
+        return {"resumed_jobs": [item.model_dump(mode="json") for item in resumed]}
+
+    @app.get("/providers")
+    def providers() -> dict[str, list[dict[str, Any]]]:
+        registry = ModelRegistry.from_paths(
+            provider_path=config_dir / "model_providers.yaml",
+            agents_path=config_dir / "agents.yaml",
+            routing_path=config_dir / "model_routing.yaml",
+        )
+        return {
+            "providers": [provider.model_dump(mode="json") for provider in registry.providers.values()]
+        }
+
+    @app.get("/providers/{provider_key}/health")
+    def provider_health(provider_key: str) -> dict[str, Any]:
+        registry = ModelRegistry.from_paths(
+            provider_path=config_dir / "model_providers.yaml",
+            agents_path=config_dir / "agents.yaml",
+            routing_path=config_dir / "model_routing.yaml",
+        )
+        checker = ProviderHealthChecker(registry)
+        return checker.check_provider(provider_key).model_dump(mode="json")
 
     @app.get("/models")
     def list_models() -> list[dict[str, object]]:

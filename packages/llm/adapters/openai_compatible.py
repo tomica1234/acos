@@ -29,7 +29,7 @@ class OpenAICompatibleAdapter:
     def __init__(self, provider: ModelProviderConfig, model: ModelConfig) -> None:
         self.provider = provider
         self.model = model
-        api_key = os.environ.get(provider.api_key_env, "missing-api-key")
+        api_key = self._resolve_api_key(provider)
         self.client = OpenAI(
             api_key=api_key,
             base_url=provider.base_url,
@@ -54,6 +54,8 @@ class OpenAICompatibleAdapter:
             "temperature": temperature,
             "max_tokens": max_tokens,
         }
+        if self.provider.extra_body:
+            kwargs["extra_body"] = self.provider.extra_body
         used_json_schema = False
         if top_p is not None:
             kwargs["top_p"] = top_p
@@ -210,6 +212,19 @@ class OpenAICompatibleAdapter:
             if isinstance(value, int):
                 normalized[key] = value
         return normalized or None
+
+    @staticmethod
+    def _resolve_api_key(provider: ModelProviderConfig) -> str:
+        env_name = provider.api_key_env.strip()
+        if env_name:
+            value = os.environ.get(env_name)
+            if value:
+                return value
+        if provider.default_api_key is not None:
+            return provider.default_api_key
+        if provider.allow_empty_api_key:
+            return "EMPTY"
+        return "missing-api-key"
 
     @staticmethod
     def _classify_error(exc: Exception) -> str:

@@ -1,0 +1,32 @@
+runtime:
+  provider_health_check:
+    enabled: true
+    check_interval_seconds: 30
+    timeout_seconds: 10
+    max_backoff_seconds: 300
+    test_chat_completion: true
+    test_json_response: false
+
+  token_budget:
+    safety_margin_tokens: 4096
+    minimum_output_tokens: 1024
+    default_output_tokens: auto
+    hard_max_output_tokens:
+    estimate_chars_per_token: 4.0
+
+  on_provider_unavailable:
+    action: wait_and_retry
+    notify: true
+    mark_job_status: waiting_runtime
+
+  on_model_not_found:
+    action: block
+    notify: true
+
+  on_auth_error:
+    action: block
+    notify: true
+
+  resume:
+    auto_resume_after_provider_recovery: true
+    require_manual_resume_after_auth_error: true

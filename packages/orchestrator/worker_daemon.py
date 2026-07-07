@@ -43,7 +43,7 @@ class WorkerDaemon:
 
     def __post_init__(self) -> None:
         if self.recovery_governor is None:
-            self.recovery_governor = self.runner.recovery_governor
+            self.recovery_governor = getattr(self.runner, "recovery_governor", None)
         self.leases = LeaseManager(self.store)
         self._shutdown_requested = False
         self._last_heartbeat_at = 0.0
@@ -64,7 +64,9 @@ class WorkerDaemon:
             record.status = JobStatus.RECOVERING
             record.history.append(JobStatus.RECOVERING)
             self.store.update(record)
-            self.runner._recover_record(record, error=record.last_error)
+            recover = getattr(self.runner, "_recover_record", None)
+            if recover is not None:
+                recover(record, error=record.last_error)
             self.store.update(record)
         return record
 
@@ -148,7 +150,11 @@ class WorkerDaemon:
                 record.status = JobStatus.RUNNING
                 record.history.append(JobStatus.RUNNING)
             self.store.update(record)
-            return self.runner.resume_job(job_id)
+            resume_job = getattr(self.runner, "resume_job", None)
+            if resume_job is not None:
+                return resume_job(job_id)
+            run_next_step = getattr(self.runner, "run_next_step")
+            return run_next_step(job_id)
         finally:
             latest = self.store.get(job_id)
             if is_settled_status(latest.status) or is_recoverable_status(latest.status):

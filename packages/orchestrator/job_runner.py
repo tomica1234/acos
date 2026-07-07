@@ -12,12 +12,13 @@ from typing import Any
 from packages.agents.runner import AgentRunner
 from packages.llm.budget import estimate_tokens
 from packages.llm.client import LLMClient
-from packages.llm.errors import StructuredOutputError
+from packages.llm.errors import AdapterError, StructuredOutputError
 from packages.llm.registry import ModelRegistry
 from packages.llm.routing import ModelRouter, RoutingContext
 from packages.mcp_client.fake import FakeMCPEnvironment
 from packages.mcp_client.router import MCPRouter
 from packages.orchestrator.audit import AuditRecorder
+from packages.orchestrator.approval import ApprovalGateway
 from packages.orchestrator.completion_verifier import DefinitionOfDoneVerifier
 from packages.orchestrator.context_builder import ContextBuilder
 from packages.orchestrator.job_store import InMemoryJobStore
@@ -35,8 +36,10 @@ from packages.orchestrator.recovery_governor import (
     is_recoverable_status,
     is_waiting_status,
 )
+from packages.orchestrator.runtime import RuntimeManager
 from packages.orchestrator.scaffolds import build_scaffold
 from packages.orchestrator.states import apply_transition
+from packages.schemas.approvals import ApprovalStatus, PolicyAction
 from packages.schemas.agent_outputs import (
     ArchitecturePlan,
     FailureDiagnosis,
@@ -60,6 +63,7 @@ from packages.schemas.models import (
     TaskComplexity,
     TestWriterStatus,
 )
+from packages.schemas.runtime import RuntimeIssueType
 from packages.schemas.tasks import PlannedTask, TaskGraph
 
 
@@ -70,6 +74,10 @@ def _disable_mock_fallback_models(registry: ModelRegistry) -> None:
             for model_key in agent.fallback_models
             if registry.get_provider(registry.get_model(model_key).provider).type.value != "mock"
         ]
+
+
+class JobWaitingForApproval(RuntimeError):
+    """Internal control-flow marker for durable approval waits."""
 
 
 class JobRunner:
@@ -89,25 +97,33 @@ class JobRunner:
         policy: PolicyEngine,
         router: MCPRouter,
         store: InMemoryJobStore | None = None,
+        model_router: ModelRouter | None = None,
+        agent_runner: AgentRunner | None = None,
+        approval_gateway: ApprovalGateway | None = None,
+        runtime_manager: RuntimeManager | None = None,
     ) -> None:
         self.registry = registry
         self.policy = policy
         self.router = router
         self.store = store or InMemoryJobStore()
+        if runtime_manager is not None:
+            _disable_mock_fallback_models(registry)
         self.audit = AuditRecorder()
         self.context_builder = ContextBuilder()
         self.completion_verifier = DefinitionOfDoneVerifier()
         self.recovery_governor = RecoveryGovernor()
         self.recovery_executor = RecoveryExecutor(self.store)
-        self.model_router = ModelRouter(registry)
+        self.model_router = model_router or ModelRouter(registry)
         self.llm_client = LLMClient(registry, self.model_router)
-        self.agent_runner = AgentRunner(
+        self.agent_runner = agent_runner or AgentRunner(
             llm_client=self.llm_client,
             registry=registry,
             mcp_router=router,
             policy_engine=policy,
             audit_recorder=self.audit,
         )
+        self.approval_gateway = approval_gateway
+        self.runtime_manager = runtime_manager
         self.max_attempts_per_task = 3
         self.max_same_failure_repeats = 2
         self.max_steps_per_agent = 6
@@ -118,6 +134,30 @@ class JobRunner:
 
     def get(self, job_id: str) -> JobRecord:
         return self.store.get(job_id)
+
+    def list_jobs(self, statuses: list[JobStatus] | None = None) -> list[JobRecord]:
+        return self.store.list_jobs(statuses=statuses)
+
+    def get_events(self, job_id: str) -> list[Any]:
+        return list(self.store.get(job_id).audit_events)
+
+    def get_notifications(self, job_id: str) -> list[dict[str, Any]]:
+        return self.store.list_notifications(job_id=job_id)
+
+    def list_approvals(self, job_id: str | None = None) -> list[Any]:
+        if self.approval_gateway is None:
+            return []
+        return self.approval_gateway.list_all(job_id=job_id)
+
+    def pause_job(self, job_id: str) -> JobRecord:
+        record = self.store.get(job_id)
+        apply_transition(record, JobStatus.PAUSED)
+        return self.store.update(record)
+
+    def cancel_job(self, job_id: str) -> JobRecord:
+        record = self.store.get(job_id)
+        apply_transition(record, JobStatus.CANCELLED)
+        return self.store.update(record)
 
     def run_job(self, spec: JobSpec) -> JobRecord:
         record = self.store.create(spec)
@@ -194,6 +234,8 @@ class JobRunner:
                 error=self._quality_gate_recovery_error(exc),
             )
             return self.store.update(record)
+        except AdapterError as exc:
+            return self._handle_provider_adapter_error(record, exc)
         except StructuredOutputError as exc:
             self._recover_record(record, error=str(exc))
             return self.store.update(record)
@@ -206,6 +248,9 @@ class JobRunner:
     def _run_record(self, record: JobRecord, *, resume: bool) -> JobRecord:
         self._active_record = record
         try:
+            if resume and self._resume_approval_if_ready(record):
+                if record.status == JobStatus.BLOCKED:
+                    return self.store.update(record)
             if self._is_terminal_status(record.status) or self._is_waiting_status(record.status):
                 return record
             if resume and self._recover_record_if_needed(record):
@@ -317,12 +362,16 @@ class JobRunner:
             record.last_error = None
             apply_transition(record, JobStatus.DONE)
             return self.store.update(record)
+        except JobWaitingForApproval:
+            return self.store.update(record)
         except QualityGateError as exc:
             self._recover_record(
                 record,
                 error=self._quality_gate_recovery_error(exc),
             )
             return self.store.update(record)
+        except AdapterError as exc:
+            return self._handle_provider_adapter_error(record, exc)
         except StructuredOutputError as exc:
             self._recover_record(record, error=str(exc))
             return self.store.update(record)
@@ -1139,6 +1188,8 @@ class JobRunner:
                 f"patch_limit_exceeded:{role}:{len(patches)}>{max_patches}"
             )
         for patch in patches:
+            self.policy.assert_patch_target_allowed(role, patch.path)
+            self._ensure_patch_approved_or_pause(record, role, patch)
             self._call_tool(
                 role,
                 "repo_server.apply_patch",
@@ -1152,6 +1203,154 @@ class JobRunner:
                 executable=patch.executable,
             )
         self.store.update(record)
+
+    def _resume_approval_if_ready(self, record: JobRecord) -> bool:
+        if record.status != JobStatus.WAITING_APPROVAL or not record.pending_approval_id:
+            return False
+        if self.approval_gateway is None:
+            return False
+        approval = self.approval_gateway.get(record.pending_approval_id)
+        if approval.status == ApprovalStatus.APPROVED:
+            record.runtime_state["approved_approval_id"] = approval.id
+            pending_patch = record.runtime_state.pop("pending_approval_patch", None)
+            if isinstance(pending_patch, dict):
+                result = self.router.call("repo_server.apply_patch", **pending_patch)
+                if not result.ok:
+                    raise RuntimeError(result.error or "approved patch application failed")
+            record.pending_approval_id = None
+            if record.status != JobStatus.RESUMING:
+                record.status = JobStatus.RESUMING
+                record.history.append(JobStatus.RESUMING)
+            return True
+        if approval.status == ApprovalStatus.REJECTED:
+            record.last_error = approval.resolution_reason or "approval rejected"
+            record.pending_approval_id = None
+            if record.status != JobStatus.BLOCKED:
+                record.status = JobStatus.BLOCKED
+                record.history.append(JobStatus.BLOCKED)
+            return True
+        return False
+
+    def _ensure_patch_approved_or_pause(
+        self,
+        record: JobRecord,
+        role: str,
+        patch: Any,
+    ) -> None:
+        if self.approval_gateway is None:
+            return
+        if self._resume_approval_if_ready(record):
+            if record.status == JobStatus.BLOCKED:
+                raise JobWaitingForApproval(record.last_error or "approval rejected")
+            return
+        if record.pending_approval_id:
+            raise JobWaitingForApproval("approval pending")
+        try:
+            decision = self.policy.classify_tool_call(
+                role=role,
+                tool_name="repo_server.apply_patch",
+                arguments={
+                    "path": patch.path,
+                    "content": patch.content or patch.unified_diff or "",
+                    "changed_files": 1,
+                },
+                workspace_root=record.spec.workspace_root or record.spec.repo_path,
+                job_metadata=record.spec.metadata,
+            )
+        except PermissionError as exc:
+            raise QualityGateError(f"policy_deny:{exc}") from exc
+        if decision.policy_action == PolicyAction.DENY:
+            raise QualityGateError(f"policy_deny:{decision.reason}")
+        if decision.policy_action != PolicyAction.REQUIRE_APPROVAL:
+            return
+        challenge = self.approval_gateway.create_challenge(
+            job_id=record.job_id,
+            task_id=record.current_task_id,
+            role=role,
+            requested_by=role,
+            operation=decision.operation,
+            risk_level=decision.risk_level,
+            reason=decision.reason,
+            proposed_action={
+                "tool_name": "repo_server.apply_patch",
+                "path": patch.path,
+                "operation": patch.operation,
+            },
+        )
+        record.pending_approval_id = challenge.request.id
+        record.runtime_state["pending_approval_patch"] = {
+            "path": patch.path,
+            "content": patch.content,
+            "operation": patch.operation,
+            "new_path": patch.new_path,
+            "unified_diff": patch.unified_diff,
+            "base_sha256": patch.base_sha256,
+            "expected_old_content": patch.expected_old_content,
+            "executable": patch.executable,
+        }
+        if record.status != JobStatus.WAITING_APPROVAL:
+            record.status = JobStatus.WAITING_APPROVAL
+            record.history.append(JobStatus.WAITING_APPROVAL)
+        self.store.update(record)
+        self.router.call(
+            "notify_server.send_notification",
+            body=f"Approval required for {decision.operation}: {patch.path}",
+            kind="approval_required",
+            job_id=record.job_id,
+            approval_id=challenge.request.id,
+            approve_url=challenge.approve_url,
+            reject_url=challenge.reject_url,
+        )
+        raise JobWaitingForApproval("approval pending")
+
+    def _handle_provider_adapter_error(
+        self,
+        record: JobRecord,
+        exc: AdapterError,
+    ) -> JobRecord:
+        if self.runtime_manager is None:
+            self._recover_record(record, error=str(exc))
+            return self.store.update(record)
+        code = (exc.code or "").lower()
+        issue_type = RuntimeIssueType.CONNECTION_ERROR
+        if "timeout" in code or "timeout" in str(exc).lower():
+            issue_type = RuntimeIssueType.TIMEOUT
+        elif "auth" in code or "unauthorized" in str(exc).lower():
+            issue_type = RuntimeIssueType.AUTH_ERROR
+        elif "model" in code and "not" in code:
+            issue_type = RuntimeIssueType.MODEL_NOT_FOUND
+        provider_key = "unknown"
+        model_key = None
+        try:
+            selection = self.model_router.select_model(
+                RoutingContext(
+                    role=record.current_role or "pm",
+                    failure_count=record.failure_count,
+                    same_test_failure_count=record.same_test_failure_count,
+                    changed_files_count=0,
+                    security_sensitive=False,
+                    context_tokens=0,
+                )
+            )
+            provider_key = selection.provider_key
+            model_key = selection.model_key
+        except Exception:
+            pass
+        issue = self.runtime_manager.handle_provider_error(
+            record=record,
+            provider_key=provider_key,
+            model_key=model_key,
+            issue_type=issue_type,
+            message=str(exc),
+        )
+        self.router.call(
+            "notify_server.send_notification",
+            body=f"Runtime provider wait: {issue.message}",
+            kind="runtime_wait",
+            job_id=record.job_id,
+            runtime_issue_id=issue.id,
+        )
+        return self.store.update(record)
 
     def _run_tests(self, record: JobRecord) -> TestRunResult:
         self._transition_to_testing(record)

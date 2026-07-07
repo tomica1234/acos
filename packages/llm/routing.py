@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from packages.llm.errors import ContextBudgetExceededError, RoutingError
-from packages.llm.budget import TokenBudgetManager, estimate_tokens
+from packages.llm.budget import TokenBudgetManager, compute_max_output_tokens, estimate_tokens
 from packages.llm.registry import ModelRegistry
 from packages.schemas.context import ContextPacket
 from packages.schemas.models import (
@@ -242,12 +242,17 @@ class ModelRouter:
         details: dict[str, Any],
     ) -> ModelSelection:
         for model in valid_models:
+            max_output_tokens = self._resolve_max_output_tokens(
+                agent=agent,
+                model=model,
+                estimated_input_tokens=routing_context.context_tokens,
+            )
             try:
                 self.budget_manager.assert_context_fits(
                     context_tokens=routing_context.context_tokens,
                     requested_budget=agent.context_budget_tokens,
                     model_max_context_tokens=model.max_context_tokens,
-                    model_max_output_tokens=min(agent.max_output_tokens, model.max_output_tokens),
+                    model_max_output_tokens=max_output_tokens,
                 )
             except ContextBudgetExceededError:
                 continue
@@ -264,7 +269,7 @@ class ModelRouter:
                 details=actual_details,
                 temperature=agent.temperature,
                 top_p=agent.top_p,
-                max_output_tokens=min(agent.max_output_tokens, model.max_output_tokens),
+                max_output_tokens=max_output_tokens,
             )
         raise ContextBudgetExceededError(
             f"Context requires compaction for role {routing_context.role}",
@@ -326,3 +331,35 @@ class ModelRouter:
                 else []
             ),
         )
+
+    def _resolve_max_output_tokens(
+        self,
+        *,
+        agent: AgentModelConfig,
+        model: ModelConfig,
+        estimated_input_tokens: int,
+    ) -> int:
+        configured = self._combined_output_limit(
+            agent.max_output_tokens,
+            model.max_output_tokens,
+        )
+        return compute_max_output_tokens(
+            model_max_context_tokens=model.max_context_tokens,
+            estimated_input_tokens=estimated_input_tokens,
+            configured_max_output_tokens=configured,
+            safety_margin_tokens=self.budget_manager.policy.safety_margin_tokens,
+            minimum_output_tokens=self.budget_manager.policy.minimum_output_tokens,
+            hard_max_output_tokens=self.budget_manager.policy.hard_max_output_tokens,
+        )
+
+    @staticmethod
+    def _combined_output_limit(agent_limit: object, model_limit: object) -> int | str:
+        agent_is_int = isinstance(agent_limit, int)
+        model_is_int = isinstance(model_limit, int)
+        if agent_is_int and model_is_int:
+            return min(agent_limit, model_limit)
+        if agent_is_int:
+            return agent_limit
+        if model_is_int:
+            return model_limit
+        return "auto"

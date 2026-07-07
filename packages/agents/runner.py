@@ -22,6 +22,7 @@ from packages.llm.tool_schema import build_response_schema, build_tool_manifest
 from packages.mcp_client.router import MCPRouter
 from packages.orchestrator.audit import AuditRecorder
 from packages.orchestrator.policy import PolicyEngine
+from packages.schemas.approvals import PolicyAction
 from packages.schemas.audit import AuditEvent
 from packages.schemas.context import ContextPacket
 from packages.schemas.models import (
@@ -246,6 +247,7 @@ class AgentRunner:
             if result.tool_calls:
                 self._handle_tool_calls(
                     role=role,
+                    context_packet=context_packet,
                     messages=messages,
                     tool_calls=result.tool_calls,
                     audit_events=audit_events,
@@ -483,6 +485,7 @@ class AgentRunner:
         self,
         *,
         role: str,
+        context_packet: ContextPacket,
         messages: list[dict[str, Any]],
         tool_calls: list[dict[str, Any]],
         audit_events: list[AuditEvent] | None,
@@ -520,6 +523,19 @@ class AgentRunner:
             arguments = tool_call.get("arguments", {})
             if not isinstance(arguments, dict):
                 arguments = {"value": arguments}
+            if self.policy_engine is not None:
+                decision = self.policy_engine.classify_tool_call(
+                    role=role,
+                    tool_name=tool_name,
+                    arguments=arguments,
+                    workspace_root=context_packet.repo_path,
+                    job_metadata=context_packet.metadata,
+                )
+                if decision.policy_action in {
+                    PolicyAction.DENY,
+                    PolicyAction.REQUIRE_APPROVAL,
+                }:
+                    raise PermissionError(decision.reason)
             result = self.mcp_router.call(tool_name, **arguments)
             event = self.audit_recorder.tool_event(
                 role=role,
@@ -576,6 +592,15 @@ class AgentRunner:
         }
 
     def _assert_tools_allowed(self, role: str, tool_names: list[str]) -> None:
+        agent_config = self.registry.get_agent(role)
+        if tool_names and not agent_config.allow_tools:
+            raise PermissionError(f"Role {role} is not allowed to use tools")
+        configured_tools = set(agent_config.allowed_tools)
+        for tool_name in tool_names:
+            if tool_name not in configured_tools:
+                raise PermissionError(
+                    f"Tool {tool_name} is not configured for role {role}"
+                )
         if self.policy_engine is None:
             return
         for tool_name in tool_names:

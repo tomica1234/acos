@@ -39,9 +39,9 @@ def _derive_title(spec: JobSpec) -> str:
 
 
 class InMemoryJobStore:
-    """A minimal job record store for the MVP."""
+    """In-memory store with optional JSON persistence."""
 
-    def __init__(self) -> None:
+    def __init__(self, backing_path: str | Path | None = None) -> None:
         self._records: dict[str, JobRecord] = {}
         self._tasks: dict[str, dict[str, TaskRecord]] = {}
         self._checkpoints: dict[str, list[CheckpointRecord]] = {}
@@ -49,6 +49,63 @@ class InMemoryJobStore:
         self._heartbeats: dict[str, WorkerHeartbeat] = {}
         self._leases: dict[str, JobLease] = {}
         self._notifications: list[dict[str, Any]] = []
+        self.backing_path = Path(backing_path) if backing_path is not None else None
+        self._load()
+
+    def _load(self) -> None:
+        if self.backing_path is None or not self.backing_path.exists():
+            return
+        payload = json.loads(self.backing_path.read_text(encoding="utf-8"))
+        for item in payload.get("records", []):
+            record = JobRecord.model_validate(item)
+            self._records[record.job_id] = record
+        for item in payload.get("tasks", []):
+            task = TaskRecord.model_validate(item)
+            self._tasks.setdefault(task.job_id, {})[task.task_id] = task
+        for item in payload.get("checkpoints", []):
+            checkpoint = CheckpointRecord.model_validate(item)
+            self._checkpoints.setdefault(checkpoint.job_id, []).append(checkpoint)
+        for item in payload.get("runtime_issues", []):
+            issue = RuntimeIssue.model_validate(item)
+            self._runtime_issues[issue.id] = issue
+        for item in payload.get("heartbeats", []):
+            heartbeat = WorkerHeartbeat.model_validate(item)
+            self._heartbeats[heartbeat.worker_id] = heartbeat
+        for item in payload.get("leases", []):
+            lease = JobLease.model_validate(item)
+            self._leases[lease.job_id] = lease
+        self._notifications = list(payload.get("notifications", []))
+
+    def _persist(self) -> None:
+        if self.backing_path is None:
+            return
+        self.backing_path.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "records": [record.model_dump(mode="json") for record in self._records.values()],
+            "tasks": [
+                task.model_dump(mode="json")
+                for tasks in self._tasks.values()
+                for task in tasks.values()
+            ],
+            "checkpoints": [
+                checkpoint.model_dump(mode="json")
+                for checkpoints in self._checkpoints.values()
+                for checkpoint in checkpoints
+            ],
+            "runtime_issues": [
+                issue.model_dump(mode="json") for issue in self._runtime_issues.values()
+            ],
+            "heartbeats": [
+                heartbeat.model_dump(mode="json") for heartbeat in self._heartbeats.values()
+            ],
+            "leases": [lease.model_dump(mode="json") for lease in self._leases.values()],
+            "notifications": list(self._notifications),
+        }
+        temp_path = self.backing_path.with_name(
+            f".{self.backing_path.name}.{os.getpid()}.{uuid4().hex}.tmp"
+        )
+        payload_text = json.dumps(payload, sort_keys=True, indent=2)
+        FileJobStore._write_atomic(self, temp_path, self.backing_path, payload_text)
 
     def create(self, spec: JobSpec, *, status: JobStatus | None = None) -> JobRecord:
         initial_status = status or JobStatus.SUBMITTED
@@ -60,6 +117,7 @@ class InMemoryJobStore:
             history=[initial_status],
         )
         self._records[record.job_id] = record
+        self._persist()
         return record
 
     def get(self, job_id: str) -> JobRecord:
@@ -69,6 +127,7 @@ class InMemoryJobStore:
         record.updated_at = utc_now()
         self._records[record.job_id] = record
         self._sync_tasks_from_record(record)
+        self._persist()
         return record
 
     def list_jobs(self, *, statuses: Sequence[JobStatus] | None = None) -> list[JobRecord]:
@@ -80,10 +139,12 @@ class InMemoryJobStore:
 
     def save_tasks(self, job_id: str, tasks: Sequence[TaskRecord]) -> None:
         self._tasks[job_id] = {task.task_id: task for task in tasks}
+        self._persist()
 
     def upsert_task(self, task: TaskRecord) -> TaskRecord:
         task.updated_at = utc_now()
         self._tasks.setdefault(task.job_id, {})[task.task_id] = task
+        self._persist()
         return task
 
     def list_tasks(self, job_id: str) -> list[TaskRecord]:
@@ -101,6 +162,7 @@ class InMemoryJobStore:
         ]
         items.append(checkpoint)
         self._checkpoints[checkpoint.job_id] = items
+        self._persist()
         return checkpoint
 
     def get_checkpoint(
@@ -125,6 +187,7 @@ class InMemoryJobStore:
     def save_runtime_issue(self, issue: RuntimeIssue) -> RuntimeIssue:
         issue.updated_at = utc_now()
         self._runtime_issues[issue.id] = issue
+        self._persist()
         return issue
 
     def get_runtime_issue(self, issue_id: str) -> RuntimeIssue:
@@ -143,6 +206,7 @@ class InMemoryJobStore:
     def save_worker_heartbeat(self, heartbeat: WorkerHeartbeat) -> WorkerHeartbeat:
         heartbeat.heartbeat_at = utc_now()
         self._heartbeats[heartbeat.worker_id] = heartbeat
+        self._persist()
         return heartbeat
 
     def list_worker_heartbeats(self) -> list[WorkerHeartbeat]:
@@ -150,6 +214,7 @@ class InMemoryJobStore:
 
     def save_job_lease(self, lease: JobLease) -> JobLease:
         self._leases[lease.job_id] = lease
+        self._persist()
         return lease
 
     def get_job_lease(self, job_id: str) -> JobLease | None:
@@ -157,12 +222,14 @@ class InMemoryJobStore:
 
     def release_job_lease(self, job_id: str) -> None:
         self._leases.pop(job_id, None)
+        self._persist()
 
     def list_job_leases(self) -> list[JobLease]:
         return list(self._leases.values())
 
     def record_notification(self, payload: dict[str, Any]) -> None:
         self._notifications.append(dict(payload))
+        self._persist()
 
     def list_notifications(self, *, job_id: str | None = None) -> list[dict[str, Any]]:
         if job_id is None:

@@ -28,6 +28,8 @@ from packages.schemas.models import (
 
 AdapterFactory = Callable[[ModelProviderConfig, ModelConfig], object]
 _ENV_PATTERN = re.compile(r"^\$\{([A-Z0-9_]+)(?::-([^}]*))?\}$")
+_LEGACY_PROVIDER_ALIASES = {"local_qwen": "local_ornith"}
+_LEGACY_MODEL_ALIASES = {"qwen_35b": "ornith_35b_q4"}
 
 
 class ModelRegistry:
@@ -146,12 +148,18 @@ class ModelRegistry:
         try:
             return self.providers[name]
         except KeyError as exc:
+            alias = _LEGACY_PROVIDER_ALIASES.get(name)
+            if alias is not None and alias in self.providers:
+                return self.providers[alias]
             raise UnknownProviderError(name) from exc
 
     def get_model(self, model_id: str) -> ModelConfig:
         try:
             return self.models[model_id]
         except KeyError as exc:
+            alias = _LEGACY_MODEL_ALIASES.get(model_id)
+            if alias is not None and alias in self.models:
+                return self.models[alias]
             raise UnknownModelError(model_id) from exc
 
     def get_agent(self, role: str) -> AgentModelConfig:
@@ -202,6 +210,7 @@ class ModelRegistry:
                 )
             if (
                 provider.default_max_output_tokens is not None
+                and isinstance(model.max_output_tokens, int)
                 and model.max_output_tokens > provider.default_max_output_tokens
             ):
                 errors.append(
@@ -224,6 +233,8 @@ class ModelRegistry:
                     )
                 if (
                     model_key == agent.primary_model
+                    and isinstance(agent.max_output_tokens, int)
+                    and isinstance(model.max_output_tokens, int)
                     and agent.max_output_tokens > model.max_output_tokens
                 ):
                     errors.append(

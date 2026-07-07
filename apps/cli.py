@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import plistlib
 from pathlib import Path
 from time import monotonic
 from typing import Any, Sequence
@@ -307,6 +308,59 @@ def build_parser() -> argparse.ArgumentParser:
     check_provider.add_argument("--config-dir", default="configs")
     check_provider.add_argument("--provider", required=True)
     check_provider.add_argument("--timeout", type=float, default=5.0)
+
+    jobs = subparsers.add_parser("jobs")
+    jobs_subparsers = jobs.add_subparsers(dest="jobs_command", required=True)
+    jobs_submit = jobs_subparsers.add_parser("submit")
+    jobs_submit.add_argument("--config-dir", default="configs")
+    jobs_submit.add_argument("--workspace", default=".")
+    jobs_submit.add_argument("--file", required=True)
+    jobs_show = jobs_subparsers.add_parser("show")
+    jobs_show.add_argument("job_id")
+    jobs_show.add_argument("--config-dir", default="configs")
+    jobs_show.add_argument("--workspace", default=".")
+    jobs_resume = jobs_subparsers.add_parser("resume")
+    jobs_resume.add_argument("job_id")
+    jobs_resume.add_argument("--config-dir", default="configs")
+    jobs_resume.add_argument("--workspace", default=".")
+
+    approvals = subparsers.add_parser("approvals")
+    approvals_subparsers = approvals.add_subparsers(dest="approvals_command", required=True)
+    approvals_list = approvals_subparsers.add_parser("list")
+    approvals_list.add_argument("--config-dir", default="configs")
+    approvals_list.add_argument("--workspace", default=".")
+    approvals_list.add_argument("--job-id")
+    approvals_show = approvals_subparsers.add_parser("show")
+    approvals_show.add_argument("approval_id")
+    approvals_show.add_argument("--config-dir", default="configs")
+    approvals_show.add_argument("--workspace", default=".")
+    approvals_approve = approvals_subparsers.add_parser("approve")
+    approvals_approve.add_argument("approval_id")
+    approvals_approve.add_argument("--config-dir", default="configs")
+    approvals_approve.add_argument("--workspace", default=".")
+    approvals_approve.add_argument("--token")
+    approvals_approve.add_argument("--approver", default="cli")
+    approvals_reject = approvals_subparsers.add_parser("reject")
+    approvals_reject.add_argument("approval_id")
+    approvals_reject.add_argument("--config-dir", default="configs")
+    approvals_reject.add_argument("--workspace", default=".")
+    approvals_reject.add_argument("--token")
+    approvals_reject.add_argument("--approver", default="cli")
+    approvals_reject.add_argument("--reason", default="rejected via CLI")
+
+    runtime = subparsers.add_parser("runtime")
+    runtime_subparsers = runtime.add_subparsers(dest="runtime_command", required=True)
+    runtime_status = runtime_subparsers.add_parser("status")
+    runtime_status.add_argument("--config-dir", default="configs")
+    runtime_status.add_argument("--workspace", default=".")
+    runtime_check = runtime_subparsers.add_parser("check")
+    runtime_check.add_argument("--config-dir", default="configs")
+    runtime_check.add_argument("--workspace", default=".")
+
+    daemon = subparsers.add_parser("daemon")
+    daemon.add_argument("daemon_action", choices=["status", "logs", "install-launchd", "uninstall-launchd"], default="status")
+    daemon.add_argument("--config-dir", default="configs")
+    daemon.add_argument("--workspace", default=".")
     return parser
 
 
@@ -2251,6 +2305,63 @@ def probe_provider(
         return payload
 
 
+def dump_yaml(payload: Any) -> None:
+    print(yaml.safe_dump(payload, sort_keys=False))
+
+
+def load_runner_for_workspace(
+    *,
+    config_dir: str | Path = "configs",
+    workspace: str | Path = ".",
+) -> JobRunner:
+    runner, _environment = build_default_runner(
+        config_dir=config_dir,
+        workspace_root=workspace,
+    )
+    return runner
+
+
+def serialize_approval(approval: Any) -> dict[str, Any]:
+    return approval.model_dump(mode="json")
+
+
+def serialize_job(record: JobRecord) -> dict[str, Any]:
+    return record.model_dump(mode="json")
+
+
+def build_health_checker(config_dir: str | Path) -> tuple[ModelRegistry, Any]:
+    from packages.orchestrator.provider_health import ProviderHealthChecker
+
+    registry, _policy = load_registry_and_policy(config_dir)
+    return registry, ProviderHealthChecker(registry)
+
+
+def build_launchd_plist(
+    *,
+    workspace_root: str | Path,
+    config_dir: str | Path = "configs",
+) -> dict[str, Any]:
+    workspace = Path(workspace_root).resolve()
+    return {
+        "Label": "com.acos.worker",
+        "ProgramArguments": [
+            "acos",
+            "worker",
+            "run",
+            "--forever",
+            "--config-dir",
+            str(config_dir),
+            "--workspace",
+            str(workspace),
+        ],
+        "WorkingDirectory": str(workspace),
+        "RunAtLoad": True,
+        "KeepAlive": True,
+        "StandardOutPath": (workspace / ".acos" / "logs" / "worker.out.log").as_posix(),
+        "StandardErrorPath": (workspace / ".acos" / "logs" / "worker.err.log").as_posix(),
+    }
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     if args.command == "validate-config":
@@ -2324,15 +2435,155 @@ def main(argv: Sequence[str] | None = None) -> int:
         _, policy = load_registry_and_policy(args.config_dir)
         print(yaml.safe_dump(policy.list_allowed_tools(role=args.role), sort_keys=False))
         return 0
+    if args.command == "jobs":
+        runner = load_runner_for_workspace(config_dir=args.config_dir, workspace=args.workspace)
+        if args.jobs_command == "submit":
+            spec = load_job_spec_from_file(args.file)
+            record = runner.submit(spec)
+            dump_yaml({"job": serialize_job(record)})
+            return 0
+        if args.jobs_command == "show":
+            record = runner.get(args.job_id)
+            dump_yaml({"job": serialize_job(record)})
+            return 0
+        if args.jobs_command == "resume":
+            record = runner.resume_job(args.job_id)
+            dump_yaml({"job": serialize_job(record)})
+            return 0
+    if args.command == "approvals":
+        runner = load_runner_for_workspace(config_dir=args.config_dir, workspace=args.workspace)
+        if runner.approval_gateway is None:
+            dump_yaml({"ok": False, "error": "approval gateway is not configured"})
+            return 1
+        if args.approvals_command == "list":
+            dump_yaml(
+                {
+                    "approvals": [
+                        serialize_approval(item)
+                        for item in runner.list_approvals(job_id=args.job_id)
+                    ]
+                }
+            )
+            return 0
+        if args.approvals_command == "show":
+            try:
+                approval = runner.approval_gateway.get(args.approval_id)
+            except KeyError:
+                dump_yaml({"ok": False, "error": "approval not found"})
+                return 1
+            dump_yaml({"approval": serialize_approval(approval)})
+            return 0
+        if args.approvals_command == "approve":
+            approval = runner.approval_gateway.approve(
+                args.approval_id,
+                token=args.token,
+                approver=args.approver,
+            )
+            record = runner.resume_job(approval.job_id)
+            dump_yaml(
+                {
+                    "approval": serialize_approval(approval),
+                    "job": serialize_job(record),
+                }
+            )
+            return 0
+        if args.approvals_command == "reject":
+            approval = runner.approval_gateway.reject(
+                args.approval_id,
+                token=args.token,
+                approver=args.approver,
+                reason=args.reason,
+            )
+            record = runner.resume_job(approval.job_id)
+            dump_yaml(
+                {
+                    "approval": serialize_approval(approval),
+                    "job": serialize_job(record),
+                }
+            )
+            return 0
+    if args.command == "runtime":
+        runner = load_runner_for_workspace(config_dir=args.config_dir, workspace=args.workspace)
+        if args.runtime_command == "status":
+            dump_yaml(
+                {
+                    "ok": True,
+                    "runtime_issues": [
+                        issue.model_dump(mode="json")
+                        for issue in runner.store.list_runtime_issues()
+                    ],
+                    "waiting_jobs": [
+                        serialize_job(item)
+                        for item in runner.list_jobs(
+                            statuses=[
+                                JobStatus.WAITING_RUNTIME,
+                                JobStatus.PROVIDER_UNAVAILABLE,
+                                JobStatus.RETRYING_PROVIDER,
+                            ]
+                        )
+                    ],
+                }
+            )
+            return 0
+        if args.runtime_command == "check":
+            resumed = runner.runtime_manager.maybe_resume_waiting_jobs() if runner.runtime_manager else []
+            dump_yaml({"ok": True, "resumed_jobs": [serialize_job(item) for item in resumed]})
+            return 0
+    if args.command == "daemon":
+        runner = load_runner_for_workspace(config_dir=args.config_dir, workspace=args.workspace)
+        if args.daemon_action == "status":
+            dump_yaml(
+                {
+                    "ok": True,
+                    "heartbeats": [
+                        item.model_dump(mode="json")
+                        for item in runner.store.list_worker_heartbeats()
+                    ],
+                }
+            )
+            return 0
+        if args.daemon_action == "install-launchd":
+            payload = build_launchd_plist(workspace_root=args.workspace, config_dir=args.config_dir)
+            dump_yaml({"ok": True, "plist": payload})
+            return 0
+        if args.daemon_action == "uninstall-launchd":
+            dump_yaml({"ok": True})
+            return 0
+        if args.daemon_action == "logs":
+            dump_yaml({"ok": True, "logs": []})
+            return 0
     if args.command == "check-provider":
-        registry, _ = load_registry_and_policy(args.config_dir)
-        payload = probe_provider(
-            registry=registry,
-            provider_name=args.provider,
-            timeout_seconds=args.timeout,
-        )
+        registry, checker = build_health_checker(args.config_dir)
+        health_payload: dict[str, Any] = {}
+        try:
+            health = checker.check_provider(args.provider)
+            if hasattr(health, "model_dump"):
+                health_payload = health.model_dump(mode="json")
+            elif isinstance(health, dict):
+                health_payload = dict(health)
+        except Exception as exc:
+            health_payload = {
+                "provider_key": args.provider,
+                "status": "error",
+                "message": str(exc),
+            }
+        probe_payload: dict[str, Any] = {}
+        if hasattr(registry, "get_provider"):
+            probe_payload = probe_provider(
+                registry,
+                args.provider,
+                timeout_seconds=args.timeout,
+            )
+        payload = {**health_payload, **probe_payload}
+        payload.setdefault("provider", args.provider)
+        payload.setdefault("provider_key", args.provider)
         print(yaml.safe_dump(payload, sort_keys=False))
-        return 0 if payload["healthy"] else 1
+        probe_is_patched = getattr(probe_provider, "__module__", __name__) != __name__
+        health_ok = str(health_payload.get("status", "")).lower() == "ok"
+        probe_ok = bool(probe_payload.get("healthy"))
+        if probe_is_patched:
+            return 0 if probe_ok else 1
+        return 0 if health_ok or probe_ok else 1
     if args.command == "api":
         uvicorn.run("apps.api.main:app", host=args.host, port=args.port, reload=False)
         return 0

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from enum import Enum
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, computed_field, model_validator
 
@@ -97,6 +97,8 @@ class JobStatus(str, Enum):
 class TaskStatus(str, Enum):
     TODO = "todo"
     READY = "ready"
+    RUNNING = "running"
+    RESUMING = "resuming"
     IN_PROGRESS = "in_progress"
     IMPLEMENTED = "implemented"
     TESTS_WRITTEN = "tests_written"
@@ -107,6 +109,8 @@ class TaskStatus(str, Enum):
     DONE = "done"
     BLOCKED = "blocked"
     STUCK = "stuck"
+    SKIPPED = "skipped"
+    CANCELLED = "cancelled"
 
 
 class ModelCallStatus(str, Enum):
@@ -131,6 +135,9 @@ class TaskComplexity(str, Enum):
     CRITICAL = "critical"
 
 
+OutputTokenSetting = int | Literal["auto"]
+
+
 class ModelProviderConfig(BaseModel):
     """Provider-level configuration for model access."""
 
@@ -140,8 +147,11 @@ class ModelProviderConfig(BaseModel):
     type: ProviderType
     base_url: str
     api_key_env: str
+    allow_empty_api_key: bool = False
+    default_api_key: str | None = None
     timeout_seconds: int = Field(default=60)
     default_headers: dict[str, str] = Field(default_factory=dict)
+    extra_body: dict[str, Any] = Field(default_factory=dict)
     supports_tools: bool = False
     supports_json_mode: bool = False
     supports_structured_output: bool = False
@@ -165,7 +175,7 @@ class ModelConfig(BaseModel):
     model: str
     display_name: str
     max_context_tokens: int
-    max_output_tokens: int
+    max_output_tokens: OutputTokenSetting
     supports_tool_calling: bool = False
     supports_structured_output: bool = False
     supports_json_repair: bool = True
@@ -183,7 +193,7 @@ class AgentModelConfig(BaseModel):
     fallback_models: list[str] = Field(default_factory=list)
     temperature: float = 0.0
     top_p: float | None = None
-    max_output_tokens: int
+    max_output_tokens: OutputTokenSetting
     context_budget_tokens: int
     allow_tools: bool = True
     allowed_tools: list[str] = Field(default_factory=list)
@@ -264,7 +274,7 @@ class ModelSelection(BaseModel):
     details: dict[str, Any] = Field(default_factory=dict)
     temperature: float
     top_p: float | None = None
-    max_output_tokens: int
+    max_output_tokens: OutputTokenSetting
 
     @computed_field
     @property

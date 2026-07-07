@@ -116,7 +116,13 @@ class ProviderHealthChecker:
     def _resolve_api_key(provider: ModelProviderConfig) -> str:
         env_name = provider.api_key_env.strip()
         if env_name:
-            return os.environ.get(env_name) or "EMPTY"
+            value = os.environ.get(env_name)
+            if value:
+                return value
+        if provider.default_api_key is not None:
+            return provider.default_api_key
+        if provider.allow_empty_api_key:
+            return "EMPTY"
         return "EMPTY"
 
     @staticmethod
