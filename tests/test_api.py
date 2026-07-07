@@ -209,6 +209,17 @@ def test_job_progress_api_reads_requested_jobs_dir(tmp_path: Path) -> None:
             role="pm",
             action="ornith_35b_q4",
             status="success",
+            metadata={
+                "model_key": "ornith_35b_q4",
+                "provider_key": "local_ornith",
+                "usage_source": "provider",
+                "prompt_tokens": 100,
+                "completion_tokens": 25,
+                "total_tokens": 125,
+                "duration_seconds": 5.0,
+                "completion_tokens_per_second": 5.0,
+                "total_tokens_per_second": 25.0,
+            },
         )
     )
     store.update(record)
@@ -234,6 +245,9 @@ def test_job_progress_api_reads_requested_jobs_dir(tmp_path: Path) -> None:
     ]
     assert payload["summary"]["pending_task_count"] == 1
     assert payload["summary"]["next_task"]["id"] == "core"
+    assert payload["model_metrics"]["model_call_count"] == 1
+    assert payload["summary"]["model_metrics"]["total_tokens"] == 125
+    assert payload["summary"]["model_metrics"]["latest_completion_tps"] == 5.0
     assert payload["recent_audit_events"] == [
         {
             "timestamp": "2026-07-04T00:00:00Z",
@@ -243,7 +257,17 @@ def test_job_progress_api_reads_requested_jobs_dir(tmp_path: Path) -> None:
             "status": "success",
             "input_hash": None,
             "output_hash": None,
-            "metadata": {},
+            "metadata": {
+                "model_key": "ornith_35b_q4",
+                "provider_key": "local_ornith",
+                "usage_source": "provider",
+                "prompt_tokens": 100,
+                "completion_tokens": 25,
+                "total_tokens": 125,
+                "duration_seconds": 5.0,
+                "completion_tokens_per_second": 5.0,
+                "total_tokens_per_second": 25.0,
+            },
         }
     ]
 

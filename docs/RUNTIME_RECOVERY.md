@@ -36,6 +36,12 @@ recovery plan. The plan is written to:
 
 The plan records the trigger, strategy, next actor, next status, checkpoint
 policy, and constraints that should be passed into the next agent context.
+Recoverable failures are also written to
+`record.runtime_state["current_recovery_event"]`,
+`record.runtime_state["last_recoverable_error"]`, and
+`record.outputs["recovery_events"]`. `record.last_error` is reserved for hard
+terminal failures such as `POLICY_HARD_STOP`, so the UI can distinguish
+"recovering with a strategy" from "stopped and needs a human".
 
 Common mappings:
 
@@ -66,6 +72,40 @@ builds a retrieval trace from:
 The selected files and reasons are exposed in
 `ContextPacket.metadata["retrieval_trace"]` and in
 `__retrieval_trace__.txt` inside the context packet.
+
+When a recovery plan sets `expand_context=True`, retrieval also searches for
+symbols and exception fragments from the failure signature, root cause, and test
+output. The trace is saved to both `record.runtime_state["retrieval_trace"]`
+and `record.outputs["retrieval_trace"]`.
+
+## RecoveryExecutor
+
+`RecoveryGovernor` writes a durable `record.runtime_state["recovery_plan"]`
+with `id`, `status`, `trigger`, `strategy`, `current_step_index`, `steps`,
+`executed_steps`, `next_actor`, `next_status`, constraints, and timestamps.
+`RecoveryExecutor` consumes these steps in order and checkpoints each step.
+
+Supported steps include diagnosis, context expansion/compaction, PRD and
+architecture revision, task replanning/splitting, returning to implementer,
+test writer, or fixer, retrying with a different strategy or escalated model,
+waiting for runtime recovery, avoiding rejected operations, and completion
+audit.
+
+`max_attempts_per_task` and `max_same_failure_repeats` are strategy-change
+triggers. They are not stop conditions.
+
+## Durable Worker
+
+`SQLiteJobStore` can persist jobs, tasks, recovery plans, checkpoints, worker
+heartbeats, leases, runtime issues, and notifications. A worker can run with:
+
+```bash
+acos-worker --repo . --sqlite-path .acos/acos.sqlite3 --forever
+```
+
+If a process crashes, expired leases and stale heartbeats are moved to
+`RECOVERING`. Provider outages move to `WAITING_RUNTIME`; provider recovery
+moves jobs to `RESUMING`.
 
 ## Safety Boundary
 

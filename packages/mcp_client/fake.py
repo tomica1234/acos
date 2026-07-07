@@ -88,9 +88,11 @@ class RepoServer:
         max_results: int = 50,
         context_lines: int = 2,
         case_sensitive: bool = False,
+        regex: bool = False,
     ) -> dict[str, object]:
         matches: list[dict[str, object]] = []
         needle = query if case_sensitive else query.lower()
+        pattern = re.compile(query, 0 if case_sensitive else re.IGNORECASE) if regex else None
         for relative_path in self.repo_tree()["files"]:
             if glob and not Path(str(relative_path)).match(glob):
                 continue
@@ -100,12 +102,16 @@ class RepoServer:
             except UnicodeDecodeError:
                 continue
             haystack = content if case_sensitive else content.lower()
-            if needle not in haystack:
+            if pattern is None and needle not in haystack:
+                continue
+            if pattern is not None and pattern.search(content) is None:
                 continue
             lines = content.splitlines()
             for index, line in enumerate(lines, start=1):
                 search_line = line if case_sensitive else line.lower()
-                if needle not in search_line:
+                if pattern is None and needle not in search_line:
+                    continue
+                if pattern is not None and pattern.search(line) is None:
                     continue
                 start = max(1, index - context_lines)
                 end = min(len(lines), index + context_lines)
@@ -137,8 +143,11 @@ class RepoServer:
         executable: bool | None = None,
     ) -> dict[str, object]:
         file_path = self._resolve(path)
-        if unified_diff is not None:
-            raise ValueError("unified_diff patches are not supported by the fake repo server yet")
+        old_content: str | None = None
+        old_sha256: str | None = None
+        if file_path.exists() and file_path.is_file():
+            old_content = file_path.read_text(encoding="utf-8")
+            old_sha256 = hashlib.sha256(file_path.read_bytes()).hexdigest()
         if base_sha256 is not None and file_path.exists():
             digest = hashlib.sha256(file_path.read_bytes()).hexdigest()
             if digest != base_sha256:
@@ -156,11 +165,18 @@ class RepoServer:
                 raise ValueError(f"create operation would overwrite existing file: {path}")
             file_path.write_text(content, encoding="utf-8")
         elif operation == "update":
-            if content is None:
-                raise ValueError("update operation requires content")
             if not file_path.exists():
-                file_path.parent.mkdir(parents=True, exist_ok=True)
-            file_path.write_text(content, encoding="utf-8")
+                raise ValueError(f"target_files_missing:update target does not exist: {path}")
+            if unified_diff is not None:
+                patched = self._apply_unified_diff(
+                    old_content if old_content is not None else "",
+                    unified_diff,
+                )
+                file_path.write_text(patched, encoding="utf-8")
+            elif content is not None:
+                file_path.write_text(content, encoding="utf-8")
+            else:
+                raise ValueError("update operation requires content or unified_diff")
         elif operation == "delete":
             if not file_path.exists():
                 raise ValueError(f"delete operation target does not exist: {path}")
@@ -186,7 +202,62 @@ class RepoServer:
             else:
                 target_path.chmod(mode & ~0o111)
         self.modified_files.add(path)
-        return {"path": path, "operation": operation, "new_path": new_path}
+        return {
+            "path": path,
+            "operation": operation,
+            "new_path": new_path,
+            "rollback": {
+                "old_sha256": old_sha256,
+                "old_content": old_content,
+            },
+        }
+
+    @staticmethod
+    def _apply_unified_diff(original: str, unified_diff: str) -> str:
+        original_lines = original.splitlines(keepends=True)
+        result: list[str] = []
+        source_index = 0
+        lines = unified_diff.splitlines(keepends=True)
+        index = 0
+        while index < len(lines):
+            line = lines[index]
+            if line.startswith(("--- ", "+++ ")):
+                index += 1
+                continue
+            if not line.startswith("@@"):
+                index += 1
+                continue
+            match = re.match(r"@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@", line)
+            if match is None:
+                raise ValueError("patch_conflict: invalid unified diff hunk")
+            old_start = int(match.group(1)) - 1
+            if old_start < source_index:
+                raise ValueError("patch_conflict: overlapping unified diff hunk")
+            result.extend(original_lines[source_index:old_start])
+            source_index = old_start
+            index += 1
+            while index < len(lines) and not lines[index].startswith("@@"):
+                hunk_line = lines[index]
+                marker = hunk_line[:1]
+                text = hunk_line[1:]
+                if marker == " ":
+                    if source_index >= len(original_lines) or original_lines[source_index] != text:
+                        raise ValueError("patch_conflict: context mismatch")
+                    result.append(original_lines[source_index])
+                    source_index += 1
+                elif marker == "-":
+                    if source_index >= len(original_lines) or original_lines[source_index] != text:
+                        raise ValueError("patch_conflict: removal mismatch")
+                    source_index += 1
+                elif marker == "+":
+                    result.append(text)
+                elif hunk_line.startswith("\\ No newline"):
+                    pass
+                else:
+                    raise ValueError("patch_conflict: unsupported unified diff line")
+                index += 1
+        result.extend(original_lines[source_index:])
+        return "".join(result)
 
 
 class GitServer:
@@ -236,6 +307,78 @@ class GitServer:
             raise ValueError("direct protected branch operation is forbidden")
         if not branch.startswith("acos/"):
             raise ValueError("branch must start with 'acos/'")
+
+
+class RealGitServer:
+    """Real git backend with protected branch and rollback safeguards."""
+
+    def __init__(self, workspace_root: str | Path, *, branch_prefix: str = "acos/") -> None:
+        self.workspace_root = Path(workspace_root).resolve()
+        self.branch_prefix = branch_prefix
+
+    def status(self) -> dict[str, object]:
+        output = self._git("status", "--porcelain=v1")
+        modified = [
+            line[3:]
+            for line in output.splitlines()
+            if len(line) >= 4 and line[:2].strip()
+        ]
+        return {"modified_files": modified, "branch": self.current_branch()["branch"]}
+
+    def diff(self) -> dict[str, object]:
+        return {"diff": self._git("diff")}
+
+    def current_branch(self) -> dict[str, object]:
+        return {"branch": self._git("rev-parse", "--abbrev-ref", "HEAD").strip()}
+
+    def create_branch(self, branch: str) -> dict[str, object]:
+        self._assert_branch_allowed(branch)
+        self._git("checkout", "-B", branch)
+        return {"branch": branch}
+
+    def commit(self, message: str, branch: str) -> dict[str, object]:
+        self._assert_branch_allowed(branch)
+        if not message.startswith("acos:"):
+            raise ValueError("commit message must start with 'acos:'")
+        current = self.current_branch()["branch"]
+        if current != branch:
+            raise ValueError(f"current branch {current} does not match requested branch {branch}")
+        self._git("add", "--all")
+        self._git("commit", "-m", message)
+        sha = self._git("rev-parse", "HEAD").strip()
+        return {"sha": sha, "message": message, "branch": branch}
+
+    def rollback_last_acos_commit(self) -> dict[str, object]:
+        message = self._git("log", "-1", "--pretty=%s").strip()
+        if not message.startswith("acos:"):
+            raise ValueError("last commit is not an ACOS commit")
+        self._git("revert", "--no-edit", "HEAD")
+        return {"reverted": True, "message": message}
+
+    def restore_file(self, path: str) -> dict[str, object]:
+        resolved = (self.workspace_root / path).resolve()
+        if self.workspace_root not in [resolved, *resolved.parents]:
+            raise ValueError("workspace escape detected")
+        self._git("restore", "--", path)
+        return {"path": path, "restored": True}
+
+    def _git(self, *args: str) -> str:
+        result = subprocess.run(
+            ["git", *args],
+            cwd=self.workspace_root,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode != 0:
+            raise RuntimeError(result.stderr.strip() or result.stdout.strip() or "git failed")
+        return result.stdout
+
+    def _assert_branch_allowed(self, branch: str) -> None:
+        if branch in {"main", "master", "develop"}:
+            raise ValueError("direct protected branch operation is forbidden")
+        if not branch.startswith(self.branch_prefix):
+            raise ValueError(f"branch must start with {self.branch_prefix!r}")
 
 
 class TestServer:

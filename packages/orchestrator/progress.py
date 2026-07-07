@@ -31,9 +31,14 @@ def summarize_job_progress(record: JobRecord) -> dict[str, Any]:
     completion_integrity = _completion_integrity(record)
     failure_analysis = _failure_analysis(record, failed_stage, recovery_history)
     failure_diagnosis = _failure_diagnosis(record)
+    model_metrics = _model_metrics(record)
     recovery_plan = record.runtime_state.get("recovery_plan")
     if not isinstance(recovery_plan, dict):
         recovery_plan = None
+    current_recovery_event = record.runtime_state.get("current_recovery_event")
+    if not isinstance(current_recovery_event, dict):
+        current_recovery_event = None
+    last_recoverable_error = _last_recoverable_error(record)
     total_tasks = len(planned_ids)
     completed_count = len([task_id for task_id in completed_task_ids if task_id in planned_id_set])
     progress_ratio = completed_count / total_tasks if total_tasks else 0.0
@@ -69,9 +74,12 @@ def summarize_job_progress(record: JobRecord) -> dict[str, Any]:
         "planning_quality": planning_quality,
         "autonomy_readiness": autonomy_readiness,
         "completion_integrity": completion_integrity,
+        "model_metrics": model_metrics,
         "execution_limits": execution_limits,
         "failure_analysis": failure_analysis,
         "recovery_plan": recovery_plan,
+        "current_recovery_event": current_recovery_event,
+        "last_recoverable_error": last_recoverable_error,
         "change_summary": change_summary,
         "last_error": record.last_error,
         "updated_at": record.updated_at.isoformat(),
@@ -79,6 +87,156 @@ def summarize_job_progress(record: JobRecord) -> dict[str, Any]:
     if failure_diagnosis is not None:
         payload["failure_diagnosis"] = failure_diagnosis
     return payload
+
+
+def _model_metrics(record: JobRecord) -> dict[str, Any]:
+    calls: list[dict[str, Any]] = []
+    total_prompt_tokens = 0
+    total_completion_tokens = 0
+    total_tokens = 0
+    weighted_completion_tokens = 0
+    weighted_duration_seconds = 0.0
+    by_role: dict[str, dict[str, Any]] = {}
+    by_model: dict[str, dict[str, Any]] = {}
+
+    for event in record.audit_events:
+        payload = _audit_event_payload(event)
+        if payload.get("event_type") != "model_call":
+            continue
+        metadata = payload.get("metadata")
+        if not isinstance(metadata, dict):
+            metadata = {}
+        role = str(payload.get("role") or "unknown")
+        model_key = str(metadata.get("model_key") or payload.get("action") or "unknown")
+        prompt_tokens = _int_metric(
+            metadata.get("prompt_tokens"),
+            metadata.get("prompt_tokens_estimate"),
+        )
+        completion_tokens = _int_metric(
+            metadata.get("completion_tokens"),
+            metadata.get("completion_tokens_estimate"),
+        )
+        call_total_tokens = _int_metric(
+            metadata.get("total_tokens"),
+            metadata.get("total_tokens_estimate"),
+        )
+        if call_total_tokens == 0:
+            call_total_tokens = prompt_tokens + completion_tokens
+        duration_seconds = _float_metric(metadata.get("duration_seconds"))
+        completion_tps = _float_metric(metadata.get("completion_tokens_per_second"))
+        total_tps = _float_metric(metadata.get("total_tokens_per_second"))
+        call = {
+            "timestamp": payload.get("timestamp"),
+            "role": role,
+            "model_key": model_key,
+            "provider_key": metadata.get("provider_key"),
+            "status": payload.get("status"),
+            "usage_source": metadata.get("usage_source") or "estimate",
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
+            "total_tokens": call_total_tokens,
+            "duration_seconds": duration_seconds,
+            "completion_tokens_per_second": completion_tps,
+            "total_tokens_per_second": total_tps,
+        }
+        calls.append(call)
+        total_prompt_tokens += prompt_tokens
+        total_completion_tokens += completion_tokens
+        total_tokens += call_total_tokens
+        if duration_seconds is not None and duration_seconds > 0 and completion_tokens > 0:
+            weighted_completion_tokens += completion_tokens
+            weighted_duration_seconds += duration_seconds
+        _add_model_metric_bucket(by_role, role, call)
+        _add_model_metric_bucket(by_model, model_key, call)
+
+    average_completion_tps = (
+        weighted_completion_tokens / weighted_duration_seconds
+        if weighted_duration_seconds > 0
+        else None
+    )
+    latest_call = calls[-1] if calls else None
+    return {
+        "model_call_count": len(calls),
+        "total_prompt_tokens": total_prompt_tokens,
+        "total_completion_tokens": total_completion_tokens,
+        "total_tokens": total_tokens,
+        "latest_call": latest_call,
+        "latest_completion_tps": (
+            latest_call.get("completion_tokens_per_second") if latest_call else None
+        ),
+        "average_completion_tps": (
+            round(average_completion_tps, 4) if average_completion_tps is not None else None
+        ),
+        "by_role": by_role,
+        "by_model": by_model,
+    }
+
+
+def _audit_event_payload(event: Any) -> dict[str, Any]:
+    if hasattr(event, "model_dump"):
+        return event.model_dump(mode="json")
+    if isinstance(event, dict):
+        return event
+    return {}
+
+
+def _int_metric(*values: Any) -> int:
+    for value in values:
+        if isinstance(value, bool):
+            continue
+        if isinstance(value, int):
+            return value
+        if isinstance(value, float):
+            return int(value)
+        if isinstance(value, str):
+            try:
+                return int(float(value))
+            except ValueError:
+                continue
+    return 0
+
+
+def _float_metric(value: Any) -> float | None:
+    if isinstance(value, bool) or value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        try:
+            return float(value)
+        except ValueError:
+            return None
+    return None
+
+
+def _add_model_metric_bucket(
+    buckets: dict[str, dict[str, Any]],
+    key: str,
+    call: dict[str, Any],
+) -> None:
+    bucket = buckets.setdefault(
+        key,
+        {
+            "model_call_count": 0,
+            "total_prompt_tokens": 0,
+            "total_completion_tokens": 0,
+            "total_tokens": 0,
+            "duration_seconds": 0.0,
+            "average_completion_tps": None,
+        },
+    )
+    bucket["model_call_count"] += 1
+    bucket["total_prompt_tokens"] += call["prompt_tokens"]
+    bucket["total_completion_tokens"] += call["completion_tokens"]
+    bucket["total_tokens"] += call["total_tokens"]
+    duration = call.get("duration_seconds")
+    if isinstance(duration, (int, float)) and duration > 0:
+        bucket["duration_seconds"] = round(bucket["duration_seconds"] + duration, 4)
+        if bucket["total_completion_tokens"] > 0:
+            bucket["average_completion_tps"] = round(
+                bucket["total_completion_tokens"] / bucket["duration_seconds"],
+                4,
+            )
 
 
 def _failure_diagnosis(record: JobRecord) -> dict[str, Any] | None:
@@ -91,6 +249,26 @@ def _failure_diagnosis(record: JobRecord) -> dict[str, Any] | None:
             if isinstance(item, dict):
                 return item
     return None
+
+
+def _last_recoverable_error(record: JobRecord) -> str | None:
+    value = record.runtime_state.get("last_recoverable_error")
+    if isinstance(value, str) and value:
+        return value
+    value = record.outputs.get("last_recoverable_error")
+    if isinstance(value, str) and value:
+        return value
+    event = record.runtime_state.get("current_recovery_event")
+    if isinstance(event, dict):
+        for key in ("error", "reason"):
+            value = event.get(key)
+            if isinstance(value, str) and value:
+                return value
+    return None
+
+
+def _effective_failure_error(record: JobRecord) -> str | None:
+    return record.last_error or _last_recoverable_error(record)
 
 
 def _planned_tasks(record: JobRecord) -> list[dict[str, Any]]:
@@ -276,6 +454,7 @@ def _resume_recommendation(
     failure_analysis: dict[str, Any],
     autonomy_readiness: dict[str, Any],
 ) -> dict[str, Any]:
+    failure_error = _effective_failure_error(record)
     if _is_policy_hard_stop(record.last_error):
         return {
             "action": "inspect_policy_hard_stop",
@@ -341,20 +520,20 @@ def _resume_recommendation(
             "action": action,
             "task_id": task_id,
             "stage": stage,
-            "reason": record.last_error,
+            "reason": failure_error,
             "can_auto_continue": True,
             "suggested_cli_args": suggested_cli_args,
             "suggested_continue_cli_args": suggested_continue_cli_args,
             **extra,
         }
     stage_limit = execution_limits.get("autonomous_stage_limit")
-    if record.last_error == "autonomous_stage_limit_reached" and isinstance(stage_limit, dict):
+    if failure_error == "autonomous_stage_limit_reached" and isinstance(stage_limit, dict):
         suggested_next_limit = stage_limit.get("suggested_next_max_autonomous_stages")
         return {
             "action": "raise_stage_limit_or_resume",
             "task_id": pending_ids[0] if pending_ids else None,
             "stage": stage_limit.get("completed_stage_count"),
-            "reason": record.last_error,
+            "reason": failure_error,
             "can_auto_continue": True,
             "limit": stage_limit,
             "suggested_max_autonomous_stages": suggested_next_limit,
@@ -370,7 +549,7 @@ def _resume_recommendation(
             "action": "improve_planning_quality",
             "task_id": None,
             "stage": None,
-            "reason": record.last_error,
+            "reason": failure_error,
             "can_auto_continue": True,
             "blocking_items": blocking_items if isinstance(blocking_items, list) else [],
             "suggested_cli_args": _resume_cli_args(record.job_id),
@@ -383,7 +562,7 @@ def _resume_recommendation(
             "action": "retry_failed_stage",
             "task_id": task_id,
             "stage": failed_stage.get("stage"),
-            "reason": record.last_error,
+            "reason": failure_error,
             "can_auto_continue": True,
             "suggested_cli_args": _resume_cli_args(record.job_id),
             "suggested_continue_cli_args": _continue_cli_args(record.job_id),
@@ -393,7 +572,7 @@ def _resume_recommendation(
             "action": "continue_next_task",
             "task_id": pending_ids[0],
             "stage": None,
-            "reason": record.last_error,
+            "reason": failure_error,
             "can_auto_continue": True,
             "suggested_cli_args": _resume_cli_args(record.job_id),
             "suggested_continue_cli_args": _continue_cli_args(record.job_id),
@@ -402,7 +581,7 @@ def _resume_recommendation(
         "action": "none",
         "task_id": None,
         "stage": None,
-        "reason": record.last_error,
+        "reason": failure_error,
         "can_auto_continue": False,
         "suggested_cli_args": [],
         "suggested_continue_cli_args": [],
@@ -416,9 +595,10 @@ def _failure_analysis(
 ) -> dict[str, Any]:
     task = failed_stage.get("task") if isinstance(failed_stage, dict) else None
     failed_task_id = task.get("id") if isinstance(task, dict) else None
-    failed_task_id = failed_task_id or _task_id_from_error(record.last_error)
+    failure_error = _effective_failure_error(record)
+    failed_task_id = failed_task_id or _task_id_from_error(failure_error)
     failed_stage_number = failed_stage.get("stage") if isinstance(failed_stage, dict) else None
-    classification = _failure_classification(record.last_error)
+    classification = _failure_classification(failure_error)
     prior_recoveries = [
         item
         for item in recovery_history
@@ -442,7 +622,7 @@ def _failure_analysis(
     )
     analysis = {
         "classification": classification,
-        "last_error": record.last_error,
+        "last_error": failure_error,
         "failure_count": record.failure_count,
         "same_test_failure_count": record.same_test_failure_count,
         "failed_task_id": failed_task_id,

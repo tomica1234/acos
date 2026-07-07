@@ -91,9 +91,57 @@ def test_agent_runner_uses_role_primary_model_and_records_audit() -> None:
     assert model_event.metadata["model_key"] == "ornith_35b_q4"
     assert model_event.metadata["provider_key"] == "local_ornith"
     assert model_event.metadata["routing_reason"] == "role_default"
+    assert model_event.metadata["usage_source"] == "estimate"
+    assert model_event.metadata["duration_seconds"] is not None
+    assert model_event.metadata["total_tokens"] == record.total_tokens_estimate
 
     serialized_audit = json.dumps([event.model_dump(mode="json") for event in audit_events])
     assert "sk-this-should-not-appear" not in serialized_audit
+
+
+def test_agent_runner_records_provider_usage_and_tps() -> None:
+    registry = load_registry()
+    attach_mock_adapter(
+        registry,
+        {
+            "pm": {
+                "content": PRD(
+                    title="ACOS",
+                    problem_statement="Track model throughput",
+                    goals=["show token metrics"],
+                ).model_dump_json(),
+                "usage": {
+                    "prompt_tokens": 120,
+                    "completion_tokens": 30,
+                    "total_tokens": 150,
+                },
+            }
+        },
+    )
+    runner, _ = _runner(registry)
+    audit_events = []
+
+    _result, _selection, record = runner.run(
+        role="pm",
+        response_model=PRD,
+        context_packet=_packet("pm"),
+        routing_context=RoutingContext(role="pm"),
+        require_json_schema=True,
+        audit_events=audit_events,
+    )
+
+    model_event = next(event for event in audit_events if event.event_type == "model_call")
+    assert record.usage_source == "provider"
+    assert record.prompt_tokens_estimate == 120
+    assert record.completion_tokens_estimate == 30
+    assert record.total_tokens_estimate == 150
+    assert record.duration_seconds is not None
+    assert record.completion_tokens_per_second is not None
+    assert model_event.metadata["usage_source"] == "provider"
+    assert model_event.metadata["prompt_tokens"] == 120
+    assert model_event.metadata["completion_tokens"] == 30
+    assert model_event.metadata["total_tokens"] == 150
+    assert model_event.metadata["completion_tokens_per_second"] is not None
 
 
 def test_agent_runner_retries_transient_timeout_without_fallback() -> None:

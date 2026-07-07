@@ -174,6 +174,8 @@ limits are treated as recoverable strategy-change events. The job record stores
 `autonomous_recovery_plan` and `pm_interventions` so the next agent context sees
 why ACOS changed approach. Only `policy_hard_stop:*` style errors require human
 inspection.
+Recoverable errors are surfaced as `current_recovery_event` and
+`last_recoverable_error`; `last_error` is reserved for hard-stop conditions.
 Use `plan-job` when you want ACOS to spend a separate pass on PRD, architecture,
 task graph validation, and planning evidence before any implementation patches
 are applied. A successful planning run remains resumable through `continue-job`
@@ -306,7 +308,24 @@ python -m apps.cli run-demo --workspace /tmp/acos-demo
 ACOS writes recovery plans to job runtime state when tests, quality gates,
 reviews, or required artifacts fail. The next worker cycle uses that plan as
 agent context and changes strategy instead of repeating the same fixer loop.
+Recoverable failures are tracked in recovery events, while `last_error` is kept
+for policy hard stops and other hard terminal failures.
 See [docs/RUNTIME_RECOVERY.md](docs/RUNTIME_RECOVERY.md).
+
+Hard terminal statuses are only `DONE`, `CANCELLED`, and
+`POLICY_HARD_STOP`. `BLOCKED`, `STUCK`, and `FAILED` are recoverable signals:
+the worker moves them through `RECOVERING`, asks `RecoveryGovernor` for a plan,
+and `RecoveryExecutor` consumes the plan before normal execution resumes.
+
+Durable execution can use `SQLiteJobStore`:
+
+```bash
+acos-worker --repo . --sqlite-path .acos/acos.sqlite3 --forever
+```
+
+Provider outages move jobs to `WAITING_RUNTIME`; once the provider health check
+passes, the runtime manager changes the job to `RESUMING` for automatic worker
+pickup.
 
 ## Current Limitations
 
@@ -314,6 +333,8 @@ See [docs/RUNTIME_RECOVERY.md](docs/RUNTIME_RECOVERY.md).
 - the Docker sandbox runner is structural only
 - OpenAI-compatible integration is implemented, but tests do not call real APIs
 - branch and patch handling are safe MVP abstractions, not full git-native automation
+- API mutation auth is enabled when `ACOS_API_TOKEN` is set; local dev can opt
+  out with `ACOS_LOCAL_DEV_AUTH_DISABLED=1`
 
 See [docs/QUICKSTART.md](/Users/tachibanashunta/wip/acos/docs/QUICKSTART.md) for
 setup details.

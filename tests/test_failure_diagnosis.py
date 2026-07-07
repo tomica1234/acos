@@ -146,7 +146,11 @@ def test_run_tests_with_fixes_passes_diagnosis_to_fixer_and_stores_threshold(
 
     assert result is failing_result
     assert record.status == JobStatus.DIAGNOSING
-    assert record.last_error == "same_failure_threshold_reached"
+    assert record.last_error is None
+    assert record.runtime_state["last_recoverable_error"] == "same_failure_threshold_reached"
+    assert record.runtime_state["current_recovery_event"]["error"] == (
+        "same_failure_threshold_reached"
+    )
     assert record.outputs["failure_diagnosis"]["root_cause"] == (
         "VALUE remains 0 while the test expects 1"
     )

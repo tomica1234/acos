@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from enum import Enum
 from typing import Any
 
@@ -64,6 +65,8 @@ class FailureRetryMode(str, Enum):
 
 class JobStatus(str, Enum):
     SUBMITTED = "submitted"
+    QUEUED = "queued"
+    RUNNING = "running"
     ANALYZING = "analyzing"
     DESIGNING = "designing"
     PLANNING = "planning"
@@ -79,6 +82,10 @@ class JobStatus(str, Enum):
     FINALIZING = "finalizing"
     WAITING_APPROVAL = "waiting_approval"
     WAITING_RUNTIME = "waiting_runtime"
+    PROVIDER_UNAVAILABLE = "provider_unavailable"
+    PAUSED = "paused"
+    RESUMING = "resuming"
+    RETRYING_PROVIDER = "retrying_provider"
     DONE = "done"
     CANCELLED = "cancelled"
     POLICY_HARD_STOP = "policy_hard_stop"
@@ -298,6 +305,12 @@ class ModelCallRecord(BaseModel):
     prompt_tokens_estimate: int
     completion_tokens_estimate: int
     total_tokens_estimate: int
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
+    duration_seconds: float | None = None
+    usage_source: str = "estimate"
+    completion_tokens_per_second: float | None = None
+    total_tokens_per_second: float | None = None
     error: str | None = None
 
     @computed_field

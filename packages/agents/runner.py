@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import json
 import re
+from datetime import datetime, timezone
 from hashlib import sha256
+from time import perf_counter
 from typing import Any, TypeVar
 
 from pydantic import BaseModel, ValidationError
@@ -145,6 +147,8 @@ class AgentRunner:
             if audit_events is not None:
                 audit_events.append(self.audit_recorder.selection_event(role, selection))
             adapter = self._get_adapter(selection.model_key)
+            started_at = datetime.now(timezone.utc)
+            start_seconds = perf_counter()
             try:
                 result = adapter.generate(
                     messages=messages,
@@ -161,12 +165,16 @@ class AgentRunner:
                     },
                 )
             except AdapterError as exc:
+                finished_at = datetime.now(timezone.utc)
                 record = self._build_model_record(
                     role=role,
                     selection=selection,
                     messages=messages,
                     result=None,
                     error=exc.code,
+                    started_at=started_at,
+                    finished_at=finished_at,
+                    duration_seconds=perf_counter() - start_seconds,
                 )
                 if audit_events is not None:
                     audit_events.append(self.audit_recorder.model_event(record, selection))
@@ -217,12 +225,16 @@ class AgentRunner:
                     continue
                 raise
 
+            finished_at = datetime.now(timezone.utc)
             record = self._build_model_record(
                 role=role,
                 selection=selection,
                 messages=messages,
                 result=result,
                 error=None,
+                started_at=started_at,
+                finished_at=finished_at,
+                duration_seconds=perf_counter() - start_seconds,
             )
             last_selection = selection
             last_record = record
@@ -391,6 +403,9 @@ class AgentRunner:
         messages: list[dict[str, Any]],
         result: ModelResult | None,
         error: str | None,
+        started_at: datetime | None = None,
+        finished_at: datetime | None = None,
+        duration_seconds: float | None = None,
     ) -> ModelCallRecord:
         status = ModelCallStatus.SUCCESS
         if error is not None:
@@ -399,7 +414,12 @@ class AgentRunner:
             status = ModelCallStatus.FALLBACK_USED
         elif selection.reason.value == "escalation":
             status = ModelCallStatus.ESCALATED
-        prompt_tokens_estimate = sum(len(str(item)) for item in messages) // 4
+        estimated_prompt_tokens = sum(len(str(item)) for item in messages) // 4
+        prompt_tokens_estimate = (
+            result.usage.get("prompt_tokens", estimated_prompt_tokens)
+            if result is not None and result.usage is not None
+            else estimated_prompt_tokens
+        )
         completion_tokens_estimate = (
             result.usage.get("completion_tokens", len(result.content) // 4)
             if result is not None and result.usage is not None
@@ -409,6 +429,20 @@ class AgentRunner:
             result.usage.get("total_tokens", prompt_tokens_estimate + completion_tokens_estimate)
             if result is not None and result.usage is not None
             else prompt_tokens_estimate + completion_tokens_estimate
+        )
+        safe_duration = (
+            max(float(duration_seconds), 0.0) if duration_seconds is not None else None
+        )
+        usage_source = "provider" if result is not None and result.usage is not None else "estimate"
+        completion_tps = (
+            completion_tokens_estimate / safe_duration
+            if safe_duration and completion_tokens_estimate > 0
+            else None
+        )
+        total_tps = (
+            total_tokens_estimate / safe_duration
+            if safe_duration and total_tokens_estimate > 0
+            else None
         )
         output_payload: dict[str, Any] = (
             result.model_dump() if result is not None else {"error": error or "adapter_error"}
@@ -423,6 +457,14 @@ class AgentRunner:
             prompt_tokens_estimate=prompt_tokens_estimate,
             completion_tokens_estimate=completion_tokens_estimate,
             total_tokens_estimate=total_tokens_estimate,
+            started_at=started_at,
+            finished_at=finished_at,
+            duration_seconds=round(safe_duration, 4) if safe_duration is not None else None,
+            usage_source=usage_source,
+            completion_tokens_per_second=(
+                round(completion_tps, 4) if completion_tps is not None else None
+            ),
+            total_tokens_per_second=round(total_tps, 4) if total_tps is not None else None,
             error=error,
         )
 

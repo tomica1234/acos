@@ -45,6 +45,17 @@ class AuditRecorder:
                     "routing_details": selection.details,
                     "provider": record.provider,
                     "error": record.error,
+                    "started_at": record.started_at.isoformat() if record.started_at else None,
+                    "finished_at": (
+                        record.finished_at.isoformat() if record.finished_at else None
+                    ),
+                    "duration_seconds": record.duration_seconds,
+                    "usage_source": record.usage_source,
+                    "prompt_tokens": record.prompt_tokens_estimate,
+                    "completion_tokens": record.completion_tokens_estimate,
+                    "total_tokens": record.total_tokens_estimate,
+                    "completion_tokens_per_second": record.completion_tokens_per_second,
+                    "total_tokens_per_second": record.total_tokens_per_second,
                     "prompt_tokens_estimate": record.prompt_tokens_estimate,
                     "completion_tokens_estimate": record.completion_tokens_estimate,
                     "total_tokens_estimate": record.total_tokens_estimate,

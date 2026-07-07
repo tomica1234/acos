@@ -18,6 +18,7 @@ from packages.llm.routing import ModelRouter, RoutingContext
 from packages.mcp_client.fake import FakeMCPEnvironment
 from packages.mcp_client.router import MCPRouter
 from packages.orchestrator.audit import AuditRecorder
+from packages.orchestrator.completion_verifier import DefinitionOfDoneVerifier
 from packages.orchestrator.context_builder import ContextBuilder
 from packages.orchestrator.job_store import InMemoryJobStore
 from packages.orchestrator.policy import PolicyEngine
@@ -27,6 +28,7 @@ from packages.orchestrator.quality_gates import (
     ensure_fixer_safe,
     ensure_reviews_pass,
 )
+from packages.orchestrator.recovery_executor import RecoveryExecutor
 from packages.orchestrator.recovery_governor import (
     RecoveryGovernor,
     is_hard_terminal_status,
@@ -94,7 +96,9 @@ class JobRunner:
         self.store = store or InMemoryJobStore()
         self.audit = AuditRecorder()
         self.context_builder = ContextBuilder()
+        self.completion_verifier = DefinitionOfDoneVerifier()
         self.recovery_governor = RecoveryGovernor()
+        self.recovery_executor = RecoveryExecutor(self.store)
         self.model_router = ModelRouter(registry)
         self.llm_client = LLMClient(registry, self.model_router)
         self.agent_runner = AgentRunner(
@@ -127,6 +131,29 @@ class JobRunner:
         record = self.store.get(job_id)
         return self._run_record(record, resume=True)
 
+    def run_until_done_or_hard_stop(
+        self,
+        spec_or_job_id: JobSpec | str,
+        *,
+        max_cycles: int = 1000,
+    ) -> JobRecord:
+        """Resume through recoverable failures until DONE, CANCELLED, hard stop, or wait."""
+
+        if isinstance(spec_or_job_id, JobSpec):
+            record = self.run_job(spec_or_job_id)
+        else:
+            record = self.resume_job(spec_or_job_id)
+        cycles = 0
+        while (
+            not self._is_terminal_status(record.status)
+            and not self._is_waiting_status(record.status)
+            and cycles < max_cycles
+        ):
+            cycles += 1
+            record = self.resume_job(record.job_id)
+        record.runtime_state["run_until_done_or_hard_stop_cycles"] = cycles
+        return self.store.update(record)
+
     def _plan_record(self, record: JobRecord, *, resume: bool) -> JobRecord:
         self._active_record = record
         try:
@@ -135,6 +162,8 @@ class JobRunner:
             if resume and self._recover_record_if_needed(record):
                 if self._is_terminal_status(record.status) or self._is_waiting_status(record.status):
                     return self.store.update(record)
+            if resume:
+                self._consume_completed_recovery_plan(record)
             if not resume:
                 self._prepare_branch(record)
             prd = self._load_or_refine_prd_for_autonomy(record)
@@ -169,8 +198,7 @@ class JobRunner:
             self._recover_record(record, error=str(exc))
             return self.store.update(record)
         except Exception as exc:  # pragma: no cover - top-level safety net
-            record.status = JobStatus.FAILED
-            record.last_error = str(exc)
+            self._recover_record(record, error=str(exc))
             return self.store.update(record)
         finally:
             self._active_record = None
@@ -183,6 +211,8 @@ class JobRunner:
             if resume and self._recover_record_if_needed(record):
                 if self._is_terminal_status(record.status) or self._is_waiting_status(record.status):
                     return self.store.update(record)
+            if resume:
+                self._consume_completed_recovery_plan(record)
             if not resume:
                 self._prepare_branch(record)
             prd = self._load_or_refine_prd_for_autonomy(record)
@@ -222,12 +252,14 @@ class JobRunner:
             if self._has_pending_recovery_plan(record):
                 return self.store.update(record)
             if record.status in {JobStatus.STUCK, JobStatus.BLOCKED, JobStatus.FAILED}:
+                self._recover_record(record, error=record.last_error)
                 return self.store.update(record)
             if not self._constraint_flag(record, "skip_review"):
                 review, security_review = self._run_review_cycle(record, primary_task)
                 if self._has_pending_recovery_plan(record):
                     return self.store.update(record)
                 if record.status in {JobStatus.STUCK, JobStatus.BLOCKED, JobStatus.FAILED}:
+                    self._recover_record(record, error=record.last_error)
                     return self.store.update(record)
                 test_result = self._run_tests_with_fixes(record, primary_task)
                 if self._has_pending_recovery_plan(record):
@@ -236,6 +268,7 @@ class JobRunner:
                 if record.status != JobStatus.TESTING:
                     apply_transition(record, JobStatus.REVIEWING)
             if record.status in {JobStatus.STUCK, JobStatus.BLOCKED, JobStatus.FAILED}:
+                self._recover_record(record, error=record.last_error)
                 return self.store.update(record)
             if not test_result.success:
                 self._recover_record(record, error="max_attempts_exceeded")
@@ -294,8 +327,7 @@ class JobRunner:
             self._recover_record(record, error=str(exc))
             return self.store.update(record)
         except Exception as exc:  # pragma: no cover - top-level safety net
-            record.status = JobStatus.FAILED
-            record.last_error = str(exc)
+            self._recover_record(record, error=str(exc))
             return self.store.update(record)
         finally:
             self._active_record = None
@@ -357,6 +389,9 @@ class JobRunner:
             error=error,
             runtime_state=runtime_state,
         )
+        if not hasattr(self, "recovery_executor"):
+            self.recovery_executor = RecoveryExecutor(self.store)
+        self.recovery_executor.execute_until_ready(record)
         self.store.update(record)
 
     def _recover_record_if_needed(self, record: JobRecord) -> bool:
@@ -370,8 +405,24 @@ class JobRunner:
         plan = record.runtime_state.get("recovery_plan")
         if not isinstance(plan, dict):
             return False
+        if plan.get("status") == "completed" and plan.get("consumed_by_runner") is True:
+            return False
         next_status = plan.get("next_status")
         return isinstance(next_status, str) and record.status.value == next_status
+
+    @staticmethod
+    def _consume_completed_recovery_plan(record: JobRecord) -> None:
+        plan = record.runtime_state.get("recovery_plan")
+        if isinstance(plan, dict) and plan.get("status") == "completed":
+            plan["consumed_by_runner"] = True
+
+    def _should_pause_for_recovery(self, record: JobRecord) -> bool:
+        return (
+            self._has_pending_recovery_plan(record)
+            or self._is_recoverable_status(record.status)
+            or self._is_terminal_status(record.status)
+            or self._is_waiting_status(record.status)
+        )
 
     @staticmethod
     def _quality_gate_recovery_error(exc: QualityGateError) -> str:
@@ -563,6 +614,40 @@ class JobRunner:
                     for path in self._prioritized_context_files(repo_files):
                         add_candidate(path, "repo_map.priority")
 
+        if (
+            record is not None
+            and self._constraints(record).get("expand_context") is True
+            and self.policy.is_tool_allowed(role, "repo_server.search_text")
+        ):
+            for query in self._context_search_queries(record)[:4]:
+                try:
+                    search_payload = self._call_tool(
+                        role,
+                        "repo_server.search_text",
+                        query=query,
+                        max_results=8,
+                        context_lines=2,
+                    )
+                except Exception as exc:
+                    trace.append(
+                        {
+                            "path": "__search__",
+                            "reason": f"search:{query}",
+                            "action": f"skipped:{exc}",
+                        }
+                    )
+                    continue
+                for match in search_payload.get("matches", []):
+                    if isinstance(match, dict):
+                        add_candidate(match.get("path"), f"search:{query}")
+                        trace.append(
+                            {
+                                "path": str(match.get("path", "")),
+                                "reason": f"search:{query}",
+                                "action": f"search_hit:{match.get('line_number')}",
+                            }
+                        )
+
         agent_cfg = self.registry.get_agent(role)
         max_files = self._context_file_budget(agent_cfg.context_budget_tokens)
         candidates = self._prioritized_context_files(
@@ -610,6 +695,7 @@ class JobRunner:
             )
             if record is not None:
                 record.runtime_state["retrieval_trace"] = trace[-100:]
+                record.outputs["retrieval_trace"] = trace[-100:]
         return files
 
     @staticmethod
@@ -687,6 +773,15 @@ class JobRunner:
         texts: list[str] = []
         if isinstance(record.last_error, str):
             texts.append(record.last_error)
+        recoverable_error = record.runtime_state.get("last_recoverable_error")
+        if isinstance(recoverable_error, str):
+            texts.append(recoverable_error)
+        recovery_event = record.runtime_state.get("current_recovery_event")
+        if isinstance(recovery_event, dict):
+            for key in ("error", "reason"):
+                value = recovery_event.get(key)
+                if isinstance(value, str):
+                    texts.append(value)
         test_run = record.outputs.get("test_run")
         if isinstance(test_run, dict):
             output_excerpt = test_run.get("output_excerpt")
@@ -705,6 +800,35 @@ class JobRunner:
                     ):
                         texts.append(str(test_payload["output_excerpt"]))
         return texts
+
+    def _context_search_queries(self, record: JobRecord) -> list[str]:
+        queries: list[str] = []
+        diagnosis = record.outputs.get("failure_diagnosis")
+        if isinstance(diagnosis, dict):
+            for key in ("failure_signature", "root_cause", "recommended_fix_strategy"):
+                value = diagnosis.get(key)
+                if isinstance(value, str) and value.strip():
+                    queries.extend(self._terms_from_failure_text(value))
+        for text in self._failure_context_texts(record):
+            queries.extend(self._terms_from_failure_text(text))
+        return list(dict.fromkeys(query for query in queries if query.strip()))
+
+    @staticmethod
+    def _terms_from_failure_text(text: str) -> list[str]:
+        terms: list[str] = []
+        for pattern in (
+            r"cannot import name ['\"]([^'\"]+)['\"]",
+            r"No module named ['\"]([^'\"]+)['\"]",
+            r"NameError: name ['\"]([^'\"]+)['\"]",
+            r"AttributeError: .* has no attribute ['\"]([^'\"]+)['\"]",
+            r"([A-Za-z_][A-Za-z0-9_]{2,})",
+        ):
+            for match in re.findall(pattern, text):
+                if isinstance(match, tuple):
+                    match = next((item for item in match if item), "")
+                if isinstance(match, str) and len(match) >= 3:
+                    terms.append(match)
+        return terms[:8]
 
     @staticmethod
     def _prioritized_context_files(paths: list[str], limit: int = 40) -> list[str]:
@@ -1108,8 +1232,10 @@ class JobRunner:
                 self.store.update(record)
                 return current_prd
 
-        record.status = JobStatus.BLOCKED
-        record.last_error = "prd_quality_gate_failed:" + ",".join(report["missing"])
+        self._recover_record(
+            record,
+            error="prd_quality_gate_failed:" + ",".join(report["missing"]),
+        )
         self.store.update(record)
         return None
 
@@ -1408,8 +1534,7 @@ class JobRunner:
                 self.store.update(record)
                 return task_graph
 
-        record.status = JobStatus.BLOCKED
-        record.last_error = "invalid_task_graph"
+        self._recover_record(record, error="invalid_task_graph")
         self.store.update(record)
         return None
 
@@ -1452,8 +1577,7 @@ class JobRunner:
         if validation["valid"]:
             self.store.update(record)
             return True
-        record.status = JobStatus.BLOCKED
-        record.last_error = "invalid_task_graph"
+        self._recover_record(record, error="invalid_task_graph")
         self.store.update(record)
         return False
 
@@ -1675,7 +1799,7 @@ class JobRunner:
                     implementation_results=implementation_results,
                     test_writer_results=test_writer_results,
                 )
-                if record.status in {JobStatus.BLOCKED, JobStatus.FAILED}:
+                if self._should_pause_for_recovery(record):
                     return implementation_results, test_writer_results, last_test_result, stage_results
                 stage_test_results = [item[1] for item in stage_test_pairs]
                 if stage_test_results:
@@ -1704,7 +1828,7 @@ class JobRunner:
                     }
                     stage_results.append(stage_result)
                     self._record_stage_checkpoint(record, stage_result)
-                    if record.status == JobStatus.STUCK or not last_test_result.success:
+                    if self._should_pause_for_recovery(record) or not last_test_result.success:
                         return (
                             implementation_results,
                             test_writer_results,
@@ -1725,7 +1849,7 @@ class JobRunner:
                     implementation_results=implementation_results,
                     test_writer_results=test_writer_results,
                 )
-                if record.status in {JobStatus.BLOCKED, JobStatus.FAILED}:
+                if self._should_pause_for_recovery(record):
                     return implementation_results, test_writer_results, last_test_result, stage_results
                 stage_test_results = [item[1] for item in stage_test_pairs]
                 if not stage_test_results:
@@ -1737,7 +1861,7 @@ class JobRunner:
                     )
                     test_writer_results.append(test_writer)
                     stage_test_results.append(test_writer)
-                    if record.status in {JobStatus.BLOCKED, JobStatus.FAILED}:
+                    if self._should_pause_for_recovery(record):
                         return (
                             implementation_results,
                             test_writer_results,
@@ -1764,13 +1888,13 @@ class JobRunner:
                 }
                 stage_results.append(stage_result)
                 self._record_stage_checkpoint(record, stage_result)
-                if record.status == JobStatus.STUCK or not last_test_result.success:
+                if self._should_pause_for_recovery(record) or not last_test_result.success:
                     return implementation_results, test_writer_results, last_test_result, stage_results
                 stage_review = self._run_stage_review_gate(record, task)
                 if stage_review is not None:
                     stage_result["stage_review"] = stage_review
                     self.store.update(record)
-                    if record.status in {JobStatus.STUCK, JobStatus.BLOCKED, JobStatus.FAILED}:
+                    if self._should_pause_for_recovery(record):
                         return implementation_results, test_writer_results, last_test_result, stage_results
                     last_test_result = self._run_tests_with_fixes(
                         record,
@@ -1780,7 +1904,7 @@ class JobRunner:
                     stage_result["post_review_test_run"] = last_test_result.model_dump()
                     self.store.update(record)
                     if (
-                        record.status in {JobStatus.STUCK, JobStatus.BLOCKED, JobStatus.FAILED}
+                        self._should_pause_for_recovery(record)
                         or not last_test_result.success
                     ):
                         return implementation_results, test_writer_results, last_test_result, stage_results
@@ -1795,8 +1919,10 @@ class JobRunner:
                 dependency for dependency in task.depends_on if dependency not in completed_task_ids
             ]
             if unmet_dependencies:
-                record.status = JobStatus.STUCK
-                record.last_error = f"unmet_task_dependencies:{','.join(unmet_dependencies)}"
+                self._recover_record(
+                    record,
+                    error=f"unmet_task_dependencies:{','.join(unmet_dependencies)}",
+                )
                 return implementation_results, test_writer_results, last_test_result, stage_results
             implementation = self._run_structured_role(
                 record,
@@ -1821,7 +1947,7 @@ class JobRunner:
                 implementation_results=implementation_results,
                 test_writer_results=test_writer_results,
             )
-            if record.status in {JobStatus.BLOCKED, JobStatus.FAILED}:
+            if self._should_pause_for_recovery(record):
                 return implementation_results, test_writer_results, last_test_result, stage_results
             stage_test_results = [item[1] for item in stage_test_pairs]
             if not stage_test_results:
@@ -1833,7 +1959,7 @@ class JobRunner:
                 )
                 test_writer_results.append(test_writer)
                 stage_test_results.append(test_writer)
-                if record.status in {JobStatus.BLOCKED, JobStatus.FAILED}:
+                if self._should_pause_for_recovery(record):
                     return implementation_results, test_writer_results, last_test_result, stage_results
             last_test_result = self._run_tests_with_fixes(
                 record,
@@ -1855,13 +1981,13 @@ class JobRunner:
             }
             stage_results.append(stage_result)
             self._record_stage_checkpoint(record, stage_result)
-            if record.status == JobStatus.STUCK or not last_test_result.success:
+            if self._should_pause_for_recovery(record) or not last_test_result.success:
                 return implementation_results, test_writer_results, last_test_result, stage_results
             stage_review = self._run_stage_review_gate(record, task)
             if stage_review is not None:
                 stage_result["stage_review"] = stage_review
                 self.store.update(record)
-                if record.status in {JobStatus.STUCK, JobStatus.BLOCKED, JobStatus.FAILED}:
+                if self._should_pause_for_recovery(record):
                     return implementation_results, test_writer_results, last_test_result, stage_results
                 last_test_result = self._run_tests_with_fixes(
                     record,
@@ -1871,7 +1997,7 @@ class JobRunner:
                 stage_result["post_review_test_run"] = last_test_result.model_dump()
                 self.store.update(record)
                 if (
-                    record.status in {JobStatus.STUCK, JobStatus.BLOCKED, JobStatus.FAILED}
+                    self._should_pause_for_recovery(record)
                     or not last_test_result.success
                 ):
                     return implementation_results, test_writer_results, last_test_result, stage_results
@@ -1893,7 +2019,7 @@ class JobRunner:
                 test_writer_results,
             )
             test_writer_results.append(test_writer)
-            if record.status in {JobStatus.BLOCKED, JobStatus.FAILED}:
+            if self._should_pause_for_recovery(record):
                 return implementation_results, test_writer_results, last_test_result, stage_results
             last_test_result = self._run_tests_with_fixes(record, task, logs=[test_writer.summary])
             if self._autonomous_stage_limit_reached(record, stage_results):
@@ -1911,7 +2037,7 @@ class JobRunner:
             }
             stage_results.append(stage_result)
             self._record_stage_checkpoint(record, stage_result)
-            if record.status == JobStatus.STUCK or not last_test_result.success:
+            if self._should_pause_for_recovery(record) or not last_test_result.success:
                 return implementation_results, test_writer_results, last_test_result, stage_results
             self._mark_task_completed(record, task.id)
             completed_task_ids.add(task.id)
@@ -1954,7 +2080,7 @@ class JobRunner:
             }
             stage_results.append(stage_result)
             self._record_stage_checkpoint(record, stage_result)
-            if record.status == JobStatus.STUCK or not last_test_result.success:
+            if self._should_pause_for_recovery(record) or not last_test_result.success:
                 return implementation_results, test_writer_results, last_test_result, stage_results
             if primary_task is not None:
                 self._mark_task_completed(record, primary_task.id)
@@ -1994,7 +2120,7 @@ class JobRunner:
             )
             test_writer_results.append(test_writer)
             results.append((task, test_writer))
-            if record.status in {JobStatus.BLOCKED, JobStatus.FAILED}:
+            if self._should_pause_for_recovery(record):
                 break
             ready_task_ids.add(task.id)
         return results
@@ -2522,11 +2648,9 @@ class JobRunner:
             return True
         task_id = task.id if task is not None else "unplanned"
         if implementation.status == ImplementationStatus.BLOCKED:
-            record.status = JobStatus.BLOCKED
-            record.last_error = f"implementation_blocked:{task_id}"
+            self._recover_record(record, error=f"implementation_blocked:{task_id}")
         else:
-            record.status = JobStatus.FAILED
-            record.last_error = f"implementation_failed:{task_id}"
+            self._recover_record(record, error=f"implementation_failed:{task_id}")
         self.store.update(record)
         return False
 
@@ -2540,11 +2664,9 @@ class JobRunner:
             return True
         task_id = task.id if task is not None else "unplanned"
         if test_writer.status == TestWriterStatus.BLOCKED:
-            record.status = JobStatus.BLOCKED
-            record.last_error = f"test_writer_blocked:{task_id}"
+            self._recover_record(record, error=f"test_writer_blocked:{task_id}")
         else:
-            record.status = JobStatus.FAILED
-            record.last_error = f"test_writer_failed:{task_id}"
+            self._recover_record(record, error=f"test_writer_failed:{task_id}")
         self.store.update(record)
         return False
 
@@ -2558,11 +2680,9 @@ class JobRunner:
             return True
         task_id = task.id if task is not None else "unplanned"
         if fix.status == FixStatus.STUCK:
-            record.status = JobStatus.STUCK
-            record.last_error = f"fixer_stuck:{task_id}"
+            self._recover_record(record, error=f"fixer_stuck:{task_id}")
         else:
-            record.status = JobStatus.FAILED
-            record.last_error = f"fixer_failed:{task_id}"
+            self._recover_record(record, error=f"fixer_failed:{task_id}")
         self.store.update(record)
         return False
 
@@ -2719,6 +2839,11 @@ class JobRunner:
             ),
         )
         record.outputs["completion_integrity"] = report
+        dod = self.completion_verifier.verify(record)
+        if not dod.passed:
+            report["passed"] = False
+            report["failure_reasons"].extend(dod.missing_evidence)
+            report["unresolved_findings"] = dod.unresolved_findings
         if report["passed"]:
             self.store.update(record)
             return True
@@ -2882,8 +3007,20 @@ class JobRunner:
         max_stages = self._constraint_int(record, "max_autonomous_stages", 0)
         if not max_stages or len(stage_results) < max_stages:
             return False
-        record.status = JobStatus.BLOCKED
-        record.last_error = "autonomous_stage_limit_reached"
+        if not self._constraint_flag(record, "max_autonomous_stages_hard"):
+            constraints = record.spec.metadata.setdefault("constraints", {})
+            if isinstance(constraints, dict):
+                bumped = max(max_stages + 16, max_stages * 2, 64)
+                constraints["max_autonomous_stages"] = bumped
+                record.outputs["autonomous_stage_limit"] = {
+                    "max_autonomous_stages": max_stages,
+                    "bumped_to": bumped,
+                    "completed_stage_count": len(stage_results),
+                    "recovery_action": "auto_bump_stage_limit",
+                }
+                self.store.update(record)
+                return False
+        self._recover_record(record, error="autonomous_stage_limit_reached")
         record.outputs["autonomous_stage_limit"] = {
             "max_autonomous_stages": max_stages,
             "completed_stage_count": len(stage_results),

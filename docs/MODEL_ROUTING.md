@@ -147,8 +147,15 @@ Roles that require strict JSON may only use models that support:
 - PM and Architect use `ornith_35b_q4` for long-context planning.
 - Implementer, Test Writer, Reviewer, Fixer, Release Manager, and Summarizer all
   route to the same local Ornith model by default.
-- Repeated-failure escalation still records an escalation decision, even when
-  the configured escalated model is the same local Ornith model.
+- Repeated-failure escalation must route to a different configured model.
+  `ModelRegistry.validate` rejects no-op escalation where
+  `escalated_model == primary_model`.
+- The default escalation target is `ncmoe40_q4`, allowing recovery to switch
+  away from `ornith_35b_q4` for repeated failures.
+
+Recovery constraints can force model escalation, long-context retrieval, JSON
+repair retries, or smaller structured-output retries. Provider outages are
+runtime waits, not job failures.
 
 ## Audit Expectations
 

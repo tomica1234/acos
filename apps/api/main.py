@@ -4,13 +4,15 @@ from __future__ import annotations
 
 import threading
 import uuid
+import os
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 import uvicorn
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, field_validator
 
 from apps.cli import (
@@ -103,9 +105,14 @@ class ProviderProbeRequest(BaseModel):
 
 def create_app(job_runner: JobRunner | None = None) -> FastAPI:
     app = FastAPI(title="ACOS API", version="0.1.0")
+    cors_origins = [
+        origin.strip()
+        for origin in os.environ.get("ACOS_CORS_ALLOW_ORIGINS", "*").split(",")
+        if origin.strip()
+    ]
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["*"],
+        allow_origins=cors_origins,
         allow_credentials=False,
         allow_methods=["*"],
         allow_headers=["*"],
@@ -118,6 +125,15 @@ def create_app(job_runner: JobRunner | None = None) -> FastAPI:
         workspace_root=Path("."),
     )[0]
     config_dir = Path(__file__).resolve().parents[2] / "configs"
+    rate_limit: dict[str, list[float]] = {}
+
+    @app.middleware("http")
+    async def _security_middleware(request: Request, call_next):
+        if request.method in {"POST", "PUT", "PATCH", "DELETE"}:
+            error = _authorize_mutation(request)
+            if error is not None:
+                return error
+        return await call_next(request)
 
     def get_runner() -> JobRunner:
         runner = app.state.job_runner
@@ -128,6 +144,49 @@ def create_app(job_runner: JobRunner | None = None) -> FastAPI:
 
     def _now_iso() -> str:
         return datetime.now(timezone.utc).isoformat()
+
+    def _authorize_mutation(request: Request) -> JSONResponse | None:
+        token = os.environ.get("ACOS_API_TOKEN")
+        dev_disabled = os.environ.get("ACOS_LOCAL_DEV_AUTH_DISABLED", "1").lower() in {
+            "1",
+            "true",
+            "yes",
+        }
+        if not dev_disabled and not token:
+            return JSONResponse(
+                {"detail": "ACOS_API_TOKEN must be configured or local dev auth disabled explicitly"},
+                status_code=503,
+            )
+        if token:
+            provided = request.headers.get("x-acos-api-token")
+            auth = request.headers.get("authorization", "")
+            bearer = auth.removeprefix("Bearer ").strip() if auth.startswith("Bearer ") else None
+            if provided != token and bearer != token:
+                return JSONResponse({"detail": "unauthorized"}, status_code=401)
+        key = request.client.host if request.client else "unknown"
+        now = datetime.now(timezone.utc).timestamp()
+        bucket = [item for item in rate_limit.get(key, []) if now - item < 60]
+        bucket.append(now)
+        rate_limit[key] = bucket
+        max_per_minute = int(os.environ.get("ACOS_RATE_LIMIT_PER_MINUTE", "120"))
+        if len(bucket) > max_per_minute:
+            return JSONResponse({"detail": "rate limit exceeded"}, status_code=429)
+        return None
+
+    def _assert_repo_allowed(repo_path: str) -> None:
+        allowlist = [
+            item.strip()
+            for item in os.environ.get("ACOS_REPO_ALLOWLIST", "").split(os.pathsep)
+            if item.strip()
+        ]
+        if not allowlist:
+            return
+        resolved = Path(repo_path).resolve()
+        for root in allowlist:
+            allowed = Path(root).resolve()
+            if allowed in [resolved, *resolved.parents]:
+                return
+        raise HTTPException(status_code=403, detail="repo path is outside ACOS_REPO_ALLOWLIST")
 
     def _update_background_run(run_id: str, **updates: Any) -> dict[str, Any]:
         with app.state.background_run_lock:
@@ -288,6 +347,7 @@ def create_app(job_runner: JobRunner | None = None) -> FastAPI:
 
     @app.post("/jobs", response_model=JobRecord)
     def submit_job(payload: SubmitJobRequest) -> JobRecord:
+        _assert_repo_allowed(payload.repo_path)
         spec = JobSpec(
             request_text=payload.request_text,
             repo_path=payload.repo_path,
@@ -307,6 +367,7 @@ def create_app(job_runner: JobRunner | None = None) -> FastAPI:
     @app.post("/jobs/supervised")
     def submit_supervised_job(payload: SupervisedJobRequest) -> dict[str, Any]:
         try:
+            _assert_repo_allowed(payload.repo_path)
             spec = build_job_spec_from_request(
                 request_text=payload.request_text,
                 repo_path=payload.repo_path,
@@ -452,6 +513,7 @@ def create_app(job_runner: JobRunner | None = None) -> FastAPI:
             record = store.get(job_id)
         except KeyError as exc:
             raise HTTPException(status_code=404, detail="job not found") from exc
+        _assert_repo_allowed(payload.workspace or record.spec.workspace_root or record.spec.repo_path)
         result = supervise_persisted_job(
             store=store,
             job_id=job_id,
@@ -554,6 +616,10 @@ def create_app(job_runner: JobRunner | None = None) -> FastAPI:
             "completed_task_ids": list(record.completed_task_ids),
             "checkpoint_count": len(record.checkpoints),
             "last_error": record.last_error,
+            "last_recoverable_error": summary.get("last_recoverable_error"),
+            "current_recovery_event": summary.get("current_recovery_event"),
+            "recovery_plan": summary.get("recovery_plan"),
+            "model_metrics": summary.get("model_metrics"),
             "created_at": record.created_at.isoformat(),
             "updated_at": record.updated_at.isoformat(),
             "summary": summary,

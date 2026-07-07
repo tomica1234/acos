@@ -59,6 +59,11 @@ def test_recovery_governor_turns_same_failure_into_diagnosis_plan() -> None:
 
     assert record.status == JobStatus.DIAGNOSING
     assert plan.strategy == "RETRY_WITH_DIFFERENT_STRATEGY"
+    assert record.last_error is None
+    assert record.runtime_state["last_recoverable_error"] == "same_failure_threshold_reached"
+    assert record.runtime_state["current_recovery_event"]["error"] == (
+        "same_failure_threshold_reached"
+    )
     assert record.runtime_state["recovery_plan"]["trigger"] == "same_failure_threshold_reached"
     assert record.outputs["recovery_history"][-1]["steps"] == [
         "DIAGNOSE_FAILURE",
@@ -87,6 +92,10 @@ def test_recovery_governor_maps_agent_max_steps_to_strategy_change() -> None:
 
     plan = record.runtime_state["recovery_plan"]
     assert record.status == JobStatus.STRATEGY_CHANGE
+    assert record.last_error is None
+    assert record.runtime_state["last_recoverable_error"].startswith(
+        "Agent fixer exceeded max_steps=24"
+    )
     assert plan["trigger"] == "agent_max_steps_exceeded"
     assert plan["strategy"] == "RETRY_AGENT_WITH_STRUCTURED_OUTPUT_GUARD"
     assert plan["next_actor"] == "fixer"
@@ -128,6 +137,10 @@ def test_quality_gate_error_is_recoverable_unless_policy_denied(tmp_path: Path) 
     )
 
     assert record.status == JobStatus.WRITING_TESTS
+    assert record.last_error is None
+    assert record.runtime_state["last_recoverable_error"] == (
+        "test_patch_quality_failed:Fixer attempted to weaken tests"
+    )
     assert record.runtime_state["recovery_plan"]["strategy"] == "RETURN_TO_TEST_WRITER"
 
     policy_record = _record(status=JobStatus.BLOCKED)
@@ -139,6 +152,7 @@ def test_quality_gate_error_is_recoverable_unless_policy_denied(tmp_path: Path) 
     )
 
     assert policy_record.status == JobStatus.POLICY_HARD_STOP
+    assert policy_record.last_error == "policy_denied:direct_main_write"
     assert is_hard_terminal_status(policy_record.status)
 
 
@@ -216,7 +230,8 @@ def test_worker_daemon_recovers_blocked_stuck_failed_before_processing(tmp_path:
     recovered = daemon.normalize_before_processing(record)
 
     assert recovered.status == JobStatus.DIAGNOSING
-    assert recovered.history[-2:] == [JobStatus.RECOVERING, JobStatus.DIAGNOSING]
+    assert JobStatus.RECOVERING in recovered.history
+    assert recovered.history[-1] == JobStatus.DIAGNOSING
     assert recovered.runtime_state["recovery_plan"]["strategy"] == (
         "RETRY_WITH_DIFFERENT_STRATEGY"
     )

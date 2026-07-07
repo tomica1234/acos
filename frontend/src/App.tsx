@@ -34,8 +34,69 @@ type RunResult = {
       title?: string
       role?: string
     } | null
+    model_metrics?: ModelMetrics
   }
   error?: string
+}
+
+type ModelCallMetrics = {
+  timestamp?: string | null
+  role?: string
+  model_key?: string
+  provider_key?: string | null
+  status?: string
+  usage_source?: string
+  prompt_tokens?: number
+  completion_tokens?: number
+  total_tokens?: number
+  duration_seconds?: number | null
+  completion_tokens_per_second?: number | null
+  total_tokens_per_second?: number | null
+}
+
+type ModelMetrics = {
+  model_call_count?: number
+  total_prompt_tokens?: number
+  total_completion_tokens?: number
+  total_tokens?: number
+  latest_call?: ModelCallMetrics | null
+  latest_completion_tps?: number | null
+  average_completion_tps?: number | null
+  by_role?: Record<string, Record<string, unknown>>
+  by_model?: Record<string, Record<string, unknown>>
+}
+
+type RecoveryPlan = {
+  strategy?: string
+  reason?: string
+  next_actor?: string
+  next_status?: string
+  hard_stop?: boolean
+}
+
+type RecoveryEvent = RecoveryPlan & {
+  error?: string
+  trigger?: string
+  at?: string
+}
+
+async function readJsonResponse(response: Response): Promise<any> {
+  const text = await response.text()
+  if (!text.trim()) {
+    return null
+  }
+  try {
+    return JSON.parse(text)
+  } catch {
+    throw new Error(`API returned non-JSON response (${response.status})`)
+  }
+}
+
+function responseDetail(body: any, fallback: string): string {
+  if (body && typeof body === 'object' && typeof body.detail === 'string') {
+    return body.detail
+  }
+  return fallback
 }
 
 type PmDecision = {
@@ -58,10 +119,27 @@ type ProgressResult = {
   completed_task_ids?: string[]
   checkpoint_count?: number
   last_error?: string | null
+  last_recoverable_error?: string | null
+  current_recovery_event?: RecoveryEvent | null
+  recovery_plan?: RecoveryPlan | null
+  model_metrics?: ModelMetrics | null
   updated_at?: string
   summary?: RunResult['summary'] & {
     total_tasks?: number
     last_error?: string | null
+    last_recoverable_error?: string | null
+    current_recovery_event?: RecoveryEvent | null
+    recovery_plan?: RecoveryPlan | null
+    model_metrics?: ModelMetrics | null
+    failure_diagnosis?: {
+      classification?: string
+      root_cause?: string
+      recommended_fix_strategy?: string
+      retry_mode?: string
+      confidence?: number
+      failure_signature?: string | null
+      same_failure_repeats?: number
+    } | null
   }
   failure_diagnosis?: {
     classification?: string
@@ -79,6 +157,17 @@ type ProgressResult = {
     role?: string
     action?: string
     status?: string
+    metadata?: {
+      model_key?: string
+      usage_source?: string
+      prompt_tokens?: number
+      completion_tokens?: number
+      total_tokens?: number
+      duration_seconds?: number
+      completion_tokens_per_second?: number | null
+      total_tokens_per_second?: number | null
+      [key: string]: unknown
+    }
   }>
 }
 
@@ -242,6 +331,21 @@ function formatTime(value?: string) {
   return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })
 }
 
+function formatMetricNumber(value?: number | null) {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return '-'
+  return new Intl.NumberFormat().format(Math.round(value))
+}
+
+function formatTps(value?: number | null) {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return '-'
+  return `${value.toFixed(1)} tok/s`
+}
+
+function formatDuration(value?: number | null) {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return '-'
+  return `${value.toFixed(1)}s`
+}
+
 function describeProgressGap(
   progress: ProgressResult | null,
   progressError: string | null,
@@ -374,9 +478,9 @@ function App() {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ ...runPayload, max_batches: null }),
         })
-        const body = await response.json()
+        const body = await readJsonResponse(response)
         if (!response.ok) {
-          throw new Error(body.detail || 'ACOS background request failed')
+          throw new Error(responseDetail(body, 'ACOS background request failed'))
         }
         setBackgroundRun(body)
         persistUiState({
@@ -404,9 +508,9 @@ function App() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(runPayload),
       })
-      const body = await response.json()
+      const body = await readJsonResponse(response)
       if (!response.ok) {
-        throw new Error(body.detail || 'ACOS API request failed')
+        throw new Error(responseDetail(body, 'ACOS API request failed'))
       }
       setResult(body)
       persistUiState({
@@ -432,9 +536,9 @@ function App() {
   async function refreshBackgroundRun(runId: string) {
     try {
       const response = await fetch(`/api/background-runs/${encodeURIComponent(runId)}`)
-      const body = await response.json()
+      const body = await readJsonResponse(response)
       if (!response.ok) {
-        throw new Error(body.detail || 'background status request failed')
+        throw new Error(responseDetail(body, 'background status request failed'))
       }
       setBackgroundRun(body)
       if (body.job_id) {
@@ -462,9 +566,9 @@ function App() {
       const response = await fetch(
         `/api/background-runs?job_id=${encodeURIComponent(currentJobId)}`,
       )
-      const body = await response.json()
+      const body = await readJsonResponse(response)
       if (!response.ok) {
-        throw new Error(body.detail || 'background list request failed')
+        throw new Error(responseDetail(body, 'background list request failed'))
       }
       const latest = Array.isArray(body) ? body[0] : null
       if (!latest) return
@@ -487,9 +591,9 @@ function App() {
         `/api/background-runs/${encodeURIComponent(backgroundRun.run_id)}/stop`,
         { method: 'POST' },
       )
-      const body = await response.json()
+      const body = await readJsonResponse(response)
       if (!response.ok) {
-        throw new Error(body.detail || 'stop request failed')
+        throw new Error(responseDetail(body, 'stop request failed'))
       }
       setBackgroundRun(body)
     } catch (caught) {
@@ -510,9 +614,9 @@ function App() {
         setProgressError('ジョブファイル作成待ち')
         return
       }
-      const body = await response.json()
+      const body = await readJsonResponse(response)
       if (!response.ok) {
-        throw new Error(body.detail || 'progress request failed')
+        throw new Error(responseDetail(body, 'progress request failed'))
       }
       setProgress(body)
       setProgressError(null)
@@ -587,8 +691,23 @@ function App() {
   const taskDone = progress?.summary?.completed_task_count ?? result?.summary?.completed_task_count ?? 0
   const taskPending = progress?.summary?.pending_task_count ?? result?.summary?.pending_task_count ?? 0
   const progressGap = describeProgressGap(progress, progressError, backgroundRun)
+  const recoveryEvent =
+    progress?.current_recovery_event ?? progress?.summary?.current_recovery_event ?? null
+  const recoveryPlan = progress?.recovery_plan ?? progress?.summary?.recovery_plan ?? null
+  const recoverableError =
+    progress?.last_recoverable_error ??
+    progress?.summary?.last_recoverable_error ??
+    recoveryEvent?.error ??
+    recoveryPlan?.reason ??
+    null
   const lastError = progress?.last_error ?? progress?.summary?.last_error ?? result?.error ?? backgroundRun?.error
-  const diagnosis = progress?.failure_diagnosis
+  const recoveryNotice = lastError ? null : recoverableError
+  const recoveryLabel = recoveryPlan?.strategy ?? recoveryEvent?.strategy ?? 'auto recovery'
+  const diagnosis = progress?.failure_diagnosis ?? progress?.summary?.failure_diagnosis
+  const modelMetrics = progress?.model_metrics ?? progress?.summary?.model_metrics ?? null
+  const latestModelCall = modelMetrics?.latest_call ?? null
+  const latestTps =
+    latestModelCall?.completion_tokens_per_second ?? modelMetrics?.latest_completion_tps ?? null
   const workerActive = backgroundRun?.status ? activeStatuses.has(backgroundRun.status) : false
   const workerTerminal = backgroundRun?.status ? terminalStatuses.has(backgroundRun.status) : false
   const latestPmDecision =
@@ -640,7 +759,20 @@ function App() {
               {progress.summary.next_task.id}: {progress.summary.next_task.title}
             </p>
           )}
+          {latestModelCall && (
+            <p className="mobile-diagnosis">
+              model: {latestModelCall.role || '-'} / {latestModelCall.model_key || '-'} /{' '}
+              {formatMetricNumber(latestModelCall.total_tokens)} tokens / {formatTps(latestTps)}
+              {latestModelCall.usage_source === 'estimate' ? ' estimated' : ''}
+            </p>
+          )}
           {lastError && <p className="mobile-error">last error: {lastError}</p>}
+          {recoveryNotice && (
+            <p className="mobile-diagnosis">
+              recovery: {recoveryLabel}
+              {recoveryNotice ? ` - ${recoveryNotice}` : ''}
+            </p>
+          )}
           {diagnosis?.root_cause && <p className="mobile-diagnosis">{diagnosis.root_cause}</p>}
           <div className="mobile-actions">
             <button className="ghost-button" type="button" onClick={() => void refreshProgress()}>
@@ -820,6 +952,12 @@ function App() {
           </div>
           {progressGap && !progress && <div className="progress-note">{progressGap}</div>}
           {lastError && <div className="error-box live-error">last error: {lastError}</div>}
+          {recoveryNotice && (
+            <div className="progress-note">
+              recovery: {recoveryLabel}
+              {recoveryNotice ? ` - ${recoveryNotice}` : ''}
+            </div>
+          )}
           {diagnosis && (
             <div className="diagnosis-card">
               <div>
@@ -869,6 +1007,26 @@ function App() {
                 <div>
                   <span>batches</span>
                   <strong>{batchesRun}</strong>
+                </div>
+                <div>
+                  <span>model calls</span>
+                  <strong>{formatMetricNumber(modelMetrics?.model_call_count)}</strong>
+                </div>
+                <div>
+                  <span>tokens</span>
+                  <strong>{formatMetricNumber(modelMetrics?.total_tokens)}</strong>
+                </div>
+                <div>
+                  <span>avg TPS</span>
+                  <strong>{formatTps(modelMetrics?.average_completion_tps)}</strong>
+                </div>
+                <div>
+                  <span>latest</span>
+                  <strong>
+                    {latestModelCall
+                      ? `${latestModelCall.role || '-'} / ${formatTps(latestTps)} / ${formatDuration(latestModelCall.duration_seconds)}`
+                      : '-'}
+                  </strong>
                 </div>
                 {backgroundRun && (
                   <div>
@@ -922,7 +1080,11 @@ function App() {
                     <strong>{event.role || 'system'}</strong>
                     <em>{event.event_type || '-'}</em>
                     <b>{event.status || '-'}</b>
-                    <small>{event.action || '-'}</small>
+                    <small>
+                      {event.event_type === 'model_call'
+                        ? `${event.action || '-'} / ${formatMetricNumber(event.metadata?.total_tokens)} tokens / ${formatTps(event.metadata?.completion_tokens_per_second)}${event.metadata?.usage_source === 'estimate' ? ' estimated' : ''}`
+                        : event.action || '-'}
+                    </small>
                   </div>
                 ))}
               </div>

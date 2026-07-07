@@ -125,6 +125,7 @@ agents:
       - repo_server.read_file
       - git_server.diff
       - memory_server.read_memory
+    max_tool_steps: 32
     require_json_schema: true
     escalation_policy: {}
     output_schema: ReviewResult
@@ -142,6 +143,7 @@ agents:
       - repo_server.read_file
       - git_server.diff
       - memory_server.read_memory
+    max_tool_steps: 32
     require_json_schema: true
     escalation_policy:
       security_sensitive: true

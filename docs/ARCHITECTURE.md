@@ -47,6 +47,25 @@ supervision stalls fail, ACOS records `failure_analysis`,
 `pm_interventions`. The next run uses those records as context instead of
 asking the user to choose a recovery path.
 
+The runtime separates status classes:
+
+- hard terminal: `DONE`, `CANCELLED`, `POLICY_HARD_STOP`
+- waiting: `WAITING_APPROVAL`, `WAITING_RUNTIME`, `PROVIDER_UNAVAILABLE`, `PAUSED`
+- recoverable: `BLOCKED`, `STUCK`, `FAILED`
+- runnable: submitted, queued, running, planning, implementing, testing,
+  recovering, replanning, diagnosing, strategy-change, and provider retry states
+
+`RecoveryGovernor` decides the strategy. `RecoveryExecutor` executes the saved
+steps, writes checkpoints, updates constraints, and returns the job to the next
+actor. This keeps `max_attempts_exceeded`, repeated failures, bad task graphs,
+review rejection, and completion integrity failures inside ACOS instead of
+turning them into human-facing terminal states.
+
+`SQLiteJobStore` persists job records, recovery plans, checkpoints, runtime
+issues, worker heartbeats, leases, tasks, and notifications. `WorkerDaemon`
+polls runnable jobs, acquires a lease, normalizes recoverable statuses to
+`RECOVERING`, and resumes after stale heartbeat or provider recovery.
+
 ## Tooling Boundary
 
 Agents do not edit the file system directly. They return structured outputs

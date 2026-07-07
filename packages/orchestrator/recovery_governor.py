@@ -6,25 +6,20 @@ import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
+from uuid import uuid4
 
+from packages.orchestrator.statuses import (
+    HARD_TERMINAL_STATUSES,
+    RECOVERABLE_STATUSES,
+    WAITING_STATUSES,
+    is_hard_terminal_status,
+    is_recoverable_status,
+    is_waiting_status,
+)
 from packages.schemas.jobs import JobRecord
 from packages.schemas.models import JobStatus
 
 
-HARD_TERMINAL_STATUSES = {
-    JobStatus.DONE,
-    JobStatus.CANCELLED,
-    JobStatus.POLICY_HARD_STOP,
-}
-WAITING_STATUSES = {
-    JobStatus.WAITING_APPROVAL,
-    JobStatus.WAITING_RUNTIME,
-}
-RECOVERABLE_STATUSES = {
-    JobStatus.BLOCKED,
-    JobStatus.STUCK,
-    JobStatus.FAILED,
-}
 POLICY_HARD_STOP_PREFIXES = (
     "policy_hard_stop",
     "policy_denied",
@@ -41,7 +36,7 @@ POLICY_HARD_STOP_PREFIXES = (
 )
 
 
-@dataclass(frozen=True)
+@dataclass
 class RecoveryPlan:
     """A concrete autonomous recovery action for a recoverable failure."""
 
@@ -54,18 +49,34 @@ class RecoveryPlan:
     checkpoint_policy: str = "preserve"
     constraints: dict[str, Any] = field(default_factory=dict)
     hard_stop: bool = False
+    id: str = field(default_factory=lambda: uuid4().hex)
+    status: str = "pending"
+    current_step_index: int = 0
+    executed_steps: list[str] = field(default_factory=list)
+    created_at: str | None = None
+    updated_at: str | None = None
+    completed_at: str | None = None
+    failure_reason: str | None = None
 
     def model_dump(self) -> dict[str, Any]:
         return {
+            "id": self.id,
+            "status": self.status,
             "trigger": self.trigger,
             "strategy": self.strategy,
+            "current_step_index": self.current_step_index,
             "next_status": self.next_status.value,
             "next_actor": self.next_actor,
             "steps": list(self.steps),
+            "executed_steps": list(self.executed_steps),
             "reason": self.reason,
             "checkpoint_policy": self.checkpoint_policy,
             "constraints": dict(self.constraints),
             "hard_stop": self.hard_stop,
+            "created_at": self.created_at,
+            "updated_at": self.updated_at,
+            "completed_at": self.completed_at,
+            "failure_reason": self.failure_reason,
         }
 
 
@@ -154,15 +165,35 @@ class RecoveryGovernor:
         error: str | None = None,
         runtime_state: dict[str, Any] | None = None,
     ) -> RecoveryPlan:
+        recoverable_error = str(error or record.last_error or "")
         plan = self.build_plan(record, error=error, runtime_state=runtime_state)
         now = datetime.now(timezone.utc).isoformat()
-        plan_payload = plan.model_dump() | {"created_at": now}
+        plan.created_at = plan.created_at or now
+        plan.updated_at = now
+        plan_payload = plan.model_dump()
         record.runtime_state["recovery_plan"] = plan_payload
+        recovery_event = {
+            "id": plan.id,
+            "at": now,
+            "trigger": plan.trigger,
+            "strategy": plan.strategy,
+            "next_status": plan.next_status.value,
+            "next_actor": plan.next_actor,
+            "reason": plan.reason,
+            "error": recoverable_error or plan.reason,
+            "hard_stop": plan.hard_stop,
+        }
+        record.runtime_state["current_recovery_event"] = recovery_event
         history = record.outputs.setdefault("recovery_history", [])
         if not isinstance(history, list):
             history = []
             record.outputs["recovery_history"] = history
         history.append(plan_payload)
+        events = record.outputs.setdefault("recovery_events", [])
+        if not isinstance(events, list):
+            events = []
+            record.outputs["recovery_events"] = events
+        events.append(recovery_event)
         constraints = record.spec.metadata.setdefault("constraints", {})
         if not isinstance(constraints, dict):
             constraints = {}
@@ -176,9 +207,14 @@ class RecoveryGovernor:
         record.status = plan.next_status
         record.history.append(plan.next_status)
         if plan.hard_stop:
+            record.runtime_state.pop("last_recoverable_error", None)
+            record.outputs.pop("last_recoverable_error", None)
             record.last_error = plan.reason
-        elif error is not None:
-            record.last_error = error
+        else:
+            recoverable_reason = recoverable_error or plan.reason
+            record.runtime_state["last_recoverable_error"] = recoverable_reason
+            record.outputs["last_recoverable_error"] = recoverable_reason
+            record.last_error = None
         record.updated_at = datetime.now(timezone.utc)
         return plan
 
@@ -289,6 +325,42 @@ class RecoveryGovernor:
                 reason=last_error,
                 checkpoint_policy="invalidate_failed_stage",
                 constraints={"recovery_mode": "required_artifacts_replan"},
+            )
+        if trigger in {"invalid_task_graph", "unmet_task_dependencies"}:
+            return RecoveryPlan(
+                trigger=trigger,
+                strategy="REPLAN_TASK",
+                next_status=JobStatus.REPLANNING,
+                next_actor="planner",
+                steps=["REPLAN_TASK", "SPLIT_TASK"],
+                reason=last_error,
+                checkpoint_policy="invalidate_planning",
+                constraints={"recovery_mode": "task_graph_repair"},
+            )
+        if trigger == "prd_quality_gate_failed":
+            return RecoveryPlan(
+                trigger=trigger,
+                strategy="REVISE_PRD_AND_ARCHITECTURE",
+                next_status=JobStatus.ANALYZING,
+                next_actor="pm",
+                steps=["REVISE_PRD", "REVISE_ARCHITECTURE", "REPLAN_TASK"],
+                reason=last_error,
+                checkpoint_policy="invalidate_planning",
+                constraints={"recovery_mode": "prd_quality_revision"},
+            )
+        if trigger == "autonomous_stage_limit_reached":
+            return RecoveryPlan(
+                trigger=trigger,
+                strategy="RETRY_WITH_DIFFERENT_STRATEGY",
+                next_status=JobStatus.STRATEGY_CHANGE,
+                next_actor="planner",
+                steps=["EXPAND_CONTEXT", "SPLIT_TASK", "RETRY_WITH_DIFFERENT_STRATEGY"],
+                reason=last_error,
+                checkpoint_policy="preserve",
+                constraints={
+                    "recovery_mode": "stage_limit_strategy_change",
+                    "auto_bump_stage_limit": True,
+                },
             )
         if trigger in {"target_files_missing", "target_file_missing"} or "target file" in lowered:
             return RecoveryPlan(
@@ -413,32 +485,22 @@ class RecoveryGovernor:
             "REVISE_PRD_AND_ARCHITECTURE": {
                 "pm",
                 "prd",
-                "prd_quality",
-                "prd_quality_attempts",
                 "architect",
                 "architecture",
                 "planner",
                 "task_graph",
-                "task_graph_validation",
-                "task_graph_validation_attempts",
             },
             "REPLAN_TASK": {
                 "planner",
                 "task_graph",
-                "task_graph_validation",
-                "task_graph_validation_attempts",
             },
             "REPLAN_TASK_WITH_REQUIRED_ARTIFACTS": {
                 "planner",
                 "task_graph",
-                "task_graph_validation",
-                "task_graph_validation_attempts",
             },
             "SPLIT_TASK_OR_REDEFINE_ACCEPTANCE": {
                 "planner",
                 "task_graph",
-                "task_graph_validation",
-                "task_graph_validation_attempts",
             },
             "RETURN_TO_IMPLEMENTER": {
                 "implementer",
@@ -455,13 +517,13 @@ class RecoveryGovernor:
             record.runtime_state["invalidated_outputs"] = invalidated
 
 
-def is_hard_terminal_status(status: JobStatus) -> bool:
-    return status in HARD_TERMINAL_STATUSES
-
-
-def is_waiting_status(status: JobStatus) -> bool:
-    return status in WAITING_STATUSES
-
-
-def is_recoverable_status(status: JobStatus) -> bool:
-    return status in RECOVERABLE_STATUSES
+__all__ = [
+    "HARD_TERMINAL_STATUSES",
+    "WAITING_STATUSES",
+    "RECOVERABLE_STATUSES",
+    "RecoveryGovernor",
+    "RecoveryPlan",
+    "is_hard_terminal_status",
+    "is_waiting_status",
+    "is_recoverable_status",
+]

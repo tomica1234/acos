@@ -62,6 +62,7 @@ class JobRecord(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     job_id: str
+    title: str | None = None
     spec: JobSpec
     status: JobStatus = JobStatus.SUBMITTED
     history: list[JobStatus] = Field(default_factory=lambda: [JobStatus.SUBMITTED])
@@ -73,5 +74,17 @@ class JobRecord(BaseModel):
     failure_count: int = 0
     same_test_failure_count: int = 0
     last_error: str | None = None
+    runtime_error: str | None = None
+    provider_status: str | None = None
+    current_phase: str | None = None
+    current_role: str | None = None
+    current_task_id: str | None = None
+    pending_approval_id: str | None = None
+    pending_runtime_issue_id: str | None = None
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)
+    started_at: datetime | None = None
+    completed_at: datetime | None = None
+    heartbeat_at: datetime | None = None
+    lease_owner: str | None = None
+    lease_expires_at: datetime | None = None

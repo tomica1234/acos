@@ -1,4 +1,5 @@
 from packages.orchestrator.progress import summarize_job_progress
+from packages.schemas.audit import AuditEvent
 from packages.schemas.jobs import JobRecord, JobSpec
 from packages.schemas.models import JobStatus
 from packages.schemas.tasks import PlannedTask, TaskGraph
@@ -928,3 +929,66 @@ def test_summarize_job_progress_marks_post_review_failures_as_failed(tmp_path) -
     assert payload["failed_stage"]["stage"] == 1
     assert payload["resume"]["action"] == "retry_failed_stage"
     assert payload["resume"]["task_id"] == "core"
+
+
+def test_summarize_job_progress_reports_model_token_metrics(tmp_path) -> None:
+    spec = JobSpec(
+        job_id="model-metrics-progress",
+        request_text="Track model metrics",
+        repo_path=str(tmp_path),
+    )
+    record = JobRecord(job_id=spec.job_id, spec=spec, status=JobStatus.RUNNING)
+    record.audit_events.extend(
+        [
+            AuditEvent(
+                timestamp="2026-07-04T00:00:00Z",
+                event_type="model_call",
+                role="pm",
+                action="ornith_35b_q4",
+                status="success",
+                metadata={
+                    "model_key": "ornith_35b_q4",
+                    "provider_key": "local_ornith",
+                    "usage_source": "provider",
+                    "prompt_tokens": 100,
+                    "completion_tokens": 40,
+                    "total_tokens": 140,
+                    "duration_seconds": 2.0,
+                    "completion_tokens_per_second": 20.0,
+                    "total_tokens_per_second": 70.0,
+                },
+            ),
+            AuditEvent(
+                timestamp="2026-07-04T00:00:03Z",
+                event_type="model_call",
+                role="fixer",
+                action="ncmoe40_q4",
+                status="success",
+                metadata={
+                    "model_key": "ncmoe40_q4",
+                    "provider_key": "local_ornith",
+                    "usage_source": "estimate",
+                    "prompt_tokens": 60,
+                    "completion_tokens": 20,
+                    "total_tokens": 80,
+                    "duration_seconds": 1.0,
+                    "completion_tokens_per_second": 20.0,
+                    "total_tokens_per_second": 80.0,
+                },
+            ),
+        ]
+    )
+
+    payload = summarize_job_progress(record)
+
+    metrics = payload["model_metrics"]
+    assert metrics["model_call_count"] == 2
+    assert metrics["total_prompt_tokens"] == 160
+    assert metrics["total_completion_tokens"] == 60
+    assert metrics["total_tokens"] == 220
+    assert metrics["latest_call"]["role"] == "fixer"
+    assert metrics["latest_call"]["usage_source"] == "estimate"
+    assert metrics["latest_completion_tps"] == 20.0
+    assert metrics["average_completion_tps"] == 20.0
+    assert metrics["by_role"]["pm"]["total_tokens"] == 140
+    assert metrics["by_model"]["ncmoe40_q4"]["model_call_count"] == 1

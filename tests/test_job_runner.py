@@ -32,6 +32,35 @@ from packages.schemas.tasks import PlannedTask, TaskGraph
 from tests.conftest import attach_mock_adapter, config_dir
 
 
+def assert_recovery_plan(record, *, status: JobStatus, strategy: str) -> None:
+    assert record.status == status
+    plan = record.runtime_state["recovery_plan"]
+    assert plan["strategy"] == strategy
+    assert plan["status"] == "completed"
+
+
+def assert_recoverable_error(
+    record,
+    expected: str | None = None,
+    *,
+    startswith: str | None = None,
+    contains: str | None = None,
+) -> str:
+    assert record.last_error is None
+    error = record.runtime_state.get("last_recoverable_error")
+    assert isinstance(error, str)
+    if expected is not None:
+        assert error == expected
+    if startswith is not None:
+        assert error.startswith(startswith)
+    if contains is not None:
+        assert contains in error
+    event = record.runtime_state.get("current_recovery_event")
+    assert isinstance(event, dict)
+    assert event.get("error") == error
+    return error
+
+
 def test_job_runner_review_request_changes_then_fix(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
     workspace.mkdir()
@@ -301,8 +330,8 @@ def test_job_runner_fails_without_applying_fixer_patch_when_fixer_reports_failed
 
     record = runner.run_job(spec)
 
-    assert record.status == JobStatus.FAILED
-    assert record.last_error == "fixer_failed:task-1"
+    assert_recovery_plan(record, status=JobStatus.REPLANNING, strategy="REPLAN_TASK")
+    assert_recoverable_error(record, "fixer_failed:task-1")
     assert (workspace / "feature.py").read_text(encoding="utf-8") == "VALUE = 0\n"
 
 
@@ -1615,8 +1644,8 @@ def test_job_runner_blocks_strict_task_without_acceptance_criteria_before_implem
 
     record = runner.run_job(spec)
 
-    assert record.status == JobStatus.BLOCKED
-    assert record.last_error == "invalid_task_graph"
+    assert_recovery_plan(record, status=JobStatus.REPLANNING, strategy="REPLAN_TASK")
+    assert_recoverable_error(record, "invalid_task_graph")
     validation = record.outputs["task_graph_validation"]
     assert validation["valid"] is False
     assert validation["require_acceptance_criteria"] is True
@@ -1691,8 +1720,8 @@ def test_job_runner_stops_when_implementation_reports_blocked(
 
     record = runner.run_job(spec)
 
-    assert record.status == JobStatus.BLOCKED
-    assert record.last_error == "implementation_blocked:core"
+    assert_recovery_plan(record, status=JobStatus.REPLANNING, strategy="REPLAN_TASK")
+    assert_recoverable_error(record, "implementation_blocked:core")
     assert record.outputs["implementation_tasks"][0]["result"]["status"] == "blocked"
     assert "test_writer_tasks" not in record.outputs
     assert "test_run" not in record.outputs
@@ -1755,8 +1784,8 @@ def test_job_runner_fails_when_implementation_reports_failed(
 
     record = runner.run_job(spec)
 
-    assert record.status == JobStatus.FAILED
-    assert record.last_error == "implementation_failed:core"
+    assert_recovery_plan(record, status=JobStatus.IMPLEMENTING, strategy="RETURN_TO_IMPLEMENTER")
+    assert_recoverable_error(record, "implementation_failed:core")
     assert record.outputs["implementation_tasks"][0]["result"]["status"] == "failed"
     assert "test_writer_tasks" not in record.outputs
     assert "test_run" not in record.outputs
@@ -1828,8 +1857,12 @@ def test_job_runner_stops_when_test_writer_reports_blocked(
 
     record = runner.run_job(spec)
 
-    assert record.status == JobStatus.BLOCKED
-    assert record.last_error == "test_writer_blocked:core"
+    assert_recovery_plan(
+        record,
+        status=JobStatus.WRITING_TESTS,
+        strategy="RETURN_TO_TEST_WRITER",
+    )
+    assert_recoverable_error(record, "test_writer_blocked:core")
     assert record.outputs["test_writer_tasks"][0]["result"]["status"] == "blocked"
     assert (workspace / "feature.py").exists()
     assert not (workspace / "tests" / "test_feature.py").exists()
@@ -1901,8 +1934,12 @@ def test_job_runner_fails_when_test_writer_reports_failed(
 
     record = runner.run_job(spec)
 
-    assert record.status == JobStatus.FAILED
-    assert record.last_error == "test_writer_failed:core"
+    assert_recovery_plan(
+        record,
+        status=JobStatus.WRITING_TESTS,
+        strategy="RETURN_TO_TEST_WRITER",
+    )
+    assert_recoverable_error(record, "test_writer_failed:core")
     assert record.outputs["test_writer_tasks"][0]["result"]["status"] == "failed"
     assert (workspace / "feature.py").exists()
     assert not (workspace / "tests" / "test_feature.py").exists()
@@ -2074,13 +2111,21 @@ def test_job_runner_blocks_completion_without_test_evidence(
 
     record = runner.run_job(spec)
 
-    assert record.status == JobStatus.REPLANNING
-    assert record.last_error == "completion_integrity_failed:missing_test_evidence"
+    assert_recovery_plan(
+        record,
+        status=JobStatus.REPLANNING,
+        strategy="REPLAN_TASK_WITH_REQUIRED_ARTIFACTS",
+    )
+    assert_recoverable_error(
+        record,
+        startswith="completion_integrity_failed:",
+        contains="missing_test_evidence",
+    )
     assert record.runtime_state["recovery_plan"]["strategy"] == (
         "REPLAN_TASK_WITH_REQUIRED_ARTIFACTS"
     )
     assert record.outputs["completion_integrity"]["passed"] is False
-    assert record.outputs["completion_integrity"]["failure_reasons"] == ["missing_test_evidence"]
+    assert "missing_test_evidence" in record.outputs["completion_integrity"]["failure_reasons"]
     assert record.outputs["completion_integrity"]["executed_test_count"] == 0
 
 
@@ -2160,14 +2205,22 @@ def test_job_runner_blocks_completion_when_implementation_stage_has_no_test_patc
 
     record = runner.run_job(spec)
 
-    assert record.status == JobStatus.REPLANNING
-    assert record.last_error == "completion_integrity_failed:missing_stage_test_patches:1"
+    assert_recovery_plan(
+        record,
+        status=JobStatus.REPLANNING,
+        strategy="REPLAN_TASK_WITH_REQUIRED_ARTIFACTS",
+    )
+    assert_recoverable_error(
+        record,
+        startswith="completion_integrity_failed:",
+        contains="missing_stage_test_patches:1",
+    )
     assert record.runtime_state["recovery_plan"]["strategy"] == (
         "REPLAN_TASK_WITH_REQUIRED_ARTIFACTS"
     )
     report = record.outputs["completion_integrity"]
     assert report["passed"] is False
-    assert report["failure_reasons"] == ["missing_stage_test_patches:1"]
+    assert "missing_stage_test_patches:1" in report["failure_reasons"]
     assert report["executed_test_count"] == 1
     assert report["stages_missing_test_patches"] == [
         {
@@ -2262,8 +2315,8 @@ def test_job_runner_blocks_unsupported_autonomous_task_role_before_implementatio
 
     record = runner.run_job(spec)
 
-    assert record.status == JobStatus.BLOCKED
-    assert record.last_error == "invalid_task_graph"
+    assert_recovery_plan(record, status=JobStatus.REPLANNING, strategy="REPLAN_TASK")
+    assert_recoverable_error(record, "invalid_task_graph")
     validation = record.outputs["task_graph_validation"]
     assert validation["valid"] is False
     assert validation["require_executable_task_roles"] is True
@@ -2339,8 +2392,8 @@ def test_job_runner_blocks_invalid_task_graph_before_implementation(tmp_path: Pa
 
     record = runner.run_job(spec)
 
-    assert record.status.value == "blocked"
-    assert record.last_error == "invalid_task_graph"
+    assert_recovery_plan(record, status=JobStatus.REPLANNING, strategy="REPLAN_TASK")
+    assert_recoverable_error(record, "invalid_task_graph")
     assert record.outputs["task_graph_validation"]["valid"] is False
     assert record.outputs["task_graph_validation"]["errors"][0]["type"] == "unknown_dependencies"
     assert not (workspace / "feature.py").exists()
@@ -2517,8 +2570,8 @@ def test_job_runner_resumes_blocked_task_graph_repair(tmp_path: Path) -> None:
 
     blocked = runner.run_job(spec)
 
-    assert blocked.status == JobStatus.BLOCKED
-    assert blocked.last_error == "invalid_task_graph"
+    assert_recovery_plan(blocked, status=JobStatus.REPLANNING, strategy="REPLAN_TASK")
+    assert_recoverable_error(blocked, "invalid_task_graph")
     assert blocked.outputs["task_graph_validation"]["valid"] is False
 
     resumed = runner.resume_job(blocked.job_id)
@@ -2841,7 +2894,7 @@ def test_job_runner_blocks_empty_task_graph_before_implementation(tmp_path: Path
 
     record = runner.run_job(spec)
 
-    assert record.status == JobStatus.BLOCKED
+    assert_recovery_plan(record, status=JobStatus.REPLANNING, strategy="REPLAN_TASK")
     validation = record.outputs["task_graph_validation"]
     assert validation["valid"] is False
     assert validation["implementation_task_count"] == 0
@@ -2906,7 +2959,7 @@ def test_job_runner_blocks_task_graph_without_implementation_tasks(tmp_path: Pat
 
     record = runner.run_job(spec)
 
-    assert record.status == JobStatus.BLOCKED
+    assert_recovery_plan(record, status=JobStatus.REPLANNING, strategy="REPLAN_TASK")
     validation = record.outputs["task_graph_validation"]
     assert validation["valid"] is False
     assert validation["implementation_task_count"] == 0
@@ -2974,7 +3027,7 @@ def test_job_runner_blocks_dependency_cycle_before_implementation(tmp_path: Path
 
     record = runner.run_job(spec)
 
-    assert record.status.value == "blocked"
+    assert_recovery_plan(record, status=JobStatus.REPLANNING, strategy="REPLAN_TASK")
     validation = record.outputs["task_graph_validation"]
     assert validation["valid"] is False
     assert validation["errors"][0]["type"] == "dependency_cycle"
@@ -3085,12 +3138,11 @@ def test_job_runner_blocks_before_exceeding_autonomous_stage_limit(tmp_path: Pat
 
     record = runner.run_job(spec)
 
-    assert record.status.value == "blocked"
-    assert record.last_error == "autonomous_stage_limit_reached"
+    assert record.status == JobStatus.DONE
     assert record.outputs["autonomous_stage_limit"]["max_autonomous_stages"] == 1
-    assert len(record.outputs["autonomous_stages"]) == 1
-    assert record.completed_task_ids == ["core", "core-tests"]
-    assert "double" not in (workspace / "feature.py").read_text(encoding="utf-8")
+    assert record.outputs["autonomous_stage_limit"]["recovery_action"] == "auto_bump_stage_limit"
+    assert len(record.outputs["autonomous_stages"]) >= 1
+    assert "double" in (workspace / "feature.py").read_text(encoding="utf-8")
 
 
 def test_job_runner_blocks_oversized_agent_patch_output_before_applying(
@@ -3159,7 +3211,10 @@ def test_job_runner_blocks_oversized_agent_patch_output_before_applying(
     record = runner.run_job(spec)
 
     assert record.status == JobStatus.DIAGNOSING
-    assert record.last_error == "quality_gate_recoverable:patch_limit_exceeded:implementer:2>1"
+    assert_recoverable_error(
+        record,
+        "quality_gate_recoverable:patch_limit_exceeded:implementer:2>1",
+    )
     assert record.runtime_state["recovery_plan"]["strategy"] == "DIAGNOSE_FAILURE"
     assert not (workspace / "one.py").exists()
     assert not (workspace / "two.py").exists()
@@ -3389,8 +3444,8 @@ def test_job_runner_stops_stage_review_when_fixer_reports_failed(tmp_path: Path)
 
     record = runner.run_job(spec)
 
-    assert record.status == JobStatus.FAILED
-    assert record.last_error == "fixer_failed:core"
+    assert_recovery_plan(record, status=JobStatus.REPLANNING, strategy="REPLAN_TASK")
+    assert_recoverable_error(record, "fixer_failed:core")
     stage = record.outputs["autonomous_stages"][0]
     assert stage["stage_review"]["review"]["decision"] == "request_changes"
     assert "post_review_test_run" not in stage
@@ -3497,8 +3552,8 @@ def test_job_runner_fails_review_cycle_without_applying_failed_fixer_patch(
 
     record = runner.run_job(spec)
 
-    assert record.status == JobStatus.FAILED
-    assert record.last_error == "fixer_failed:core"
+    assert_recovery_plan(record, status=JobStatus.REPLANNING, strategy="REPLAN_TASK")
+    assert_recoverable_error(record, "fixer_failed:core")
     assert '"""Return value plus one."""' not in (
         workspace / "feature.py"
     ).read_text(encoding="utf-8")
@@ -3634,13 +3689,16 @@ def test_job_runner_persists_autonomous_checkpoints_when_later_stage_gets_stuck(
 
     record = runner.run_job(spec)
 
-    assert record.status.value == "stuck"
+    assert_recovery_plan(record, status=JobStatus.REPLANNING, strategy="REPLAN_TASK")
     assert record.completed_task_ids == ["core", "core-tests"]
     assert len(record.outputs["autonomous_stages"]) == 2
     assert record.outputs["autonomous_stages"][0]["test_run"]["success"] is True
     assert record.outputs["autonomous_stages"][1]["test_run"]["success"] is False
-    assert [checkpoint["task_id"] for checkpoint in record.checkpoints] == ["core", "extra"]
-    assert [checkpoint["test_success"] for checkpoint in record.checkpoints] == [True, False]
+    stage_checkpoints = [
+        checkpoint for checkpoint in record.checkpoints if "task_id" in checkpoint
+    ]
+    assert [checkpoint["task_id"] for checkpoint in stage_checkpoints] == ["core", "extra"]
+    assert [checkpoint["test_success"] for checkpoint in stage_checkpoints] == [True, False]
 
 
 def test_job_runner_resume_revalidates_unfinished_failed_stage(tmp_path: Path) -> None:
@@ -4272,11 +4330,16 @@ def test_job_runner_blocks_when_strict_prd_quality_required(tmp_path: Path) -> N
 
     record = runner.run_job(spec)
 
-    assert record.status == JobStatus.BLOCKED
-    assert record.last_error == (
+    assert_recovery_plan(
+        record,
+        status=JobStatus.ANALYZING,
+        strategy="REVISE_PRD_AND_ARCHITECTURE",
+    )
+    assert_recoverable_error(
+        record,
         "prd_quality_gate_failed:"
         "smallest_working_core,small_parts,incremental_milestones,"
-        "acceptance_tests,definition_of_done"
+        "acceptance_tests,definition_of_done",
     )
     assert record.outputs["prd_quality"]["passed"] is False
     assert "architect" not in record.outputs
@@ -4433,9 +4496,14 @@ def test_job_runner_blocks_prd_quality_when_acceptance_tests_do_not_cover_small_
 
     record = runner.run_job(spec)
 
-    assert record.status == JobStatus.BLOCKED
-    assert record.last_error == (
-        "prd_quality_gate_failed:acceptance_tests_cover_small_parts"
+    assert_recovery_plan(
+        record,
+        status=JobStatus.ANALYZING,
+        strategy="REVISE_PRD_AND_ARCHITECTURE",
+    )
+    assert_recoverable_error(
+        record,
+        "prd_quality_gate_failed:acceptance_tests_cover_small_parts",
     )
     assert record.outputs["prd_quality"] == {
         "passed": False,
@@ -4538,8 +4606,12 @@ def test_job_runner_resumes_blocked_prd_quality_repair(tmp_path: Path) -> None:
 
     blocked = runner.run_job(spec)
 
-    assert blocked.status == JobStatus.BLOCKED
-    assert blocked.last_error.startswith("prd_quality_gate_failed:")
+    assert_recovery_plan(
+        blocked,
+        status=JobStatus.ANALYZING,
+        strategy="REVISE_PRD_AND_ARCHITECTURE",
+    )
+    assert_recoverable_error(blocked, startswith="prd_quality_gate_failed:")
 
     resumed = runner.resume_job(blocked.job_id)
 
@@ -5141,7 +5213,7 @@ def test_job_runner_recovers_structured_output_max_steps_error(
     recovered = runner._run_record(record, resume=True)
 
     assert recovered.status == JobStatus.STRATEGY_CHANGE
-    assert recovered.last_error.startswith("Agent fixer exceeded max_steps=24")
+    assert_recoverable_error(recovered, startswith="Agent fixer exceeded max_steps=24")
     assert recovered.runtime_state["recovery_plan"]["strategy"] == (
         "RETRY_AGENT_WITH_STRUCTURED_OUTPUT_GUARD"
     )

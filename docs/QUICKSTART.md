@@ -53,3 +53,22 @@ acos api
 ```
 
 The API exposes a minimal ACOS MVP surface for submitting and inspecting jobs.
+
+## Durable Worker
+
+```bash
+acos-worker --repo . --sqlite-path .acos/acos.sqlite3 --forever
+```
+
+Recoverable failures are handled automatically. Only `DONE`, `CANCELLED`, and
+`POLICY_HARD_STOP` are hard terminal states. `WAITING_RUNTIME` resumes
+automatically after provider recovery; `WAITING_APPROVAL` waits for an approval
+decision.
+
+For API mutation auth:
+
+```bash
+export ACOS_API_TOKEN=change-me
+export ACOS_REPO_ALLOWLIST="$PWD"
+export ACOS_CORS_ALLOW_ORIGINS="http://127.0.0.1:5174"
+```
