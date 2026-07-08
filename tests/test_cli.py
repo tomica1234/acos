@@ -1331,6 +1331,8 @@ def test_run_supervised_plan_first_sets_runtime_deadline(
             str(workspace),
             "--job-id",
             "plan-first-runtime-deadline-job",
+            "--jobs-dir",
+            str(tmp_path / "jobs"),
             "--plan-first",
             "--max-runtime-seconds",
             "900",
