@@ -382,6 +382,62 @@ def test_missing_frontend_test_file_create_hint_rewrites_update_to_create(
     assert "missing_file_context" in retrieval_trace
 
 
+def test_stage_test_gate_rewrites_declared_new_test_file_update_to_create(
+    tmp_path: Path,
+) -> None:
+    test_path = "backend/test/scaffold.test.js"
+    runner, _environment, record = _runner(
+        tmp_path,
+        scenario={
+            "test_writer": TestWriterResult(
+                summary="Add scaffold backend tests.",
+                changed_files=[test_path],
+                patches=[
+                    FilePatch(
+                        path=test_path,
+                        operation="update",
+                        content=(
+                            "describe('scaffold backend', () => {\n"
+                            "  it('exists', () => {})\n"
+                            "})\n"
+                        ),
+                    )
+                ],
+            ).model_dump(),
+        },
+    )
+    task = PlannedTask(
+        id="scaffold-backend",
+        title="Scaffold backend project structure",
+        description="Create backend package and source scaffold.",
+        role="scaffold",
+        target_files=["backend/package.json"],
+        required_artifacts=["backend/package.json"],
+    )
+    implementation = ImplementationResult(
+        status=ImplementationStatus.IMPLEMENTED,
+        summary="Created backend scaffold.",
+        changed_files=["backend/package.json"],
+        patches=[],
+    )
+
+    result = runner._run_stage_test_gate(record, task, [implementation], [])
+
+    assert result.patches[0].operation == "create"
+    assert (tmp_path / test_path).exists()
+    assert "last_recoverable_error" not in record.runtime_state
+    assert record.outputs["patch_operation_rewrites"] == [
+        {
+            "role": "test_writer",
+            "path": test_path,
+            "from": "update",
+            "to": "create",
+            "reason": "test_writer_declared_new_test_file",
+            "stage": "structured_output",
+        }
+    ]
+
+
 def test_recreate_target_files_recovery_waits_until_artifacts_exist(
     tmp_path: Path,
 ) -> None:

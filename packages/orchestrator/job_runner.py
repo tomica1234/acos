@@ -1470,8 +1470,20 @@ class JobRunner:
                     patch_path,
                     workspace_root=self._workspace_root(record),
                 )
-                and self._is_known_missing_patch_target(record, patch_path)
+                and (
+                    self._is_known_missing_patch_target(record, patch_path)
+                    or self._is_test_writer_declared_new_test_file(
+                        role,
+                        result,
+                        patch_path,
+                    )
+                )
             ):
+                reason = (
+                    "known_missing_target_file"
+                    if self._is_known_missing_patch_target(record, patch_path)
+                    else "test_writer_declared_new_test_file"
+                )
                 patch = patch.model_copy(
                     update={
                         "operation": "create",
@@ -1487,7 +1499,7 @@ class JobRunner:
                             "path": patch.path,
                             "from": "update",
                             "to": "create",
-                            "reason": "known_missing_target_file",
+                            "reason": reason,
                             "stage": "structured_output",
                         }
                     )
@@ -1507,6 +1519,25 @@ class JobRunner:
                 "changed_files": changed_files,
             }
         )
+
+    @classmethod
+    def _is_test_writer_declared_new_test_file(
+        cls,
+        role: str,
+        result: Any,
+        path: str,
+    ) -> bool:
+        if role != "test_writer" or not cls._looks_like_test_path(path):
+            return False
+        normalized = path.replace("\\", "/").removeprefix("./")
+        changed_files = getattr(result, "changed_files", [])
+        if not isinstance(changed_files, list):
+            return False
+        return normalized in {
+            str(item).replace("\\", "/").removeprefix("./")
+            for item in changed_files
+            if str(item).strip()
+        }
 
     def _is_known_missing_patch_target(self, record: JobRecord, path: str) -> bool:
         normalized = path.replace("\\", "/").removeprefix("./")
@@ -1849,7 +1880,46 @@ class JobRunner:
             target_status=JobStatus.ANALYZING,
             last_error_prefix="prd_quality_gate_failed:",
         )
-        for attempt in range(1, refinement_attempts + 1):
+        attempt_offset = 0
+        deterministic_prd = (
+            self._deterministically_repair_prd_acceptance_tests(
+                current_prd,
+                report,
+            )
+            if refinement_attempts > 0
+            else None
+        )
+        if deterministic_prd is not None:
+            previous_acceptance_tests = set(
+                self._non_empty_items(current_prd.acceptance_tests)
+            )
+            current_prd = deterministic_prd
+            added_acceptance_tests = [
+                item
+                for item in self._non_empty_items(current_prd.acceptance_tests)
+                if item not in previous_acceptance_tests
+            ]
+            record.outputs["prd_quality_deterministic_repair"] = {
+                "applied": True,
+                "added_acceptance_tests": added_acceptance_tests,
+            }
+            self._write_memory_item(record, "pm", "prd", current_prd.model_dump_json())
+            record.outputs["pm"] = current_prd.model_dump()
+            report = self._build_prd_quality_report(current_prd)
+            record.outputs["prd_quality"] = report
+            self._record_prd_quality_attempt(
+                record,
+                attempt=1,
+                action="deterministic_repair",
+                report=report,
+            )
+            attempt_offset = 1
+            if report["passed"]:
+                self._clear_planning_repair_constraints(record)
+                self.store.update(record)
+                return current_prd
+
+        for attempt in range(attempt_offset + 1, attempt_offset + refinement_attempts + 1):
             current_prd = self._run_structured_role(
                 record,
                 "pm",
@@ -1883,6 +1953,51 @@ class JobRunner:
         )
         self.store.update(record)
         return None
+
+    @classmethod
+    def _deterministically_repair_prd_acceptance_tests(
+        cls,
+        prd: PRD,
+        report: dict[str, Any],
+    ) -> PRD | None:
+        repairable_missing = {
+            "acceptance_tests",
+            "acceptance_tests_cover_small_parts",
+            "acceptance_tests_semantically_cover_small_parts",
+        }
+        missing = set(report.get("missing") or [])
+        if not missing or not missing.issubset(repairable_missing):
+            return None
+        uncovered = report.get("uncovered_acceptance_small_parts")
+        if not isinstance(uncovered, list) or not uncovered:
+            return None
+        acceptance_tests = cls._non_empty_items(prd.acceptance_tests)
+        added_tests: list[str] = []
+        for item in uncovered:
+            if not isinstance(item, dict):
+                continue
+            part = item.get("small_part")
+            if not isinstance(part, str) or not part.strip():
+                continue
+            acceptance_test = cls._acceptance_test_for_small_part(part)
+            if acceptance_test not in acceptance_tests:
+                acceptance_tests.append(acceptance_test)
+                added_tests.append(acceptance_test)
+        if not added_tests:
+            return None
+        return prd.model_copy(update={"acceptance_tests": acceptance_tests})
+
+    @staticmethod
+    def _acceptance_test_for_small_part(small_part: str) -> str:
+        part = " ".join(small_part.split())
+        lower = part.lower()
+        if "readme" in lower:
+            return f"{part} exists and contains setup, run, and test instructions."
+        if ".env" in lower or "env example" in lower:
+            return f"{part} exists and lists required environment variables."
+        if "test" in lower or "tests" in lower:
+            return f"Automated checks for {part} exist and pass."
+        return f"{part} works and can be verified by an observable app or API check."
 
     @staticmethod
     def _prd_quality_repair_logs(prd: PRD, report: dict[str, Any]) -> list[str]:

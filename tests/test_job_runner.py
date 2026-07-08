@@ -6355,6 +6355,72 @@ def test_prd_quality_repair_logs_name_uncovered_small_parts() -> None:
     assert any("Current acceptance_tests: GET /api/health returns 200" == item for item in logs)
 
 
+def test_prd_quality_deterministically_repairs_uncovered_acceptance_tests(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    registry = ModelRegistry.from_paths(
+        provider_path=config_dir() / "model_providers.yaml",
+        agents_path=config_dir() / "agents.yaml",
+        routing_path=config_dir() / "model_routing.yaml",
+    )
+    policy = PolicyEngine.from_path(config_dir() / "policies.yaml")
+    environment = FakeMCPEnvironment(
+        workspace_root=workspace,
+        memory_db_path=workspace / ".memory.sqlite3",
+    )
+    runner = JobRunner(registry=registry, policy=policy, router=environment.build_router())
+    record = runner.store.create(
+        JobSpec(
+            request_text="Build vocabulary app",
+            repo_path=str(workspace),
+            metadata={"constraints": {"require_prd_quality": True}},
+        )
+    )
+    prd = PRD(
+        title="English Vocab App",
+        problem_statement="Students need vocabulary practice.",
+        smallest_working_core=["Generate quizzes and track progress"],
+        small_parts=[
+            "Quiz generation endpoint",
+            "Progress tracking endpoint",
+        ],
+        incremental_milestones=["Quiz API works", "Progress API works"],
+        acceptance_tests=["React app renders the word list"],
+        definition_of_done=["All tests pass"],
+        required_artifacts=[
+            "backend/src/routes/quiz.js",
+            "backend/src/routes/progress.js",
+            "tests/api.test.js",
+        ],
+    )
+
+    repaired = runner._refine_prd_quality_for_autonomy(record, prd)
+
+    assert repaired is not None
+    assert record.outputs["prd_quality"]["passed"] is True
+    assert [
+        attempt["action"] for attempt in record.outputs["prd_quality_attempts"]
+    ] == ["initial", "deterministic_repair"]
+    assert record.outputs["prd_quality_deterministic_repair"] == {
+        "applied": True,
+        "added_acceptance_tests": [
+            (
+                "Quiz generation endpoint works and can be verified by an "
+                "observable app or API check."
+            ),
+            (
+                "Progress tracking endpoint works and can be verified by an "
+                "observable app or API check."
+            ),
+        ],
+    }
+    assert repaired.acceptance_tests[-2:] == record.outputs[
+        "prd_quality_deterministic_repair"
+    ]["added_acceptance_tests"]
+
+
 def test_semantic_tokens_split_camel_case_domain_terms() -> None:
     tokens = JobRunner._semantic_tokens("WordSet QuizQuestion UserProgress")
 
