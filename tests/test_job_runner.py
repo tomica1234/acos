@@ -2846,6 +2846,69 @@ def test_job_runner_repairs_task_graph_that_under_covers_prd_small_parts(
     ]
 
 
+def test_task_graph_validation_rejects_semantic_small_part_mismatch() -> None:
+    prd = PRD(
+        title="English Vocab App",
+        problem_statement="Students need account-based vocabulary practice.",
+        smallest_working_core=["Health check"],
+        small_parts=[
+            "User authentication and roles",
+            "Word set CRUD operations",
+        ],
+        incremental_milestones=["Auth works", "Word sets work"],
+        acceptance_tests=[
+            "User can register and login",
+            "Teacher can create a word set",
+        ],
+        definition_of_done=["All tests pass"],
+    )
+    task_graph = TaskGraph(
+        goal="Build app",
+        tasks=[
+            PlannedTask(
+                id="backend-health",
+                title="Backend health endpoint",
+                description="Create a FastAPI health endpoint.",
+                role="implementer",
+                acceptance_criteria=["Health endpoint returns 200"],
+            ),
+            PlannedTask(
+                id="database-setup",
+                title="Database setup",
+                description="Create database configuration and migrations.",
+                role="implementer",
+                acceptance_criteria=["Database initializes"],
+            ),
+        ],
+    )
+
+    validation = JobRunner._build_task_graph_validation(
+        task_graph,
+        prd=prd,
+        require_acceptance_criteria=True,
+        require_executable_task_roles=True,
+    )
+
+    assert validation["valid"] is False
+    error_types = {item["type"] for item in validation["errors"]}
+    assert "semantic_small_part_mismatch" in error_types
+    assert "semantic_acceptance_test_mismatch" in error_types
+    assert validation["uncovered_small_parts"] == [
+        {
+            "small_part_index": 1,
+            "small_part": "User authentication and roles",
+            "task_id": None,
+            "covered": False,
+        },
+        {
+            "small_part_index": 2,
+            "small_part": "Word set CRUD operations",
+            "task_id": None,
+            "covered": False,
+        },
+    ]
+
+
 def test_job_runner_blocks_empty_task_graph_before_implementation(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
     workspace.mkdir()

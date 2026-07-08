@@ -2498,32 +2498,21 @@ class JobRunner:
         acceptance_tests = (
             JobRunner._non_empty_items(prd.acceptance_tests) if prd is not None else []
         )
-        small_part_coverage = [
-            {
-                "small_part_index": index,
-                "small_part": small_part,
-                "task_id": (
-                    implementation_task_ids[index - 1]
-                    if index <= len(implementation_task_ids)
-                    else None
-                ),
-                "covered": index <= len(implementation_task_ids),
-            }
-            for index, small_part in enumerate(small_parts, start=1)
+        implementation_tasks = [
+            task for task in task_graph.tasks if task.role in JobRunner.IMPLEMENTATION_TASK_ROLES
         ]
-        acceptance_test_coverage = [
-            {
-                "acceptance_test_index": index,
-                "acceptance_test": acceptance_test,
-                "task_id": (
-                    implementation_task_ids[index - 1]
-                    if index <= len(implementation_task_ids)
-                    else None
-                ),
-                "covered": index <= len(implementation_task_ids),
-            }
-            for index, acceptance_test in enumerate(acceptance_tests, start=1)
-        ]
+        small_part_coverage = JobRunner._semantic_task_coverage(
+            small_parts,
+            implementation_tasks,
+            item_key="small_part",
+            index_key="small_part_index",
+        )
+        acceptance_test_coverage = JobRunner._semantic_task_coverage(
+            acceptance_tests,
+            implementation_tasks,
+            item_key="acceptance_test",
+            index_key="acceptance_test_index",
+        )
         uncovered_small_parts = [
             item for item in small_part_coverage if not item["covered"]
         ]
@@ -2549,6 +2538,24 @@ class JobRunner:
                     "small_part_count": len(small_parts),
                     "implementation_task_count": len(implementation_task_ids),
                     "uncovered_small_parts": uncovered_small_parts,
+                }
+            )
+        elif uncovered_small_parts:
+            errors.append(
+                {
+                    "type": "semantic_small_part_mismatch",
+                    "small_part_count": len(small_parts),
+                    "implementation_task_count": len(implementation_task_ids),
+                    "uncovered_small_parts": uncovered_small_parts,
+                }
+            )
+        if acceptance_tests and uncovered_acceptance_tests:
+            errors.append(
+                {
+                    "type": "semantic_acceptance_test_mismatch",
+                    "acceptance_test_count": len(acceptance_tests),
+                    "implementation_task_count": len(implementation_task_ids),
+                    "uncovered_acceptance_tests": uncovered_acceptance_tests,
                 }
             )
         if duplicate_ids:
@@ -2602,6 +2609,152 @@ class JobRunner:
             "uncovered_acceptance_tests": uncovered_acceptance_tests,
             "errors": errors,
         }
+
+    @classmethod
+    def _semantic_task_coverage(
+        cls,
+        items: list[str],
+        tasks: list[PlannedTask],
+        *,
+        item_key: str,
+        index_key: str,
+    ) -> list[dict[str, Any]]:
+        remaining_tasks = list(tasks)
+        coverage: list[dict[str, Any]] = []
+        for index, item in enumerate(items, start=1):
+            item_tokens = cls._semantic_tokens(item)
+            if not item_tokens:
+                fallback_task = tasks[index - 1] if index <= len(tasks) else None
+                coverage.append(
+                    {
+                        index_key: index,
+                        item_key: item,
+                        "task_id": fallback_task.id if fallback_task is not None else None,
+                        "covered": fallback_task is not None,
+                    }
+                )
+                continue
+            best_task: PlannedTask | None = None
+            best_score = 0
+            for task in remaining_tasks:
+                score = cls._semantic_overlap_score(
+                    item_tokens,
+                    cls._semantic_tokens(cls._task_semantic_text(task)),
+                )
+                if score > best_score:
+                    best_score = score
+                    best_task = task
+            required_score = cls._semantic_overlap_required(item_tokens)
+            covered = best_task is not None and best_score >= required_score
+            coverage.append(
+                {
+                    index_key: index,
+                    item_key: item,
+                    "task_id": best_task.id if covered and best_task is not None else None,
+                    "covered": covered,
+                }
+            )
+            if covered and best_task is not None:
+                remaining_tasks.remove(best_task)
+        return coverage
+
+    @staticmethod
+    def _semantic_overlap_score(item_tokens: set[str], task_tokens: set[str]) -> int:
+        return len(item_tokens & task_tokens)
+
+    @staticmethod
+    def _semantic_overlap_required(item_tokens: set[str]) -> int:
+        return 1 if len(item_tokens) <= 1 else 2
+
+    @classmethod
+    def _semantic_tokens(cls, text: str) -> set[str]:
+        stopwords = {
+            "a",
+            "an",
+            "and",
+            "app",
+            "application",
+            "build",
+            "can",
+            "check",
+            "checks",
+            "core",
+            "create",
+            "created",
+            "creates",
+            "do",
+            "does",
+            "feature",
+            "for",
+            "from",
+            "has",
+            "have",
+            "helper",
+            "implement",
+            "implemented",
+            "implements",
+            "in",
+            "initial",
+            "is",
+            "it",
+            "manage",
+            "module",
+            "of",
+            "operation",
+            "operations",
+            "part",
+            "return",
+            "returns",
+            "setup",
+            "focused",
+            "should",
+            "task",
+            "test",
+            "tests",
+            "that",
+            "the",
+            "to",
+            "with",
+            "works",
+        }
+        aliases = {
+            "authenticate": "auth",
+            "authenticated": "auth",
+            "authentication": "auth",
+            "login": "auth",
+            "signin": "auth",
+            "signup": "auth",
+            "registration": "register",
+        }
+        raw_tokens = re.findall(r"[a-z0-9_]+", text.lower())
+        tokens: set[str] = set()
+        for token in raw_tokens:
+            pieces = [token]
+            if "_" in token:
+                pieces.extend(part for part in token.split("_") if part)
+            if "-" in token:
+                pieces.extend(part for part in token.split("-") if part)
+            for piece in pieces:
+                if len(piece) < 2 or piece.isdigit() or piece in stopwords:
+                    continue
+                normalized = aliases.get(piece, piece)
+                if len(normalized) > 3 and normalized.endswith("s"):
+                    normalized = normalized[:-1]
+                tokens.add(normalized)
+        return tokens
+
+    @staticmethod
+    def _task_semantic_text(task: PlannedTask) -> str:
+        return " ".join(
+            [
+                task.id,
+                task.title,
+                task.description,
+                " ".join(task.acceptance_criteria),
+                " ".join(task.target_files),
+                " ".join(task.required_artifacts),
+            ]
+        )
 
     @staticmethod
     def _find_task_graph_cycle(task_graph: TaskGraph) -> list[str]:
