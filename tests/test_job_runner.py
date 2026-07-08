@@ -4886,8 +4886,30 @@ def test_job_runner_blocks_prd_quality_when_acceptance_tests_do_not_cover_small_
             }
         ],
         "definition_of_done_count": 1,
+        "required_artifact_count": 0,
+        "invalid_required_artifacts": [],
     }
     assert "architect" not in record.outputs
+
+
+def test_prd_quality_rejects_invalid_required_artifact_paths() -> None:
+    prd = PRD(
+        title="Feature",
+        problem_statement="Need feature",
+        smallest_working_core=["Expose a feature module"],
+        small_parts=["Create feature module"],
+        incremental_milestones=["Module exists"],
+        acceptance_tests=["Feature module exists"],
+        definition_of_done=["All tests pass"],
+        required_artifacts=["feature.py", "../outside.py", "C:\\outside.py"],
+    )
+
+    report = JobRunner._build_prd_quality_report(prd)
+
+    assert report["passed"] is False
+    assert report["missing"] == ["required_artifacts_valid_paths"]
+    assert report["required_artifact_count"] == 1
+    assert report["invalid_required_artifacts"] == ["../outside.py", "C:\\outside.py"]
 
 
 def test_prd_quality_accepts_semantically_covered_acceptance_tests() -> None:

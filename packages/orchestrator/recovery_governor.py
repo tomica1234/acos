@@ -342,10 +342,16 @@ class RecoveryGovernor:
             )
         if trigger in {"required_artifacts_missing", "completion_integrity_failed"}:
             missing_artifacts = runtime_state.get("missing_artifacts")
+            non_file_artifacts = runtime_state.get("non_file_artifacts")
             if runtime_state.get("force_project_setup_scaffold") is True and isinstance(
                 missing_artifacts,
                 list,
             ):
+                non_file_artifacts = (
+                    [str(item) for item in non_file_artifacts if str(item).strip()]
+                    if isinstance(non_file_artifacts, list)
+                    else []
+                )
                 return RecoveryPlan(
                     trigger=trigger,
                     strategy="RETURN_TO_IMPLEMENTER",
@@ -362,6 +368,7 @@ class RecoveryGovernor:
                         "target_files": [
                             str(item) for item in missing_artifacts if str(item).strip()
                         ],
+                        "non_file_artifacts": non_file_artifacts,
                         "force_project_setup_scaffold": True,
                     },
                 )

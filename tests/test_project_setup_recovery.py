@@ -94,6 +94,40 @@ def test_project_setup_architect_empty_task_is_normalized_to_scaffold(
     )
 
 
+def test_project_setup_normalization_uses_canonical_artifacts_only(
+    tmp_path: Path,
+) -> None:
+    runner, _environment, record = _runner(tmp_path)
+    task_graph = TaskGraph(
+        goal="Build English vocabulary test app",
+        tasks=[
+            PlannedTask(
+                id="project-scaffold",
+                title="Project scaffold",
+                description="Create backend frontend shared monorepo setup",
+                role="architect",
+                target_files=["../outside.py", "docs/extra.md"],
+                required_artifacts=["C:\\outside.py", "backend/main.py"],
+            )
+        ],
+    )
+
+    normalized = runner._normalize_project_setup_task_graph(record, task_graph)
+    task = normalized.tasks[0]
+
+    assert task.role == "scaffold"
+    assert task.target_files == JobRunner.PROJECT_SETUP_REQUIRED_ARTIFACTS
+    assert task.required_artifacts == JobRunner.PROJECT_SETUP_REQUIRED_ARTIFACTS
+    assert record.outputs["task_graph_normalization"][
+        "ignored_project_setup_artifacts"
+    ] == [
+        {
+            "task_id": "project-scaffold",
+            "paths": ["../outside.py", "docs/extra.md", "C:\\outside.py"],
+        }
+    ]
+
+
 def test_project_setup_cannot_enter_test_writer_before_required_artifacts_exist(
     tmp_path: Path,
 ) -> None:
@@ -199,6 +233,30 @@ def test_update_missing_test_file_recovery_returns_to_test_writer_with_create_hi
 
     plan = record.runtime_state["recovery_plan"]
     constraints = plan["constraints"]
+    assert plan["strategy"] == "RETURN_TO_TEST_WRITER"
+    assert plan["next_actor"] == "test_writer"
+    assert record.status == JobStatus.WRITING_TESTS
+    assert constraints["patch_operation_hint"] == "create"
+    assert constraints["missing_target_file"] == "backend/tests/test_project_setup.py"
+
+
+def test_update_directory_target_recovery_returns_create_hint(
+    tmp_path: Path,
+) -> None:
+    runner, _environment, record = _runner(tmp_path)
+    target = tmp_path / "backend/tests/test_project_setup.py"
+    target.mkdir(parents=True)
+    patch = FilePatch(
+        path="backend/tests/test_project_setup.py",
+        operation="update",
+        content="def test_project_setup() -> None:\n    assert True\n",
+    )
+
+    runner._apply_patches(record, "test_writer", [patch])
+
+    plan = record.runtime_state["recovery_plan"]
+    constraints = plan["constraints"]
+    assert target.is_dir()
     assert plan["strategy"] == "RETURN_TO_TEST_WRITER"
     assert plan["next_actor"] == "test_writer"
     assert record.status == JobStatus.WRITING_TESTS
@@ -334,6 +392,47 @@ def test_recreate_target_files_recovery_replans_invalid_artifact_paths(
     assert not (tmp_path.parent / "outside.py").exists()
 
 
+def test_recreate_target_files_treats_directory_target_as_missing(
+    tmp_path: Path,
+) -> None:
+    test_path = "frontend/test/project_scaffold.test.tsx"
+    (tmp_path / test_path).mkdir(parents=True)
+    spec = JobSpec(
+        request_text="Build it",
+        repo_path=str(tmp_path),
+        workspace_root=str(tmp_path),
+        target_branch="acos/recovery-directory-target",
+    )
+    record = JobRecord(job_id=spec.job_id, spec=spec, status=JobStatus.RECOVERING)
+    record.runtime_state["recovery_plan"] = {
+        "id": "plan-directory-target",
+        "trigger": "target_files_missing",
+        "strategy": "RETURN_TO_TEST_WRITER",
+        "next_status": JobStatus.WRITING_TESTS.value,
+        "next_actor": "test_writer",
+        "steps": ["RETURN_TO_TEST_WRITER", "RECREATE_TARGET_FILES"],
+        "current_step_index": 0,
+        "status": "pending",
+        "constraints": {
+            "required_artifacts": [test_path],
+            "target_files": [test_path],
+            "missing_target_file": test_path,
+        },
+    }
+    executor = RecoveryExecutor()
+
+    executor.execute_until_ready(record)
+    executor.execute_until_ready(record)
+
+    plan = record.runtime_state["recovery_plan"]
+    assert (tmp_path / test_path).is_dir()
+    assert plan["status"] == "running"
+    assert plan["constraints"]["missing_artifacts"] == [test_path]
+    assert plan["constraints"]["recreate_target_files_attempt"] == 2
+    assert "deterministically_created_files" not in plan["constraints"]
+    assert record.status == JobStatus.WRITING_TESTS
+
+
 def test_repeated_missing_test_file_is_created_deterministically_after_two_failures(
     tmp_path: Path,
 ) -> None:
@@ -392,6 +491,34 @@ def test_project_setup_scaffold_creates_required_files(tmp_path: Path) -> None:
         assert (tmp_path / artifact).exists(), artifact
     evidence = record.outputs["project_setup_scaffold"]["artifact_evidence"]
     assert all(item["exists"] for item in evidence)
+
+
+def test_project_setup_scaffold_blocks_on_non_file_artifact(
+    tmp_path: Path,
+) -> None:
+    runner, _environment, record = _runner(tmp_path)
+    (tmp_path / "README.md").mkdir()
+    task = runner._normalize_project_setup_task_graph(
+        record,
+        _bad_project_setup_graph(),
+    ).tasks[0]
+
+    result = runner._run_project_setup_scaffold(record, task)
+
+    assert result.status == ImplementationStatus.BLOCKED
+    scaffold = record.outputs["project_setup_scaffold"]
+    readme_evidence = next(
+        item for item in scaffold["artifact_evidence"] if item["path"] == "README.md"
+    )
+    assert readme_evidence["exists"] is False
+    assert readme_evidence["path_exists"] is True
+    assert readme_evidence["is_file"] is False
+    assert "README.md" in scaffold["missing_artifacts"]
+    assert scaffold["non_file_artifacts"] == ["README.md"]
+    plan = record.runtime_state["recovery_plan"]
+    assert plan["trigger"] == "required_artifacts_missing"
+    assert "README.md" in plan["constraints"]["non_file_artifacts"]
+    assert not (tmp_path / "backend/main.py").exists()
 
 
 def test_zero_patch_implementation_stage_is_failed_for_recovery_even_if_tests_pass(

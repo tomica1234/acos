@@ -1364,8 +1364,7 @@ class JobRunner:
         patch_path = str(getattr(patch, "path", ""))
         if not patch_path:
             return patch
-        file_path = self._workspace_root(record) / patch_path
-        if file_path.exists():
+        if artifact_path_exists(patch_path, workspace_root=self._workspace_root(record)):
             return patch
         known_missing = self._is_known_missing_patch_target(record, patch_path)
         if known_missing and getattr(patch, "content", None) is not None:
@@ -1420,7 +1419,10 @@ class JobRunner:
             if (
                 getattr(patch, "operation", None) == "update"
                 and getattr(patch, "content", None) is not None
-                and not (self._workspace_root(record) / str(getattr(patch, "path", ""))).exists()
+                and not artifact_path_exists(
+                    str(getattr(patch, "path", "")),
+                    workspace_root=self._workspace_root(record),
+                )
                 and self._is_known_missing_patch_target(record, str(getattr(patch, "path", "")))
             ):
                 patch = patch.model_copy(
@@ -1877,6 +1879,9 @@ class JobRunner:
             missing.append("acceptance_tests_semantically_cover_small_parts")
         if not JobRunner._non_empty_items(prd.definition_of_done):
             missing.append("definition_of_done")
+        invalid_required_artifacts = invalid_artifact_paths(prd.required_artifacts)
+        if invalid_required_artifacts:
+            missing.append("required_artifacts_valid_paths")
         if prd.open_questions:
             warnings.append("open_questions_present")
         missing_acceptance_test_count = max(0, len(small_parts) - len(acceptance_tests))
@@ -1894,6 +1899,8 @@ class JobRunner:
             "acceptance_test_small_part_coverage": acceptance_test_small_part_coverage,
             "uncovered_acceptance_small_parts": uncovered_acceptance_small_parts,
             "definition_of_done_count": len(JobRunner._non_empty_items(prd.definition_of_done)),
+            "required_artifact_count": len(valid_artifact_paths(prd.required_artifacts)),
+            "invalid_required_artifacts": invalid_required_artifacts,
         }
 
     @staticmethod
@@ -2047,15 +2054,22 @@ class JobRunner:
     ) -> TaskGraph:
         tasks: list[PlannedTask] = []
         normalized_task_ids: list[str] = []
+        ignored_project_setup_artifacts: list[dict[str, Any]] = []
         for task in task_graph.tasks:
             if self._is_project_setup_task(task):
-                artifacts = self._unique_paths(
-                    [
-                        *task.target_files,
-                        *task.required_artifacts,
-                        *self.PROJECT_SETUP_REQUIRED_ARTIFACTS,
-                    ]
+                declared_artifacts = self._unique_paths(
+                    [*task.target_files, *task.required_artifacts]
                 )
+                ignored_artifacts = [
+                    artifact
+                    for artifact in declared_artifacts
+                    if artifact not in self.PROJECT_SETUP_REQUIRED_ARTIFACTS
+                ]
+                if ignored_artifacts:
+                    ignored_project_setup_artifacts.append(
+                        {"task_id": task.id, "paths": ignored_artifacts}
+                    )
+                artifacts = list(self.PROJECT_SETUP_REQUIRED_ARTIFACTS)
                 tasks.append(
                     task.model_copy(
                         update={
@@ -2096,6 +2110,7 @@ class JobRunner:
             "applied": True,
             "normalized_task_ids": normalized_task_ids,
             "required_artifacts": list(self.PROJECT_SETUP_REQUIRED_ARTIFACTS),
+            "ignored_project_setup_artifacts": ignored_project_setup_artifacts,
         }
         self.store.update(record)
         return normalized
@@ -2138,13 +2153,15 @@ class JobRunner:
             return []
         artifacts = self._unique_paths(
             [
-                *(task.target_files if task is not None else []),
-                *(task.required_artifacts if task is not None else []),
                 *self.PROJECT_SETUP_REQUIRED_ARTIFACTS,
             ]
         )
         root = self._workspace_root(record)
-        return [artifact for artifact in artifacts if not (root / artifact).exists()]
+        return [
+            artifact
+            for artifact in artifacts
+            if not artifact_path_exists(artifact, workspace_root=root)
+        ]
 
     def _ensure_project_setup_ready_before_test_writer(
         self,
@@ -2173,19 +2190,58 @@ class JobRunner:
         task: PlannedTask,
     ) -> ImplementationResult:
         apply_transition(record, JobStatus.IMPLEMENTING)
+        preflight_evidence = self._project_setup_artifact_evidence(record, task)
+        blocking_artifacts = [
+            item["path"]
+            for item in preflight_evidence
+            if item["path_exists"] and not item["is_file"]
+        ]
+        if blocking_artifacts:
+            missing = [
+                item["path"] for item in preflight_evidence if not item["exists"]
+            ]
+            record.outputs["project_setup_scaffold"] = {
+                "task_id": task.id,
+                "artifact_evidence": preflight_evidence,
+                "missing_artifacts": missing,
+                "non_file_artifacts": blocking_artifacts,
+            }
+            self.store.update(record)
+            self._recover_record(
+                record,
+                error="required_artifacts_missing:project_setup_artifact_blocked_by_non_file",
+                runtime_state={
+                    "required_artifacts": list(self.PROJECT_SETUP_REQUIRED_ARTIFACTS),
+                    "target_files": list(self.PROJECT_SETUP_REQUIRED_ARTIFACTS),
+                    "missing_artifacts": missing,
+                    "non_file_artifacts": blocking_artifacts,
+                    "failed_task_id": task.id,
+                    "force_project_setup_scaffold": True,
+                },
+            )
+            return ImplementationResult(
+                status=ImplementationStatus.BLOCKED,
+                summary="Project setup scaffold is blocked by non-file artifact paths.",
+                changed_files=[],
+                patches=[],
+                risks=[
+                    "Non-file paths must be removed or renamed before deterministic scaffold can write project setup artifacts."
+                ],
+            )
         patches = [
             FilePatch(
                 path=artifact,
                 operation=(
                     "update"
-                    if (self._workspace_root(record) / artifact).exists()
+                    if artifact_path_exists(
+                        artifact,
+                        workspace_root=self._workspace_root(record),
+                    )
                     else "create"
                 ),
                 content=self._project_setup_file_content(artifact, record),
             )
-            for artifact in self._unique_paths(
-                [*task.required_artifacts, *self.PROJECT_SETUP_REQUIRED_ARTIFACTS]
-            )
+            for artifact in self.PROJECT_SETUP_REQUIRED_ARTIFACTS
         ]
         result = ImplementationResult(
             status=ImplementationStatus.IMPLEMENTED,
@@ -2266,15 +2322,15 @@ class JobRunner:
         task: PlannedTask,
     ) -> list[dict[str, Any]]:
         root = self._workspace_root(record)
-        artifacts = self._unique_paths(
-            [*task.required_artifacts, *self.PROJECT_SETUP_REQUIRED_ARTIFACTS]
-        )
+        artifacts = list(self.PROJECT_SETUP_REQUIRED_ARTIFACTS)
         return [
             {
                 "path": artifact,
-                "exists": (root / artifact).exists(),
+                "exists": artifact_path_exists(artifact, workspace_root=root),
+                "path_exists": (root / artifact).exists(),
+                "is_file": (root / artifact).is_file(),
                 "size": (root / artifact).stat().st_size
-                if (root / artifact).exists()
+                if (root / artifact).is_file()
                 else 0,
             }
             for artifact in artifacts
@@ -3972,6 +4028,9 @@ class JobRunner:
     ) -> bool:
         if implementation.status == ImplementationStatus.IMPLEMENTED:
             return True
+        if self._has_pending_recovery_plan(record):
+            self.store.update(record)
+            return False
         task_id = task.id if task is not None else "unplanned"
         if implementation.status == ImplementationStatus.BLOCKED:
             self._recover_record(record, error=f"implementation_blocked:{task_id}")

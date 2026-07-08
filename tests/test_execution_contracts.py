@@ -61,6 +61,32 @@ def test_synthesize_job_metadata_from_prd_uses_explicit_fastapi_contract(tmp_pat
     assert metadata["acceptance_checks"][0]["path"] == "/"
 
 
+def test_synthesize_job_metadata_filters_invalid_required_artifacts(tmp_path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    prd = PRD(
+        title="Feature",
+        problem_statement="Build a feature.",
+        required_artifacts=[
+            "src/feature.py",
+            "../outside.py",
+            "C:\\outside.py",
+            "docs/",
+        ],
+    )
+
+    metadata = synthesize_job_metadata_from_prd(
+        prd,
+        {"required_artifacts": ["tests/test_feature.py", "/absolute.py"]},
+        workspace_root=workspace,
+    )
+
+    assert metadata["required_artifacts"] == [
+        "src/feature.py",
+        "tests/test_feature.py",
+    ]
+
+
 def test_synthesize_job_metadata_from_prd_inferrs_django_contract(tmp_path) -> None:
     workspace = tmp_path / "my-product"
     workspace.mkdir()

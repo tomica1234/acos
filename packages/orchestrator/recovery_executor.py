@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from packages.orchestrator.quality_gates import invalid_artifact_paths
+from packages.orchestrator.quality_gates import artifact_path_exists, invalid_artifact_paths
 from packages.orchestrator.statuses import is_hard_terminal_status, is_waiting_status
 from packages.schemas.checkpoints import CheckpointRecord
 from packages.schemas.jobs import JobRecord
@@ -94,7 +94,9 @@ class RecoveryExecutor:
             return True
         paths = [path for path in paths if path not in set(invalid)]
         root = Path(record.spec.workspace_root or record.spec.repo_path).resolve()
-        missing = [path for path in paths if not (root / path).exists()]
+        missing = [
+            path for path in paths if not artifact_path_exists(path, workspace_root=root)
+        ]
         if not missing:
             constraints["missing_artifacts"] = []
             return True
@@ -112,7 +114,11 @@ class RecoveryExecutor:
                 if attempted:
                     constraints["deterministic_creation_attempted"] = True
                     constraints["deterministically_created_files"] = attempted
-                    missing = [path for path in paths if not (root / path).exists()]
+                    missing = [
+                        path
+                        for path in paths
+                        if not artifact_path_exists(path, workspace_root=root)
+                    ]
                     constraints["missing_artifacts"] = missing
                     if not missing:
                         return True
@@ -198,9 +204,12 @@ class RecoveryExecutor:
             target = root / normalized
             try:
                 target.parent.mkdir(parents=True, exist_ok=True)
+                if target.exists() and not target.is_file():
+                    continue
                 if not target.exists():
                     target.write_text(content, encoding="utf-8")
-                created.append(normalized)
+                if artifact_path_exists(normalized, workspace_root=root):
+                    created.append(normalized)
             except OSError:
                 continue
         return created
