@@ -154,6 +154,7 @@ class JobRunner:
         "implementation_tasks_missing_target_files",
         "test_writer_missing_implementation_dependencies",
         "test_writer_dependency_semantic_mismatches",
+        "test_writer_acceptance_dependency_mismatches",
         "executor_order_dependency_violations",
         "invalid_task_artifacts",
     )
@@ -1178,6 +1179,7 @@ class JobRunner:
             "executable_tasks_missing_required_artifacts",
             "implementation_tasks_missing_target_files",
             "test_writer_missing_implementation_dependencies",
+            "test_writer_acceptance_dependency_mismatches",
             "executor_order_dependency_violations",
             "invalid_task_artifacts",
             "recovery_mode",
@@ -3226,6 +3228,8 @@ class JobRunner:
                     "depends_on from every test_writer task to the implementer/scaffold task it verifies, "
                     "test_writer dependencies that semantically match the behavior "
                     "being tested, "
+                    "test_writer acceptance_criteria that are semantically covered "
+                    "by the implementer/scaffold dependencies, "
                     "repo source target_files on implementer/scaffold tasks, "
                     "test target_files on test_writer tasks, "
                     "matching target_files and required_artifacts on every executable task, "
@@ -3569,6 +3573,9 @@ class JobRunner:
         test_writer_dependency_semantic_mismatches = (
             JobRunner._test_writer_dependency_semantic_mismatches(task_graph)
         )
+        test_writer_acceptance_dependency_mismatches = (
+            JobRunner._test_writer_acceptance_dependency_mismatches(task_graph)
+        )
         project_setup_scaffold_covers_test_artifacts = (
             bool(prd_test_required_artifacts)
             and all(
@@ -3810,6 +3817,13 @@ class JobRunner:
                     "items": test_writer_dependency_semantic_mismatches,
                 }
             )
+        if require_task_artifacts and test_writer_acceptance_dependency_mismatches:
+            errors.append(
+                {
+                    "type": "test_writer_acceptance_dependency_mismatch",
+                    "items": test_writer_acceptance_dependency_mismatches,
+                }
+            )
         implementation_tasks_missing_artifacts = [
             task.id
             for task in task_graph.tasks
@@ -3916,6 +3930,9 @@ class JobRunner:
             "test_writer_dependency_semantic_mismatches": (
                 test_writer_dependency_semantic_mismatches
             ),
+            "test_writer_acceptance_dependency_mismatches": (
+                test_writer_acceptance_dependency_mismatches
+            ),
             "executor_order_dependency_violations": (
                 executor_order_dependency_violations
             ),
@@ -3986,6 +4003,97 @@ class JobRunner:
                     }
                 )
         return mismatches
+
+    @staticmethod
+    def _test_writer_acceptance_dependency_mismatches(
+        task_graph: TaskGraph,
+    ) -> list[dict[str, Any]]:
+        task_by_id = {task.id: task for task in task_graph.tasks}
+        mismatches: list[dict[str, Any]] = []
+        for task in task_graph.tasks:
+            if task.role not in JobRunner.TEST_TASK_ROLES:
+                continue
+            implementation_dependencies = [
+                task_by_id[dependency_id]
+                for dependency_id in task.depends_on
+                if dependency_id in task_by_id
+                and task_by_id[dependency_id].role in JobRunner.IMPLEMENTATION_TASK_ROLES
+            ]
+            if not implementation_dependencies:
+                continue
+            dependency_tokens = [
+                JobRunner._semantic_tokens(JobRunner._task_semantic_text(dependency))
+                for dependency in implementation_dependencies
+            ]
+            uncovered_criteria: list[dict[str, Any]] = []
+            for index, criterion in enumerate(
+                JobRunner._non_empty_items(task.acceptance_criteria),
+                start=1,
+            ):
+                criterion_tokens = JobRunner._test_writer_acceptance_dependency_tokens(
+                    criterion
+                )
+                if not criterion_tokens:
+                    continue
+                required_score = JobRunner._semantic_overlap_required(criterion_tokens)
+                anchor_tokens = JobRunner._semantic_anchor_tokens(criterion_tokens)
+                covered = any(
+                    JobRunner._semantic_overlap_score(
+                        criterion_tokens,
+                        candidate_tokens,
+                    )
+                    >= required_score
+                    and JobRunner._semantic_anchor_satisfied(
+                        anchor_tokens,
+                        candidate_tokens,
+                    )
+                    for candidate_tokens in dependency_tokens
+                )
+                if not covered:
+                    uncovered_criteria.append(
+                        {
+                            "acceptance_criteria_index": index,
+                            "acceptance_criteria": criterion,
+                            "covered": False,
+                        }
+                    )
+            if uncovered_criteria:
+                mismatches.append(
+                    {
+                        "task_id": task.id,
+                        "depends_on": [
+                            dependency.id for dependency in implementation_dependencies
+                        ],
+                        "required_dependency_roles": sorted(
+                            JobRunner.IMPLEMENTATION_TASK_ROLES
+                        ),
+                        "uncovered_acceptance_criteria": uncovered_criteria,
+                    }
+                )
+        return mismatches
+
+    @staticmethod
+    def _test_writer_acceptance_dependency_tokens(criterion: str) -> set[str]:
+        generic_test_tokens = {
+            "artifact",
+            "artifacts",
+            "by",
+            "cover",
+            "covered",
+            "coverage",
+            "exist",
+            "exists",
+            "file",
+            "files",
+            "generated",
+            "pass",
+            "passe",
+            "passed",
+            "passing",
+            "regression",
+            "smoke",
+        }
+        return JobRunner._semantic_tokens(criterion) - generic_test_tokens
 
     @staticmethod
     def _executor_order_dependency_violations(
