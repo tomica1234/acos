@@ -611,10 +611,6 @@ class RecoveryGovernor:
             "failed_stage",
             "failed_task_id",
             "stage_failure_reason",
-            "failed_patch_role",
-            "failed_patch_path",
-            "failed_patch_operation",
-            "missing_target_file",
         ):
             value = runtime_state.get(key)
             if isinstance(value, str) and value.strip():

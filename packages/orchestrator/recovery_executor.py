@@ -16,6 +16,23 @@ from packages.schemas.models import JobStatus
 class RecoveryExecutor:
     """Consume RecoveryGovernor plans and make them actionable."""
 
+    STALE_RECOVERY_CONSTRAINT_KEYS = {
+        "deterministic_creation_attempted",
+        "deterministically_created_files",
+        "failed_patch_operation",
+        "failed_patch_path",
+        "failed_patch_role",
+        "force_project_setup_scaffold",
+        "invalid_artifacts",
+        "missing_artifacts",
+        "missing_target_file",
+        "non_file_artifacts",
+        "patch_operation_hint",
+        "recovery_mode",
+        "recreate_target_files_attempt",
+        "return_to_role",
+    }
+
     def __init__(self, store: Any | None = None) -> None:
         self.store = store
 
@@ -190,11 +207,12 @@ class RecoveryExecutor:
             constraints = {}
             record.spec.metadata["constraints"] = constraints
         plan_constraints = plan.get("constraints")
-        if isinstance(plan_constraints, dict):
-            for stale_key in ("patch_operation_hint",):
-                if stale_key not in plan_constraints:
-                    constraints.pop(stale_key, None)
-            constraints.update(plan_constraints)
+        if not isinstance(plan_constraints, dict):
+            plan_constraints = {}
+        for stale_key in RecoveryExecutor.STALE_RECOVERY_CONSTRAINT_KEYS:
+            if stale_key not in plan_constraints:
+                constraints.pop(stale_key, None)
+        constraints.update(plan_constraints)
         for target_key, source_key in (
             ("recovery_strategy", "strategy"),
             ("recovery_next_actor", "next_actor"),

@@ -231,6 +231,36 @@ def test_recovery_governor_preserves_artifact_stage_context() -> None:
     assert constraints["invalid_artifacts"] == ["../outside.py"]
 
 
+def test_recovery_governor_drops_stale_patch_context_for_artifact_replan() -> None:
+    record = _record("required_artifacts_missing:stage:core")
+
+    RecoveryGovernor().recover(
+        record,
+        error="required_artifacts_missing:stage:core",
+        runtime_state={
+            "failed_stage": 2,
+            "failed_task_id": "core",
+            "stage_failure_reason": "required_artifacts_missing",
+            "required_artifacts": ["backend/main.py"],
+            "target_files": ["backend/main.py"],
+            "missing_artifacts": ["backend/main.py"],
+            "failed_patch_role": "test_writer",
+            "failed_patch_path": "frontend/test/project_scaffold.test.tsx",
+            "failed_patch_operation": "update",
+            "missing_target_file": "frontend/test/project_scaffold.test.tsx",
+        },
+    )
+
+    constraints = record.runtime_state["recovery_plan"]["constraints"]
+    assert constraints["failed_stage"] == 2
+    assert constraints["failed_task_id"] == "core"
+    assert constraints["missing_artifacts"] == ["backend/main.py"]
+    assert "failed_patch_role" not in constraints
+    assert "failed_patch_path" not in constraints
+    assert "failed_patch_operation" not in constraints
+    assert "missing_target_file" not in constraints
+
+
 def test_quality_gate_error_is_recoverable_unless_policy_denied(tmp_path: Path) -> None:
     runner, _environment = _runner(tmp_path)
     record = _record(status=JobStatus.TESTING)

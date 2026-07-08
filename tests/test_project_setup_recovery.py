@@ -573,6 +573,69 @@ def test_recreate_target_files_recovery_replans_invalid_artifact_paths(
     assert not (tmp_path.parent / "outside.py").exists()
 
 
+def test_recovery_executor_sync_drops_stale_file_recovery_metadata(
+    tmp_path: Path,
+) -> None:
+    spec = JobSpec(
+        request_text="Build it",
+        repo_path=str(tmp_path),
+        workspace_root=str(tmp_path),
+        target_branch="acos/recovery-stale-file-context",
+        metadata={
+            "constraints": {
+                "recovery_mode": "target_files_missing",
+                "recovery_strategy": "RETURN_TO_TEST_WRITER",
+                "recovery_next_actor": "test_writer",
+                "recovery_next_status": JobStatus.WRITING_TESTS.value,
+                "return_to_role": "test_writer",
+                "patch_operation_hint": "create",
+                "missing_target_file": "frontend/test/project_scaffold.test.tsx",
+                "missing_artifacts": ["frontend/test/project_scaffold.test.tsx"],
+                "failed_patch_role": "test_writer",
+                "failed_patch_path": "frontend/test/project_scaffold.test.tsx",
+                "failed_patch_operation": "update",
+                "max_autonomous_stages": 12,
+            }
+        },
+    )
+    record = JobRecord(job_id=spec.job_id, spec=spec, status=JobStatus.RECOVERING)
+    record.runtime_state["recovery_plan"] = {
+        "id": "plan-invalid-now",
+        "trigger": "target_files_invalid",
+        "strategy": "REPLAN_TASK_WITH_REQUIRED_ARTIFACTS",
+        "next_status": JobStatus.REPLANNING.value,
+        "next_actor": "planner",
+        "steps": ["REPLAN_TASK_WITH_REQUIRED_ARTIFACTS"],
+        "current_step_index": 0,
+        "status": "pending",
+        "constraints": {
+            "recovery_mode": "invalid_artifacts_replan",
+            "invalid_artifacts": ["../outside.py"],
+        },
+    }
+
+    RecoveryExecutor().execute_until_ready(record)
+
+    constraints = record.spec.metadata["constraints"]
+    assert record.runtime_state["recovery_plan"]["status"] == "completed"
+    assert record.status == JobStatus.REPLANNING
+    assert constraints["max_autonomous_stages"] == 12
+    assert constraints["recovery_mode"] == "invalid_artifacts_replan"
+    assert constraints["recovery_strategy"] == "REPLAN_TASK_WITH_REQUIRED_ARTIFACTS"
+    assert constraints["recovery_next_actor"] == "planner"
+    assert constraints["invalid_artifacts"] == ["../outside.py"]
+    for stale_key in (
+        "return_to_role",
+        "patch_operation_hint",
+        "missing_target_file",
+        "missing_artifacts",
+        "failed_patch_role",
+        "failed_patch_path",
+        "failed_patch_operation",
+    ):
+        assert stale_key not in constraints
+
+
 def test_recreate_target_files_treats_directory_target_as_missing(
     tmp_path: Path,
 ) -> None:
