@@ -2469,6 +2469,61 @@ def test_task_graph_validation_requires_test_writer_implementation_dependency() 
     } in validation["errors"]
 
 
+def test_task_graph_validation_rejects_unrelated_test_writer_dependency() -> None:
+    task_graph = TaskGraph(
+        goal="Build feature",
+        tasks=[
+            PlannedTask(
+                id="backend-api",
+                title="Build backend API",
+                description="Expose backend JSON endpoints.",
+                role="implementer",
+                acceptance_criteria=["Backend API returns JSON"],
+                target_files=["backend/main.py"],
+                required_artifacts=["backend/main.py"],
+            ),
+            PlannedTask(
+                id="frontend-ui",
+                title="Build frontend UI",
+                description="Render VALUE in the browser UI.",
+                role="implementer",
+                acceptance_criteria=["Frontend UI renders VALUE"],
+                target_files=["frontend/src/App.tsx"],
+                required_artifacts=["frontend/src/App.tsx"],
+            ),
+            PlannedTask(
+                id="frontend-tests",
+                title="Test frontend UI",
+                description="Test the browser UI rendering VALUE.",
+                role="test_writer",
+                depends_on=["backend-api"],
+                acceptance_criteria=["Frontend UI renders VALUE"],
+                target_files=["frontend/test/app.test.tsx"],
+                required_artifacts=["frontend/test/app.test.tsx"],
+            ),
+        ],
+    )
+
+    validation = JobRunner._build_task_graph_validation(
+        task_graph,
+        require_acceptance_criteria=True,
+        require_task_artifacts=True,
+    )
+
+    assert validation["valid"] is False
+    assert validation["test_writer_dependency_semantic_mismatches"] == [
+        {
+            "task_id": "frontend-tests",
+            "depends_on": ["backend-api"],
+            "required_dependency_roles": ["implementer", "scaffold"],
+        }
+    ]
+    assert {
+        "type": "test_writer_dependency_semantic_mismatch",
+        "items": validation["test_writer_dependency_semantic_mismatches"],
+    } in validation["errors"]
+
+
 def test_task_graph_validation_requires_test_writer_acceptance_criteria() -> None:
     task_graph = TaskGraph(
         goal="Build feature",

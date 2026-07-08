@@ -153,6 +153,7 @@ class JobRunner:
         "test_writer_tasks_missing_acceptance_criteria",
         "implementation_tasks_missing_target_files",
         "test_writer_missing_implementation_dependencies",
+        "test_writer_dependency_semantic_mismatches",
         "executor_order_dependency_violations",
         "invalid_task_artifacts",
     )
@@ -3223,6 +3224,8 @@ class JobRunner:
                     "target_files on every test_writer task, "
                     "required_artifacts on every executable task, "
                     "depends_on from every test_writer task to the implementer/scaffold task it verifies, "
+                    "test_writer dependencies that semantically match the behavior "
+                    "being tested, "
                     "repo source target_files on implementer/scaffold tasks, "
                     "test target_files on test_writer tasks, "
                     "matching target_files and required_artifacts on every executable task, "
@@ -3563,6 +3566,9 @@ class JobRunner:
                 for dependency in task.depends_on
             )
         ]
+        test_writer_dependency_semantic_mismatches = (
+            JobRunner._test_writer_dependency_semantic_mismatches(task_graph)
+        )
         project_setup_scaffold_covers_test_artifacts = (
             bool(prd_test_required_artifacts)
             and all(
@@ -3797,6 +3803,13 @@ class JobRunner:
                     "items": test_writer_missing_implementation_dependencies,
                 }
             )
+        if require_task_artifacts and test_writer_dependency_semantic_mismatches:
+            errors.append(
+                {
+                    "type": "test_writer_dependency_semantic_mismatch",
+                    "items": test_writer_dependency_semantic_mismatches,
+                }
+            )
         implementation_tasks_missing_artifacts = [
             task.id
             for task in task_graph.tasks
@@ -3900,6 +3913,9 @@ class JobRunner:
             "test_writer_missing_implementation_dependencies": (
                 test_writer_missing_implementation_dependencies
             ),
+            "test_writer_dependency_semantic_mismatches": (
+                test_writer_dependency_semantic_mismatches
+            ),
             "executor_order_dependency_violations": (
                 executor_order_dependency_violations
             ),
@@ -3918,6 +3934,58 @@ class JobRunner:
             ),
             "errors": errors,
         }
+
+    @staticmethod
+    def _test_writer_dependency_semantic_mismatches(
+        task_graph: TaskGraph,
+    ) -> list[dict[str, Any]]:
+        task_by_id = {task.id: task for task in task_graph.tasks}
+        mismatches: list[dict[str, Any]] = []
+        for task in task_graph.tasks:
+            if task.role not in JobRunner.TEST_TASK_ROLES:
+                continue
+            implementation_dependencies = [
+                task_by_id[dependency_id]
+                for dependency_id in task.depends_on
+                if dependency_id in task_by_id
+                and task_by_id[dependency_id].role in JobRunner.IMPLEMENTATION_TASK_ROLES
+            ]
+            if not implementation_dependencies:
+                continue
+            task_tokens = JobRunner._semantic_tokens(JobRunner._task_semantic_text(task))
+            if not task_tokens:
+                continue
+            anchor_tokens = JobRunner._semantic_anchor_tokens(task_tokens)
+            matching_dependencies: list[str] = []
+            for dependency in implementation_dependencies:
+                dependency_tokens = JobRunner._semantic_tokens(
+                    JobRunner._task_semantic_text(dependency)
+                )
+                score = JobRunner._semantic_overlap_score(
+                    task_tokens,
+                    dependency_tokens,
+                )
+                if (
+                    score >= 1
+                    and JobRunner._semantic_anchor_satisfied(
+                        anchor_tokens,
+                        dependency_tokens,
+                    )
+                ):
+                    matching_dependencies.append(dependency.id)
+            if not matching_dependencies:
+                mismatches.append(
+                    {
+                        "task_id": task.id,
+                        "depends_on": [
+                            dependency.id for dependency in implementation_dependencies
+                        ],
+                        "required_dependency_roles": sorted(
+                            JobRunner.IMPLEMENTATION_TASK_ROLES
+                        ),
+                    }
+                )
+        return mismatches
 
     @staticmethod
     def _executor_order_dependency_violations(
