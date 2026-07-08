@@ -2139,6 +2139,13 @@ class JobRunner:
             for path in source_required_artifacts
             if not self._looks_like_test_path(path)
         ]
+        implementation_task_count = len(
+            [
+                task
+                for task in task_graph.tasks
+                if task.role in self.IMPLEMENTATION_TASK_ROLES
+            ]
+        )
         if (
             not acceptance_tests
             and not definition_of_done
@@ -2174,11 +2181,16 @@ class JobRunner:
                 implementation_index += 1
             else:
                 implementation_index += 1
-            if source_implementation_artifacts:
+            task_artifacts = self._prd_artifacts_for_task(
+                task,
+                source_implementation_artifacts,
+                implementation_task_count=implementation_task_count,
+            )
+            if task_artifacts:
                 if not valid_artifact_paths(task.target_files):
-                    updates["target_files"] = list(source_implementation_artifacts)
+                    updates["target_files"] = list(task_artifacts)
                 if not valid_artifact_paths(task.required_artifacts):
-                    updates["required_artifacts"] = list(source_implementation_artifacts)
+                    updates["required_artifacts"] = list(task_artifacts)
                 if "target_files" in updates or "required_artifacts" in updates:
                     artifact_updated_task_ids.append(task.id)
             tasks.append(task.model_copy(update=updates) if updates else task)
@@ -2615,6 +2627,49 @@ class JobRunner:
         if len(cleaned) > 80:
             cleaned = f"{cleaned[:77].rstrip()}..."
         return cleaned or "Implement small part"
+
+    @classmethod
+    def _prd_artifacts_for_task(
+        cls,
+        task: PlannedTask,
+        artifacts: list[str],
+        *,
+        implementation_task_count: int,
+    ) -> list[str]:
+        if not artifacts:
+            return []
+        if implementation_task_count <= 1:
+            return list(artifacts)
+        task_tokens = cls._semantic_tokens(cls._task_semantic_text(task))
+        matched: list[str] = []
+        for artifact in artifacts:
+            artifact_tokens = cls._artifact_semantic_tokens(artifact)
+            if task_tokens & artifact_tokens:
+                matched.append(artifact)
+        return matched
+
+    @classmethod
+    def _artifact_semantic_tokens(cls, path: str) -> set[str]:
+        normalized = path.replace("\\", "/")
+        stem_text = re.sub(r"[./_-]+", " ", normalized)
+        tokens = cls._semantic_tokens(stem_text)
+        return tokens - {
+            "backend",
+            "component",
+            "components",
+            "frontend",
+            "index",
+            "main",
+            "page",
+            "pages",
+            "py",
+            "server",
+            "src",
+            "tsx",
+            "ts",
+            "view",
+            "views",
+        }
 
     def _load_or_repair_task_graph_for_autonomy(
         self,

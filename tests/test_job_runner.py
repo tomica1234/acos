@@ -1741,6 +1741,95 @@ def test_job_runner_preserves_existing_acceptance_criteria_when_enriching_later_
     assert tasks[1]["acceptance_criteria"] == ["double(4) returns 8"]
 
 
+def test_task_graph_enrichment_matches_prd_artifacts_to_multi_tasks(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    registry = ModelRegistry.from_paths(
+        provider_path=config_dir() / "model_providers.yaml",
+        agents_path=config_dir() / "agents.yaml",
+        routing_path=config_dir() / "model_routing.yaml",
+    )
+    policy = PolicyEngine.from_path(config_dir() / "policies.yaml")
+    environment = FakeMCPEnvironment(
+        workspace_root=workspace,
+        memory_db_path=workspace / ".memory.sqlite3",
+    )
+    runner = JobRunner(registry=registry, policy=policy, router=environment.build_router())
+    record = runner.store.create(
+        JobSpec(
+            request_text="Build an English vocabulary app",
+            repo_path=str(workspace),
+            target_branch="acos/artifact-match",
+        )
+    )
+    prd = PRD(
+        title="English Vocab App",
+        problem_statement="Need account-based vocabulary practice.",
+        smallest_working_core=["Serve an authenticated vocabulary shell"],
+        small_parts=[
+            "User authentication and roles",
+            "Word set CRUD operations",
+        ],
+        incremental_milestones=[
+            "Users can authenticate",
+            "Teachers can manage word sets",
+        ],
+        acceptance_tests=[
+            "Student can register and login",
+            "Teacher can perform CRUD for word sets",
+        ],
+        definition_of_done=["All tests pass"],
+        required_artifacts=[
+            "backend/auth.py",
+            "backend/words.py",
+            "backend/main.py",
+            "tests/test_vocab_app.py",
+        ],
+    )
+    task_graph = TaskGraph(
+        goal="Build English vocabulary app",
+        tasks=[
+            PlannedTask(
+                id="auth",
+                title="User authentication",
+                description="Implement authentication and roles.",
+                role="implementer",
+            ),
+            PlannedTask(
+                id="word-sets",
+                title="Word set CRUD",
+                description="Implement word set CRUD operations.",
+                role="implementer",
+                depends_on=["auth"],
+            ),
+        ],
+    )
+
+    refined = runner._enrich_task_graph_acceptance_criteria(record, prd, task_graph)
+
+    tasks = {task.id: task for task in refined.tasks}
+    assert tasks["auth"].target_files == ["backend/auth.py"]
+    assert tasks["auth"].required_artifacts == ["backend/auth.py"]
+    assert tasks["word-sets"].target_files == ["backend/words.py"]
+    assert tasks["word-sets"].required_artifacts == ["backend/words.py"]
+    assert record.outputs["task_graph_acceptance_enrichment"][
+        "artifact_updated_task_ids"
+    ] == ["auth", "word-sets"]
+
+    validation = JobRunner._build_task_graph_validation(
+        refined,
+        prd=prd,
+        require_acceptance_criteria=True,
+        require_task_artifacts=True,
+    )
+
+    assert validation["valid"] is False
+    assert "backend/main.py" in validation["unassigned_required_artifacts"]
+    assert "tests/test_vocab_app.py" in validation["unassigned_required_artifacts"]
+
+
 def test_job_runner_strict_task_acceptance_criteria_uses_prd_sources(
     tmp_path: Path,
 ) -> None:
