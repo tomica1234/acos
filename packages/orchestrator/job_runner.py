@@ -43,6 +43,7 @@ from packages.orchestrator.runtime import RuntimeManager
 from packages.orchestrator.scaffolds import build_scaffold
 from packages.orchestrator.states import apply_transition
 from packages.orchestrator.task_graph_validation import (
+    TASK_GRAPH_VALIDATION_CONTEXT_KEYS as TASK_GRAPH_VALIDATION_CONTEXT_KEYS_SOURCE,
     TASK_GRAPH_VALIDATION_DETAIL_KEYS as TASK_GRAPH_VALIDATION_DETAIL_KEYS_SOURCE,
 )
 from packages.schemas.approvals import ApprovalStatus, PolicyAction
@@ -139,6 +140,7 @@ class JobRunner:
         "upload",
     }
     CRUD_OPERATION_TOKENS = {"create", "read", "update", "delete"}
+    TASK_GRAPH_VALIDATION_CONTEXT_KEYS = TASK_GRAPH_VALIDATION_CONTEXT_KEYS_SOURCE
     TASK_GRAPH_VALIDATION_DETAIL_KEYS = TASK_GRAPH_VALIDATION_DETAIL_KEYS_SOURCE
 
     def __init__(
@@ -1145,9 +1147,7 @@ class JobRunner:
             "invalid_required_artifacts",
             "test_required_artifacts",
             "task_graph_validation_errors",
-            "uncovered_small_parts",
-            "uncovered_acceptance_tests",
-            *TASK_GRAPH_VALIDATION_DETAIL_KEYS_SOURCE,
+            *TASK_GRAPH_VALIDATION_CONTEXT_KEYS_SOURCE,
             "recovery_mode",
             "recovery_strategy",
             "recovery_next_actor",
@@ -3270,11 +3270,7 @@ class JobRunner:
             runtime_state["task_graph_validation_errors"] = list(
                 dict.fromkeys(error_types)
             )
-        for key in (
-            "uncovered_small_parts",
-            "uncovered_acceptance_tests",
-            *cls.TASK_GRAPH_VALIDATION_DETAIL_KEYS,
-        ):
+        for key in cls.TASK_GRAPH_VALIDATION_CONTEXT_KEYS:
             value = validation.get(key)
             if isinstance(value, list) and value:
                 runtime_state[key] = value

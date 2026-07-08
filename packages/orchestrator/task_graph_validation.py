@@ -23,4 +23,13 @@ TASK_GRAPH_VALIDATION_DETAIL_KEYS = (
     "invalid_task_artifacts",
 )
 
-__all__ = ["TASK_GRAPH_VALIDATION_DETAIL_KEYS"]
+TASK_GRAPH_VALIDATION_CONTEXT_KEYS = (
+    "uncovered_small_parts",
+    "uncovered_acceptance_tests",
+    *TASK_GRAPH_VALIDATION_DETAIL_KEYS,
+)
+
+__all__ = [
+    "TASK_GRAPH_VALIDATION_CONTEXT_KEYS",
+    "TASK_GRAPH_VALIDATION_DETAIL_KEYS",
+]

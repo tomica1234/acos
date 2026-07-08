@@ -17,7 +17,7 @@ from packages.orchestrator.statuses import (
     is_recoverable_status,
     is_waiting_status,
 )
-from packages.orchestrator.task_graph_validation import TASK_GRAPH_VALIDATION_DETAIL_KEYS
+from packages.orchestrator.task_graph_validation import TASK_GRAPH_VALIDATION_CONTEXT_KEYS
 from packages.schemas.jobs import JobRecord
 from packages.schemas.models import JobStatus
 
@@ -659,7 +659,7 @@ class RecoveryGovernor:
         )
         if errors:
             constraints["task_graph_validation_errors"] = errors
-        for key in TASK_GRAPH_VALIDATION_DETAIL_KEYS:
+        for key in TASK_GRAPH_VALIDATION_CONTEXT_KEYS:
             value = cls._non_empty_list(runtime_state.get(key))
             if value:
                 constraints[key] = value
