@@ -473,6 +473,14 @@ def test_consumed_recovery_plan_is_not_reported_as_active_progress(
         "ready_for_implementation": True,
     }
     record.outputs["task_graph"] = task_graph.model_dump()
+    record.outputs["autonomous_stages"] = [
+        {
+            "stage": 1,
+            "task": task_graph.tasks[0].model_dump(),
+            "test_run": {"success": False},
+            "change_summary": {"changed_files": ["feature.py"], "patch_count": 1},
+        }
+    ]
     record.outputs["prd_quality"] = {"passed": True, "missing": [], "warnings": []}
     record.outputs["task_graph_validation"] = {"valid": True, "errors": []}
     record.outputs["failure_diagnosis"] = {
@@ -498,6 +506,8 @@ def test_consumed_recovery_plan_is_not_reported_as_active_progress(
     assert payload["recovery_plan"] is None
     assert payload["current_recovery_event"] is None
     assert payload["last_recoverable_error"] is None
+    assert payload["failed_stage"] is None
+    assert payload["failed_stage_task_ids"] == []
     assert "failure_diagnosis" not in payload
     assert payload["failure_analysis"]["classification"] is None
     assert payload["failure_analysis"]["last_error"] is None

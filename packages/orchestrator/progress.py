@@ -21,7 +21,7 @@ def summarize_job_progress(record: JobRecord) -> dict[str, Any]:
     planned_id_set = set(planned_ids)
     pending_ids = [task_id for task_id in planned_ids if task_id not in completed_task_ids]
     last_stage = _last_stage(record)
-    failed_stage = _last_failed_stage(record)
+    raw_failed_stage = _last_failed_stage(record)
     stage_statuses = _stage_statuses(record)
     recovery_history = _recovery_history(stage_statuses)
     change_summary = _change_summary(record)
@@ -36,6 +36,11 @@ def summarize_job_progress(record: JobRecord) -> dict[str, Any]:
     execution_limits = _execution_limits(record)
     completion_integrity = _completion_integrity(record)
     active_recovery_context = _has_active_recovery_context(record)
+    failed_stage = _active_failed_stage(
+        record,
+        raw_failed_stage,
+        active_recovery_context=active_recovery_context,
+    )
     failure_analysis = _failure_analysis(record, failed_stage, recovery_history)
     failure_diagnosis = (
         _failure_diagnosis(record) if active_recovery_context else None
@@ -78,7 +83,11 @@ def summarize_job_progress(record: JobRecord) -> dict[str, Any]:
         "failed_stage": failed_stage,
         "stage_statuses": stage_statuses,
         "successful_stage_task_ids": _stage_task_ids(stage_statuses, "passed"),
-        "failed_stage_task_ids": _stage_task_ids(stage_statuses, "failed"),
+        "failed_stage_task_ids": (
+            _stage_task_ids(stage_statuses, "failed")
+            if failed_stage is not None
+            else []
+        ),
         "recovered_stage_task_ids": _stage_task_ids(stage_statuses, "superseded"),
         "recovery_history": recovery_history,
         "resume": resume,
@@ -365,6 +374,21 @@ def _has_active_recovery_context(record: JobRecord) -> bool:
     if _active_recovery_plan(record) is not None:
         return True
     return record.status.value in {"blocked", "failed", "stuck"}
+
+
+def _active_failed_stage(
+    record: JobRecord,
+    failed_stage: dict[str, Any] | None,
+    *,
+    active_recovery_context: bool,
+) -> dict[str, Any] | None:
+    if failed_stage is None:
+        return None
+    if active_recovery_context:
+        return failed_stage
+    if record.status.value in {"testing", "fixing"}:
+        return failed_stage
+    return None
 
 
 def _planned_tasks(record: JobRecord) -> list[dict[str, Any]]:
