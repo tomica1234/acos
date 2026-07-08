@@ -50,6 +50,8 @@ from packages.schemas.models import (
 )
 from packages.schemas.tasks import PlannedTask, TaskGraph
 
+SUPERVISED_MODEL_CALL_TIMEOUT_CAP_SECONDS = 300.0
+
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="acos")
@@ -661,6 +663,18 @@ def apply_constraint_overrides(
         constraints["model_timeout_seconds"] = float(model_timeout_seconds)
 
 
+def supervised_model_timeout_seconds(
+    max_runtime_seconds: float | None,
+    elapsed_seconds: float = 0.0,
+) -> float | None:
+    if max_runtime_seconds is None:
+        return None
+    remaining_seconds = max(float(max_runtime_seconds) - float(elapsed_seconds), 0.0)
+    if remaining_seconds <= 0:
+        return 0.0
+    return min(remaining_seconds, SUPERVISED_MODEL_CALL_TIMEOUT_CAP_SECONDS)
+
+
 def apply_recovery_overrides(record: JobRecord, summary: dict[str, object]) -> dict[str, object] | None:
     failure_analysis = summary.get("failure_analysis")
     if not isinstance(failure_analysis, dict):
@@ -1258,12 +1272,13 @@ def supervise_persisted_job(
     latest_pm_decision: dict[str, Any] | None = None
     effective_max_cycles = 1_000_000 if autonomous_until_done else max_cycles
     for cycle_index in range(effective_max_cycles):
-        model_timeout_seconds = None
-        if max_runtime_seconds is not None:
-            model_timeout_seconds = max(max_runtime_seconds - elapsed_seconds, 0.0)
-            if model_timeout_seconds <= 0:
-                stopped_for_runtime = True
-                break
+        model_timeout_seconds = supervised_model_timeout_seconds(
+            max_runtime_seconds,
+            elapsed_seconds,
+        )
+        if model_timeout_seconds == 0:
+            stopped_for_runtime = True
+            break
         provider_preflight = maybe_probe_provider(
             config_dir=config_dir,
             provider_name=preflight_provider,
@@ -2787,7 +2802,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             require_prd_quality=args.require_prd_quality,
             stage_review=args.stage_review,
             test_timeout_seconds=args.test_timeout_seconds,
-            model_timeout_seconds=args.max_runtime_seconds,
+            model_timeout_seconds=supervised_model_timeout_seconds(
+                args.max_runtime_seconds
+            ),
         )
         store = FileJobStore(args.jobs_dir)
         runner, _ = build_default_runner(

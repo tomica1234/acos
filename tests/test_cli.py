@@ -7,12 +7,14 @@ import pytest
 import yaml
 
 from apps.cli import (
+    SUPERVISED_MODEL_CALL_TIMEOUT_CAP_SECONDS,
     apply_recovery_overrides,
     autonomous_result_payload,
     build_job_spec_from_request,
     load_job_spec_from_file,
     main,
     probe_provider,
+    supervised_model_timeout_seconds,
 )
 from packages.orchestrator.job_runner import build_default_runner
 from packages.orchestrator.job_store import FileJobStore
@@ -1224,6 +1226,58 @@ def test_run_supervised_can_start_from_direct_request(
         "provider_event_count": 0,
         "last_provider_event": None,
     }
+
+
+def test_supervised_model_timeout_caps_long_runtime_budget() -> None:
+    assert supervised_model_timeout_seconds(None) is None
+    assert supervised_model_timeout_seconds(45.0) == 45.0
+    assert (
+        supervised_model_timeout_seconds(900.0)
+        == SUPERVISED_MODEL_CALL_TIMEOUT_CAP_SECONDS
+    )
+    assert supervised_model_timeout_seconds(900.0, elapsed_seconds=870.0) == 30.0
+    assert supervised_model_timeout_seconds(900.0, elapsed_seconds=900.0) == 0.0
+
+
+def test_run_supervised_caps_initial_model_timeout_for_long_runtime_budget(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    workspace = tmp_path / "direct-workspace"
+    captured: dict[str, object] = {}
+
+    class DummyRunner:
+        def run_job(self, spec: JobSpec) -> JobRecord:
+            captured["constraints"] = dict(spec.metadata["constraints"])
+            return JobRecord(job_id=spec.job_id, spec=spec, status=JobStatus.DONE)
+
+    def fake_build_default_runner(config_dir: str | Path, workspace_root: str | Path, store=None):
+        return DummyRunner(), None
+
+    monkeypatch.setattr("apps.cli.build_default_runner", fake_build_default_runner)
+
+    exit_code = main(
+        [
+            "run-supervised",
+            "--config-dir",
+            str(config_dir()),
+            "--request",
+            "Build a vocabulary app.",
+            "--repo-path",
+            str(workspace),
+            "--job-id",
+            "long-runtime-direct-supervised-job",
+            "--max-runtime-seconds",
+            "900",
+        ]
+    )
+
+    assert exit_code == 0
+    assert captured["constraints"]["model_timeout_seconds"] == (
+        SUPERVISED_MODEL_CALL_TIMEOUT_CAP_SECONDS
+    )
+    json.loads(capsys.readouterr().out)
 
 
 def test_run_supervised_preflight_stops_before_runner_when_provider_unhealthy(
@@ -4498,6 +4552,67 @@ def test_supervise_job_stops_after_runtime_limit(
         "provider_event_count": len(payload["provider_events"]),
         "last_provider_event": payload["provider_events"][-1],
     }
+
+
+def test_supervise_job_caps_model_timeout_for_long_runtime_budget(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    jobs_dir = tmp_path / "jobs"
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    spec = JobSpec(
+        job_id="supervise-long-runtime-job",
+        request_text="Build something useful.",
+        repo_path=str(workspace),
+        metadata={"constraints": {"max_autonomous_stages": 1}},
+    )
+    store = FileJobStore(jobs_dir)
+    record = store.create(spec)
+    record.status = JobStatus.BLOCKED
+    record.last_error = "autonomous_stage_limit_reached"
+    store.update(record)
+    captured: dict[str, object] = {}
+
+    class DummyRunner:
+        def resume_job(self, job_id: str) -> JobRecord:
+            resumed = captured["store"].get(job_id)
+            captured["constraints"] = dict(resumed.spec.metadata["constraints"])
+            resumed.status = JobStatus.DONE
+            captured["store"].update(resumed)
+            return resumed
+
+    def fake_build_default_runner(config_dir: str | Path, workspace_root: str | Path, store=None):
+        captured["store"] = store
+        return DummyRunner(), None
+
+    monkeypatch.setattr("apps.cli.build_default_runner", fake_build_default_runner)
+
+    exit_code = main(
+        [
+            "supervise-job",
+            "--config-dir",
+            str(config_dir()),
+            "--jobs-dir",
+            str(jobs_dir),
+            "--job-id",
+            "supervise-long-runtime-job",
+            "--max-cycles",
+            "1",
+            "--steps-per-cycle",
+            "1",
+            "--max-runtime-seconds",
+            "900",
+        ]
+    )
+
+    assert exit_code == 0
+    assert captured["constraints"]["model_timeout_seconds"] == (
+        SUPERVISED_MODEL_CALL_TIMEOUT_CAP_SECONDS
+    )
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["terminal_reason"] == "done"
 
 
 def test_supervise_job_preserves_autonomous_until_done_in_raw_json_and_next_args(
