@@ -42,6 +42,23 @@ def test_provider_health_reports_model_exists(monkeypatch) -> None:
     assert health.status == ProviderHealthStatus.OK
 
 
+def test_provider_health_accepts_extensionless_reported_model_id(monkeypatch) -> None:
+    registry = load_registry()
+    checker = ProviderHealthChecker(registry)
+    model = registry.get_model("qwen_35b")
+    reported_model_id = model.model.removesuffix(".gguf")
+    monkeypatch.setattr(
+        checker,
+        "_build_client",
+        lambda provider: _FakeClient([reported_model_id]),
+    )
+
+    health = checker.check_model("qwen_35b")
+
+    assert health.status == ProviderHealthStatus.OK
+    assert health.model_available is True
+
+
 def test_provider_health_reports_model_missing(monkeypatch) -> None:
     registry = load_registry()
     checker = ProviderHealthChecker(registry)

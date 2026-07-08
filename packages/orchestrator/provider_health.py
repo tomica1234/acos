@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import time
+from pathlib import PurePath
 
 from openai import (
     APIConnectionError,
@@ -66,7 +67,8 @@ class ProviderHealthChecker:
             client = self._build_client(provider)
             models = client.models.list()
             available_ids = {item.id for item in getattr(models, "data", [])}
-            if available_ids and model.model not in available_ids and model.model_id not in available_ids:
+            acceptable_model_ids = self._acceptable_model_ids(model)
+            if available_ids and not (acceptable_model_ids & available_ids):
                 return ProviderHealth(
                     provider_key=provider.name,
                     model_key=model_key,
@@ -94,6 +96,22 @@ class ProviderHealthChecker:
                 response_time_ms=int((time.monotonic() - started) * 1000),
                 model_available=False,
             )
+
+    @staticmethod
+    def _acceptable_model_ids(model: ModelConfig) -> set[str]:
+        model_name = model.model.strip()
+        basename = model_name.replace("\\", "/").rsplit("/", 1)[-1]
+        stem = PurePath(basename).stem
+        return {
+            item
+            for item in {
+                model.model_id,
+                model_name,
+                basename,
+                stem,
+            }
+            if item
+        }
 
     def _test_chat_completion(self, client: OpenAI, model: ModelConfig) -> None:
         client.chat.completions.create(
