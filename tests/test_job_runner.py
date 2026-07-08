@@ -1242,10 +1242,7 @@ def test_job_runner_refinement_preserves_task_artifact_contracts(
             assert task["required_artifacts"] == ["tests/test_feature.py"]
         else:
             assert task["target_files"] == ["feature.py"]
-            assert task["required_artifacts"] == [
-                "feature.py",
-                "tests/test_feature.py",
-            ]
+            assert task["required_artifacts"] == ["feature.py"]
 
 
 def test_test_work_item_classifier_uses_word_tokens() -> None:
@@ -2372,6 +2369,58 @@ def test_task_graph_validation_rejects_role_mismatched_target_files() -> None:
     error_types = {item["type"] for item in validation["errors"]}
     assert "role_mismatched_target_files" in error_types
     assert "unowned_required_artifacts" in error_types
+
+
+def test_task_graph_validation_rejects_role_mismatched_required_artifacts() -> None:
+    task_graph = TaskGraph(
+        goal="Build feature",
+        tasks=[
+            PlannedTask(
+                id="core",
+                title="Build core",
+                description="Create feature module",
+                role="implementer",
+                acceptance_criteria=["VALUE equals 1"],
+                target_files=["feature.py"],
+                required_artifacts=["tests/test_feature.py"],
+            ),
+            PlannedTask(
+                id="tests",
+                title="Test core",
+                description="Add focused tests.",
+                role="test_writer",
+                depends_on=["core"],
+                acceptance_criteria=["VALUE is covered"],
+                target_files=["tests/test_feature.py"],
+                required_artifacts=["feature.py"],
+            ),
+        ],
+    )
+
+    validation = JobRunner._build_task_graph_validation(
+        task_graph,
+        require_acceptance_criteria=True,
+        require_task_artifacts=True,
+    )
+
+    assert validation["valid"] is False
+    assert validation["role_mismatched_required_artifacts"] == [
+        {
+            "task_id": "core",
+            "role": "implementer",
+            "path": "tests/test_feature.py",
+            "expected_roles": ["test_writer"],
+        },
+        {
+            "task_id": "tests",
+            "role": "test_writer",
+            "path": "feature.py",
+            "expected_roles": ["implementer", "scaffold"],
+        },
+    ]
+    assert "role_mismatched_required_artifacts" in {
+        item["type"] for item in validation["errors"]
+    }
 
 
 def test_task_graph_validation_allows_project_setup_test_artifact_on_scaffold() -> None:

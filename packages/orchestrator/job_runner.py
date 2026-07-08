@@ -2065,7 +2065,7 @@ class JobRunner:
                 required_artifacts=(
                     source_test_artifacts
                     if role == "test_writer"
-                    else source_required_artifacts or source_implementation_targets
+                    else source_implementation_artifacts or source_implementation_targets
                 ),
             )
             tasks.append(task)
@@ -2913,11 +2913,23 @@ class JobRunner:
                     }
                 )
         role_mismatched_target_files: list[dict[str, Any]] = []
+        role_mismatched_required_artifacts: list[dict[str, Any]] = []
         for task in executable_tasks:
             for path in sorted(valid_artifact_paths(task.target_files)):
                 expected_roles = JobRunner._artifact_owner_roles(path)
                 if task.role not in expected_roles:
                     role_mismatched_target_files.append(
+                        {
+                            "task_id": task.id,
+                            "role": task.role,
+                            "path": path,
+                            "expected_roles": sorted(expected_roles),
+                        }
+                    )
+            for path in sorted(valid_artifact_paths(task.required_artifacts)):
+                expected_roles = JobRunner._artifact_owner_roles(path)
+                if task.role not in expected_roles:
+                    role_mismatched_required_artifacts.append(
                         {
                             "task_id": task.id,
                             "role": task.role,
@@ -3025,6 +3037,13 @@ class JobRunner:
                 {
                     "type": "role_mismatched_target_files",
                     "items": role_mismatched_target_files,
+                }
+            )
+        if require_task_artifacts and role_mismatched_required_artifacts:
+            errors.append(
+                {
+                    "type": "role_mismatched_required_artifacts",
+                    "items": role_mismatched_required_artifacts,
                 }
             )
         if duplicate_ids:
@@ -3147,6 +3166,7 @@ class JobRunner:
             "invalid_prd_required_artifacts": invalid_prd_required_artifacts,
             "unowned_required_artifacts": unowned_required_artifacts,
             "role_mismatched_target_files": role_mismatched_target_files,
+            "role_mismatched_required_artifacts": role_mismatched_required_artifacts,
             "test_writer_missing_implementation_dependencies": (
                 test_writer_missing_implementation_dependencies
             ),
