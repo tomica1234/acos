@@ -116,6 +116,86 @@ def test_summarize_job_progress_reports_pending_and_failed_stage(tmp_path) -> No
     assert payload["change_summary"]["stages"][1]["task_id"] == "extra"
 
 
+def test_done_progress_does_not_surface_stale_recovery_state(tmp_path) -> None:
+    task_graph = TaskGraph(
+        goal="Recover and finish",
+        tasks=[
+            PlannedTask(
+                id="core",
+                title="Core",
+                description="Build core",
+                role="implementer",
+            ),
+        ],
+    )
+    spec = JobSpec(
+        job_id="done-with-stale-recovery",
+        request_text="Build it",
+        repo_path=str(tmp_path),
+    )
+    record = JobRecord(job_id=spec.job_id, spec=spec, status=JobStatus.DONE)
+    record.completed_task_ids = ["core"]
+    record.outputs["task_graph"] = task_graph.model_dump()
+    record.outputs["autonomous_stages"] = [
+        {
+            "stage": 1,
+            "task": task_graph.tasks[0].model_dump(),
+            "change_summary": {"changed_files": ["feature.py"], "patch_count": 1},
+            "test_run": {"success": False},
+        },
+        {
+            "stage": 2,
+            "task": task_graph.tasks[0].model_dump(),
+            "change_summary": {"changed_files": ["feature.py"], "patch_count": 1},
+            "test_run": {"success": True},
+        },
+    ]
+    record.runtime_state["last_recoverable_error"] = "invalid_task_graph"
+    record.runtime_state["current_recovery_event"] = {
+        "error": "invalid_task_graph",
+        "reason": "invalid_task_graph",
+    }
+    record.runtime_state["recovery_plan"] = {
+        "strategy": "task_graph_replanning",
+        "reason": "invalid_task_graph",
+    }
+    record.outputs["last_recoverable_error"] = "invalid_task_graph"
+    record.outputs["failure_diagnosis"] = {
+        "classification": "invalid_task_graph",
+        "root_cause": "Task graph was repaired before completion.",
+    }
+
+    payload = summarize_job_progress(record)
+
+    assert payload["status"] == "done"
+    assert payload["last_recoverable_error"] is None
+    assert payload["current_recovery_event"] is None
+    assert payload["recovery_plan"] is None
+    assert "failure_diagnosis" not in payload
+    assert payload["failure_analysis"] == {
+        "classification": None,
+        "last_error": None,
+        "failure_count": 0,
+        "same_test_failure_count": 0,
+        "failed_task_id": None,
+        "failed_stage": None,
+        "auto_continue_blocked": False,
+        "manual_intervention_recommended": False,
+        "recommended_recovery": None,
+    }
+    assert payload["resume"] == {
+        "action": "none",
+        "task_id": None,
+        "stage": None,
+        "reason": None,
+        "can_auto_continue": False,
+        "suggested_cli_args": [],
+        "suggested_continue_cli_args": [],
+    }
+    assert payload["recovered_stage_task_ids"] == ["core"]
+    assert payload["recovery_history"][0]["task_id"] == "core"
+
+
 def test_summarize_job_progress_reports_active_model_call(tmp_path) -> None:
     started_at = datetime.now(timezone.utc) - timedelta(seconds=420)
     spec = JobSpec(

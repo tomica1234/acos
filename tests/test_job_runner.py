@@ -21,7 +21,7 @@ from packages.schemas.agent_outputs import (
     TestRunResult,
     TestWriterResult as TestWriterOutput,
 )
-from packages.schemas.jobs import JobSpec
+from packages.schemas.jobs import JobRecord, JobSpec
 from packages.schemas.models import (
     FixStatus,
     ImplementationStatus,
@@ -64,6 +64,44 @@ def assert_recoverable_error(
     assert isinstance(event, dict)
     assert event.get("error") == error
     return error
+
+
+def test_clear_active_recovery_state_removes_stale_done_markers(tmp_path: Path) -> None:
+    spec = JobSpec(
+        job_id="clear-active-recovery",
+        request_text="Build it",
+        repo_path=str(tmp_path),
+        metadata={
+            "constraints": {
+                "recovery_mode": "task_graph_replanning",
+                "recovery_strategy": "task_graph_replanning",
+                "recovery_next_actor": "planner",
+                "recovery_next_status": "planning",
+                "patch_operation_hint": "create",
+                "missing_target_file": "frontend/test/project_scaffold.test.tsx",
+                "max_autonomous_stages": 12,
+            }
+        },
+    )
+    record = JobRecord(job_id=spec.job_id, spec=spec, status=JobStatus.FINALIZING)
+    record.runtime_state.update(
+        {
+            "current_recovery_event": {"error": "invalid_task_graph"},
+            "last_recoverable_error": "invalid_task_graph",
+            "recovery_plan": {"strategy": "task_graph_replanning"},
+        }
+    )
+    record.outputs["last_recoverable_error"] = "invalid_task_graph"
+    record.outputs["recovery_history"] = [{"strategy": "task_graph_replanning"}]
+
+    JobRunner._clear_active_recovery_state(record)
+
+    assert "current_recovery_event" not in record.runtime_state
+    assert "last_recoverable_error" not in record.runtime_state
+    assert "recovery_plan" not in record.runtime_state
+    assert "last_recoverable_error" not in record.outputs
+    assert record.outputs["recovery_history"] == [{"strategy": "task_graph_replanning"}]
+    assert record.spec.metadata["constraints"] == {"max_autonomous_stages": 12}
 
 
 def test_run_structured_role_persists_active_status_before_model_call(

@@ -399,6 +399,7 @@ class JobRunner:
                 record.outputs["test_run"] = test_result.model_dump()
                 apply_transition(record, JobStatus.FINALIZING)
                 record.last_error = None
+                self._clear_active_recovery_state(record)
                 apply_transition(record, JobStatus.DONE)
                 return self.store.update(record)
             summary = self._run_structured_role(
@@ -427,6 +428,7 @@ class JobRunner:
             record.outputs["test_run"] = test_result.model_dump()
             record.outputs["summary"] = summary.model_dump()
             record.last_error = None
+            self._clear_active_recovery_state(record)
             apply_transition(record, JobStatus.DONE)
             return self.store.update(record)
         except JobWaitingForApproval:
@@ -1120,6 +1122,28 @@ class JobRunner:
             if isinstance(value, (str, int, float, bool)):
                 constraints.append(f"job_constraint {key}={value}")
         return constraints
+
+    @staticmethod
+    def _clear_active_recovery_state(record: JobRecord) -> None:
+        for key in (
+            "current_recovery_event",
+            "last_recoverable_error",
+            "recovery_plan",
+        ):
+            record.runtime_state.pop(key, None)
+        record.outputs.pop("last_recoverable_error", None)
+        constraints = record.spec.metadata.get("constraints")
+        if not isinstance(constraints, dict):
+            return
+        for key in (
+            "recovery_mode",
+            "recovery_strategy",
+            "recovery_next_actor",
+            "recovery_next_status",
+            "patch_operation_hint",
+            "missing_target_file",
+        ):
+            constraints.pop(key, None)
 
     @staticmethod
     def _clear_planning_repair_constraints(record: JobRecord) -> None:

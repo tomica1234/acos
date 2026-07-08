@@ -14,6 +14,7 @@ from packages.schemas.jobs import JobRecord
 
 def summarize_job_progress(record: JobRecord) -> dict[str, Any]:
     """Return a compact, machine-readable progress summary for a job."""
+    done = _is_done(record)
     planned_tasks = _planned_tasks(record)
     completed_task_ids = list(record.completed_task_ids)
     planned_ids = [task["id"] for task in planned_tasks if isinstance(task.get("id"), str)]
@@ -35,13 +36,15 @@ def summarize_job_progress(record: JobRecord) -> dict[str, Any]:
     execution_limits = _execution_limits(record)
     completion_integrity = _completion_integrity(record)
     failure_analysis = _failure_analysis(record, failed_stage, recovery_history)
-    failure_diagnosis = _failure_diagnosis(record)
+    failure_diagnosis = None if done else _failure_diagnosis(record)
     model_metrics = _model_metrics(record)
     active_model_call = _active_model_call(record)
-    recovery_plan = record.runtime_state.get("recovery_plan")
+    recovery_plan = None if done else record.runtime_state.get("recovery_plan")
     if not isinstance(recovery_plan, dict):
         recovery_plan = None
-    current_recovery_event = record.runtime_state.get("current_recovery_event")
+    current_recovery_event = (
+        None if done else record.runtime_state.get("current_recovery_event")
+    )
     if not isinstance(current_recovery_event, dict):
         current_recovery_event = None
     last_recoverable_error = _last_recoverable_error(record)
@@ -313,6 +316,8 @@ def _failure_diagnosis(record: JobRecord) -> dict[str, Any] | None:
 
 
 def _last_recoverable_error(record: JobRecord) -> str | None:
+    if _is_done(record):
+        return None
     value = record.runtime_state.get("last_recoverable_error")
     if isinstance(value, str) and value:
         return value
@@ -329,7 +334,13 @@ def _last_recoverable_error(record: JobRecord) -> str | None:
 
 
 def _effective_failure_error(record: JobRecord) -> str | None:
+    if _is_done(record):
+        return None
     return record.last_error or _last_recoverable_error(record)
+
+
+def _is_done(record: JobRecord) -> bool:
+    return record.status.value == "done"
 
 
 def _planned_tasks(record: JobRecord) -> list[dict[str, Any]]:
@@ -515,6 +526,16 @@ def _resume_recommendation(
     failure_analysis: dict[str, Any],
     autonomy_readiness: dict[str, Any],
 ) -> dict[str, Any]:
+    if _is_done(record):
+        return {
+            "action": "none",
+            "task_id": None,
+            "stage": None,
+            "reason": None,
+            "can_auto_continue": False,
+            "suggested_cli_args": [],
+            "suggested_continue_cli_args": [],
+        }
     failure_error = _effective_failure_error(record)
     if _is_policy_hard_stop(record.last_error):
         return {
@@ -654,6 +675,18 @@ def _failure_analysis(
     failed_stage: dict[str, Any] | None,
     recovery_history: list[dict[str, Any]],
 ) -> dict[str, Any]:
+    if _is_done(record):
+        return {
+            "classification": None,
+            "last_error": None,
+            "failure_count": record.failure_count,
+            "same_test_failure_count": record.same_test_failure_count,
+            "failed_task_id": None,
+            "failed_stage": None,
+            "auto_continue_blocked": False,
+            "manual_intervention_recommended": False,
+            "recommended_recovery": None,
+        }
     task = failed_stage.get("task") if isinstance(failed_stage, dict) else None
     failed_task_id = task.get("id") if isinstance(task, dict) else None
     failure_error = _effective_failure_error(record)
