@@ -1839,10 +1839,23 @@ class JobRunner:
         if not JobRunner._non_empty_items(prd.incremental_milestones):
             missing.append("incremental_milestones")
         acceptance_tests = JobRunner._non_empty_items(prd.acceptance_tests)
+        acceptance_test_small_part_coverage = JobRunner._semantic_item_coverage(
+            small_parts,
+            acceptance_tests,
+            item_key="small_part",
+            index_key="small_part_index",
+            candidate_key="acceptance_test",
+            candidate_index_key="acceptance_test_index",
+        )
+        uncovered_acceptance_small_parts = [
+            item for item in acceptance_test_small_part_coverage if not item["covered"]
+        ]
         if not acceptance_tests:
             missing.append("acceptance_tests")
         elif small_parts and len(acceptance_tests) < len(small_parts):
             missing.append("acceptance_tests_cover_small_parts")
+        elif small_parts and uncovered_acceptance_small_parts:
+            missing.append("acceptance_tests_semantically_cover_small_parts")
         if not JobRunner._non_empty_items(prd.definition_of_done):
             missing.append("definition_of_done")
         if prd.open_questions:
@@ -1856,6 +1869,11 @@ class JobRunner:
             "acceptance_test_count": len(acceptance_tests),
             "acceptance_tests_cover_small_parts": missing_acceptance_test_count == 0,
             "missing_acceptance_test_count": missing_acceptance_test_count,
+            "acceptance_tests_semantically_cover_small_parts": (
+                not uncovered_acceptance_small_parts
+            ),
+            "acceptance_test_small_part_coverage": acceptance_test_small_part_coverage,
+            "uncovered_acceptance_small_parts": uncovered_acceptance_small_parts,
             "definition_of_done_count": len(JobRunner._non_empty_items(prd.definition_of_done)),
         }
 
@@ -2611,6 +2629,66 @@ class JobRunner:
         }
 
     @classmethod
+    def _semantic_item_coverage(
+        cls,
+        items: list[str],
+        candidates: list[str],
+        *,
+        item_key: str,
+        index_key: str,
+        candidate_key: str,
+        candidate_index_key: str,
+    ) -> list[dict[str, Any]]:
+        remaining_candidates = list(enumerate(candidates, start=1))
+        coverage: list[dict[str, Any]] = []
+        for index, item in enumerate(items, start=1):
+            item_tokens = cls._semantic_tokens(item)
+            if not item_tokens:
+                fallback = candidates[index - 1] if index <= len(candidates) else None
+                coverage.append(
+                    {
+                        index_key: index,
+                        item_key: item,
+                        candidate_index_key: index if fallback is not None else None,
+                        candidate_key: fallback,
+                        "covered": fallback is not None,
+                    }
+                )
+                if fallback is not None:
+                    remaining_candidates = [
+                        candidate
+                        for candidate in remaining_candidates
+                        if candidate[0] != index
+                    ]
+                continue
+
+            best_candidate: tuple[int, str] | None = None
+            best_score = 0
+            for candidate in remaining_candidates:
+                score = cls._semantic_overlap_score(
+                    item_tokens,
+                    cls._semantic_tokens(candidate[1]),
+                )
+                if score > best_score:
+                    best_score = score
+                    best_candidate = candidate
+
+            required_score = cls._semantic_overlap_required(item_tokens)
+            covered = best_candidate is not None and best_score >= required_score
+            coverage.append(
+                {
+                    index_key: index,
+                    item_key: item,
+                    candidate_index_key: best_candidate[0] if covered and best_candidate else None,
+                    candidate_key: best_candidate[1] if covered and best_candidate else None,
+                    "covered": covered,
+                }
+            )
+            if covered and best_candidate is not None:
+                remaining_candidates.remove(best_candidate)
+        return coverage
+
+    @classmethod
     def _semantic_task_coverage(
         cls,
         items: list[str],
@@ -2670,6 +2748,10 @@ class JobRunner:
     def _semantic_tokens(cls, text: str) -> set[str]:
         stopwords = {
             "a",
+            "add",
+            "added",
+            "adding",
+            "adds",
             "an",
             "and",
             "app",
@@ -2721,10 +2803,17 @@ class JobRunner:
             "authenticate": "auth",
             "authenticated": "auth",
             "authentication": "auth",
+            "log": "auth",
             "login": "auth",
+            "sign": "auth",
             "signin": "auth",
             "signup": "auth",
             "registration": "register",
+            "student": "user",
+            "students": "user",
+            "teacher": "role",
+            "teachers": "role",
+            "vocab": "vocabulary",
         }
         raw_tokens = re.findall(r"[a-z0-9_]+", text.lower())
         tokens: set[str] = set()

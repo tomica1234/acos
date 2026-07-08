@@ -4576,8 +4576,164 @@ def test_job_runner_blocks_prd_quality_when_acceptance_tests_do_not_cover_small_
         "acceptance_test_count": 1,
         "acceptance_tests_cover_small_parts": False,
         "missing_acceptance_test_count": 1,
+        "acceptance_tests_semantically_cover_small_parts": False,
+        "acceptance_test_small_part_coverage": [
+            {
+                "small_part_index": 1,
+                "small_part": "Create feature module",
+                "acceptance_test_index": 1,
+                "acceptance_test": "VALUE equals 1",
+                "covered": True,
+            },
+            {
+                "small_part_index": 2,
+                "small_part": "Add focused tests",
+                "acceptance_test_index": None,
+                "acceptance_test": None,
+                "covered": False,
+            },
+        ],
+        "uncovered_acceptance_small_parts": [
+            {
+                "small_part_index": 2,
+                "small_part": "Add focused tests",
+                "acceptance_test_index": None,
+                "acceptance_test": None,
+                "covered": False,
+            }
+        ],
         "definition_of_done_count": 1,
     }
+    assert "architect" not in record.outputs
+
+
+def test_prd_quality_accepts_semantically_covered_acceptance_tests() -> None:
+    prd = PRD(
+        title="English Vocab App",
+        problem_statement="Students need account-based vocabulary practice.",
+        smallest_working_core=["Serve a vocabulary app shell"],
+        small_parts=[
+            "User authentication and roles",
+            "Word set CRUD operations",
+        ],
+        incremental_milestones=[
+            "Students can sign in",
+            "Teachers can manage word sets",
+        ],
+        acceptance_tests=[
+            "Student can register and login",
+            "Teacher can create a word set",
+        ],
+        definition_of_done=["All tests pass"],
+    )
+
+    report = JobRunner._build_prd_quality_report(prd)
+
+    assert report["passed"] is True
+    assert report["missing"] == []
+    assert report["acceptance_tests_semantically_cover_small_parts"] is True
+    assert report["uncovered_acceptance_small_parts"] == []
+    assert report["acceptance_test_small_part_coverage"] == [
+        {
+            "small_part_index": 1,
+            "small_part": "User authentication and roles",
+            "acceptance_test_index": 1,
+            "acceptance_test": "Student can register and login",
+            "covered": True,
+        },
+        {
+            "small_part_index": 2,
+            "small_part": "Word set CRUD operations",
+            "acceptance_test_index": 2,
+            "acceptance_test": "Teacher can create a word set",
+            "covered": True,
+        },
+    ]
+
+
+def test_job_runner_blocks_prd_quality_when_acceptance_tests_semantically_mismatch(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    registry = ModelRegistry.from_paths(
+        provider_path=config_dir() / "model_providers.yaml",
+        agents_path=config_dir() / "agents.yaml",
+        routing_path=config_dir() / "model_routing.yaml",
+    )
+    attach_mock_adapter(
+        registry,
+        {
+            "pm": PRD(
+                title="English Vocab App",
+                problem_statement="Students need account-based vocabulary practice.",
+                smallest_working_core=["Serve a vocabulary app shell"],
+                small_parts=[
+                    "User authentication and roles",
+                    "Word set CRUD operations",
+                ],
+                incremental_milestones=[
+                    "Students can sign in",
+                    "Teachers can manage word sets",
+                ],
+                acceptance_tests=[
+                    "Health endpoint returns 200",
+                    "Database initializes successfully",
+                ],
+                definition_of_done=["All tests pass"],
+            ).model_dump(),
+            "architect": ArchitecturePlan(summary="Should not run").model_dump(),
+        },
+    )
+    policy = PolicyEngine.from_path(config_dir() / "policies.yaml")
+    environment = FakeMCPEnvironment(
+        workspace_root=workspace,
+        memory_db_path=workspace / ".memory.sqlite3",
+    )
+    runner = JobRunner(registry=registry, policy=policy, router=environment.build_router())
+    spec = JobSpec(
+        request_text="Create an English vocabulary app",
+        repo_path=str(workspace),
+        target_branch="acos/strict-prd-semantic-acceptance",
+        metadata={
+            "constraints": {
+                "require_prd_quality": True,
+                "prd_quality_refinement_attempts": 0,
+            }
+        },
+    )
+
+    record = runner.run_job(spec)
+
+    assert_recovery_plan(
+        record,
+        status=JobStatus.ANALYZING,
+        strategy="REVISE_PRD_AND_ARCHITECTURE",
+    )
+    assert_recoverable_error(
+        record,
+        "prd_quality_gate_failed:acceptance_tests_semantically_cover_small_parts",
+    )
+    assert record.outputs["prd_quality"]["passed"] is False
+    assert record.outputs["prd_quality"]["missing"] == [
+        "acceptance_tests_semantically_cover_small_parts"
+    ]
+    assert record.outputs["prd_quality"]["uncovered_acceptance_small_parts"] == [
+        {
+            "small_part_index": 1,
+            "small_part": "User authentication and roles",
+            "acceptance_test_index": None,
+            "acceptance_test": None,
+            "covered": False,
+        },
+        {
+            "small_part_index": 2,
+            "small_part": "Word set CRUD operations",
+            "acceptance_test_index": None,
+            "acceptance_test": None,
+            "covered": False,
+        },
+    ]
     assert "architect" not in record.outputs
 
 
