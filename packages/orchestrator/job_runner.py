@@ -3093,6 +3093,19 @@ class JobRunner:
                     "task_ids": test_writer_tasks_missing_target_files,
                 }
             )
+        implementation_tasks_missing_target_files = [
+            task.id
+            for task in task_graph.tasks
+            if task.role in JobRunner.IMPLEMENTATION_TASK_ROLES
+            and not valid_artifact_paths(task.target_files)
+        ]
+        if require_task_artifacts and implementation_tasks_missing_target_files:
+            errors.append(
+                {
+                    "type": "missing_implementation_target_files",
+                    "task_ids": implementation_tasks_missing_target_files,
+                }
+            )
         if require_task_artifacts and test_writer_missing_implementation_dependencies:
             errors.append(
                 {
@@ -3167,6 +3180,9 @@ class JobRunner:
             "unowned_required_artifacts": unowned_required_artifacts,
             "role_mismatched_target_files": role_mismatched_target_files,
             "role_mismatched_required_artifacts": role_mismatched_required_artifacts,
+            "implementation_tasks_missing_target_files": (
+                implementation_tasks_missing_target_files
+            ),
             "test_writer_missing_implementation_dependencies": (
                 test_writer_missing_implementation_dependencies
             ),
