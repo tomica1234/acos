@@ -647,13 +647,16 @@ def apply_constraint_overrides(
         spec.metadata["constraints"] = constraints
     if large_autonomous:
         constraints.setdefault("max_autonomous_stages", 1)
-        constraints.setdefault("require_prd_quality", True)
-        constraints.setdefault("require_task_acceptance_criteria", True)
-        constraints.setdefault("require_task_artifacts", True)
-        constraints.setdefault("require_completion_integrity", True)
-        constraints.setdefault("require_test_evidence", True)
-        constraints.setdefault("require_stage_test_patches", True)
-        constraints.setdefault("stage_review", True)
+        for gate in (
+            "require_prd_quality",
+            "require_task_acceptance_criteria",
+            "require_task_artifacts",
+            "require_completion_integrity",
+            "require_test_evidence",
+            "require_stage_test_patches",
+            "stage_review",
+        ):
+            constraints[gate] = True
         constraints.setdefault("test_timeout_seconds", 1200)
     if max_autonomous_stages is not None:
         constraints["max_autonomous_stages"] = max_autonomous_stages

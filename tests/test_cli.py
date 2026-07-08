@@ -8,6 +8,7 @@ import yaml
 
 from apps.cli import (
     SUPERVISED_MODEL_CALL_TIMEOUT_CAP_SECONDS,
+    apply_constraint_overrides,
     apply_recovery_overrides,
     autonomous_result_payload,
     build_job_spec_from_request,
@@ -761,6 +762,35 @@ def test_run_job_large_autonomous_sets_safe_defaults(
     }
     payload = yaml.safe_load(capsys.readouterr().out)
     assert payload["status"] == "done"
+
+
+def test_large_autonomous_overrides_disabled_quality_gates() -> None:
+    spec = JobSpec(
+        request_text="Build something large.",
+        repo_path=".",
+        metadata={
+            "constraints": {
+                "require_prd_quality": False,
+                "require_task_acceptance_criteria": False,
+                "require_task_artifacts": False,
+                "require_completion_integrity": False,
+                "require_test_evidence": False,
+                "require_stage_test_patches": False,
+                "stage_review": False,
+            }
+        },
+    )
+
+    apply_constraint_overrides(spec, large_autonomous=True)
+
+    constraints = spec.metadata["constraints"]
+    assert constraints["require_prd_quality"] is True
+    assert constraints["require_task_acceptance_criteria"] is True
+    assert constraints["require_task_artifacts"] is True
+    assert constraints["require_completion_integrity"] is True
+    assert constraints["require_test_evidence"] is True
+    assert constraints["require_stage_test_patches"] is True
+    assert constraints["stage_review"] is True
 
 
 def test_run_autonomous_starts_large_job_and_continues(
