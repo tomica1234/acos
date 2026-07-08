@@ -6319,6 +6319,68 @@ def test_job_runner_blocks_when_strict_prd_quality_required(tmp_path: Path) -> N
     assert "architect" not in record.outputs
 
 
+def test_job_runner_blocks_prd_quality_when_open_questions_remain(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    registry = ModelRegistry.from_paths(
+        provider_path=config_dir() / "model_providers.yaml",
+        agents_path=config_dir() / "agents.yaml",
+        routing_path=config_dir() / "model_routing.yaml",
+    )
+    attach_mock_adapter(
+        registry,
+        {
+            "pm": PRD(
+                title="Feature",
+                problem_statement="Need feature",
+                smallest_working_core=["Expose a feature module"],
+                small_parts=["Create feature module", "Add focused tests"],
+                incremental_milestones=["Module exists", "Tests exist"],
+                acceptance_tests=["Feature module exists", "Focused tests exist"],
+                definition_of_done=["All tests pass"],
+                required_artifacts=["feature.py", "tests/test_feature.py"],
+                open_questions=["Which persistence backend should be used?"],
+            ).model_dump(),
+            "architect": ArchitecturePlan(summary="Should not run").model_dump(),
+        },
+    )
+    policy = PolicyEngine.from_path(config_dir() / "policies.yaml")
+    environment = FakeMCPEnvironment(
+        workspace_root=workspace,
+        memory_db_path=workspace / ".memory.sqlite3",
+    )
+    runner = JobRunner(registry=registry, policy=policy, router=environment.build_router())
+    spec = JobSpec(
+        request_text="Create a feature with unresolved PM questions",
+        repo_path=str(workspace),
+        target_branch="acos/strict-prd-open-questions",
+        metadata={
+            "constraints": {
+                "require_prd_quality": True,
+                "prd_quality_refinement_attempts": 0,
+            }
+        },
+    )
+
+    record = runner.run_job(spec)
+
+    assert_recovery_plan(
+        record,
+        status=JobStatus.ANALYZING,
+        strategy="REVISE_PRD_AND_ARCHITECTURE",
+    )
+    assert_recoverable_error(
+        record,
+        "prd_quality_gate_failed:open_questions_resolved",
+    )
+    assert record.outputs["prd_quality"]["passed"] is False
+    assert record.outputs["prd_quality"]["missing"] == ["open_questions_resolved"]
+    assert record.outputs["prd_quality"]["warnings"] == ["open_questions_present"]
+    assert "architect" not in record.outputs
+
+
 def test_job_runner_refines_sparse_prd_before_implementation_when_required(
     tmp_path: Path,
 ) -> None:
@@ -6590,14 +6652,38 @@ def test_prd_quality_requires_required_artifacts() -> None:
     assert report["test_required_artifacts"] == []
 
 
+def test_prd_quality_blocks_unresolved_open_questions() -> None:
+    prd = PRD(
+        title="Feature",
+        problem_statement="Need feature",
+        smallest_working_core=["Expose a feature module"],
+        small_parts=["Create feature module", "Add focused tests"],
+        incremental_milestones=["Module exists", "Tests exist"],
+        acceptance_tests=["Feature module exists", "Focused tests exist"],
+        definition_of_done=["All tests pass"],
+        required_artifacts=["feature.py", "tests/test_feature.py"],
+        open_questions=["Which persistence backend should be used?"],
+    )
+
+    report = JobRunner._build_prd_quality_report(prd)
+
+    assert report["passed"] is False
+    assert report["missing"] == ["open_questions_resolved"]
+    assert report["warnings"] == ["open_questions_present"]
+
+
 def test_prd_quality_repair_logs_name_uncovered_small_parts() -> None:
     prd = PRD(
         title="English Vocab App",
         problem_statement="Students need vocabulary practice.",
         acceptance_tests=["GET /api/health returns 200"],
+        open_questions=["Which database should store word progress?"],
     )
     report = {
-        "missing": ["acceptance_tests_cover_small_parts"],
+        "missing": [
+            "acceptance_tests_cover_small_parts",
+            "open_questions_resolved",
+        ],
         "warnings": ["open_questions_present"],
         "uncovered_acceptance_small_parts": [
             {
@@ -6615,7 +6701,7 @@ def test_prd_quality_repair_logs_name_uncovered_small_parts() -> None:
 
     assert logs[:3] == [
         "The previous PRD was not specific enough for autonomous execution.",
-        "Missing fields: acceptance_tests_cover_small_parts",
+        "Missing fields: acceptance_tests_cover_small_parts, open_questions_resolved",
         "Warnings: open_questions_present",
     ]
     assert any(
@@ -6627,6 +6713,14 @@ def test_prd_quality_repair_logs_name_uncovered_small_parts() -> None:
         for item in logs
     )
     assert any("Current acceptance_tests: GET /api/health returns 200" == item for item in logs)
+    assert any(
+        "Open questions blocking autonomy: Which database should store word progress?"
+        == item
+        for item in logs
+    )
+    assert any(
+        "Resolve open_questions before implementation" in item for item in logs
+    )
 
 
 def test_prd_quality_deterministically_repairs_uncovered_acceptance_tests(

@@ -2109,6 +2109,14 @@ class JobRunner:
                 "Current acceptance_tests: "
                 + " | ".join(self_item for self_item in prd.acceptance_tests)
             )
+        open_questions = JobRunner._non_empty_items(prd.open_questions)
+        if open_questions:
+            logs.append("Open questions blocking autonomy: " + " | ".join(open_questions))
+            logs.append(
+                "Resolve open_questions before implementation by converting each one "
+                "into an explicit assumption, constraint, non_goal, or acceptance test; "
+                "then return open_questions as an empty list."
+            )
         return logs
 
     def _record_prd_quality_attempt(
@@ -2181,7 +2189,8 @@ class JobRunner:
         )
         if acceptance_tests and required_artifacts and not test_required_artifacts:
             missing.append("required_test_artifacts")
-        if prd.open_questions:
+        if JobRunner._non_empty_items(prd.open_questions):
+            missing.append("open_questions_resolved")
             warnings.append("open_questions_present")
         missing_acceptance_test_count = max(0, len(small_parts) - len(acceptance_tests))
         return {
