@@ -158,6 +158,7 @@ def build_parser() -> argparse.ArgumentParser:
     plan_job.add_argument("--supervise-preflight-provider", default=None)
     plan_job.add_argument("--supervise-preflight-timeout", type=float, default=5.0)
     plan_job.add_argument("--supervise-pm-stall-recovery", action="store_true")
+    plan_job.add_argument("--supervise-autonomous-until-done", action="store_true")
     plan_job.add_argument(
         "--supervise-allow-blocked-recovery",
         dest="supervise_allow_repeated_failure_recovery",
@@ -298,6 +299,7 @@ def build_parser() -> argparse.ArgumentParser:
     job_status.add_argument("--supervise-preflight-provider", default=None)
     job_status.add_argument("--supervise-preflight-timeout", type=float, default=5.0)
     job_status.add_argument("--supervise-pm-stall-recovery", action="store_true")
+    job_status.add_argument("--supervise-autonomous-until-done", action="store_true")
     job_status.add_argument(
         "--supervise-allow-blocked-recovery",
         "--supervise-allow-repeated-failure-recovery",
@@ -1177,6 +1179,7 @@ def planning_result_payload(
     jobs_dir: str | Path | None = None,
     next_supervise_cli_args: list[str] | None = None,
     prefer_supervise: bool = False,
+    autonomous_until_done: bool = False,
 ) -> dict[str, Any]:
     payload = autonomous_result_payload(
         record,
@@ -1188,6 +1191,7 @@ def planning_result_payload(
         continued=False,
     )
     supervise_args = next_supervise_cli_args or []
+    payload["autonomous_until_done"] = autonomous_until_done
     if supervise_args:
         payload["can_supervise_continue"] = True
         payload["next_supervise_cli_args"] = supervise_args
@@ -1801,7 +1805,11 @@ def job_status_supervision_payload(
             preflight_provider=args.supervise_preflight_provider,
             preflight_timeout=args.supervise_preflight_timeout,
             allow_repeated_failure_recovery=args.supervise_allow_repeated_failure_recovery,
-            pm_stall_recovery=args.supervise_pm_stall_recovery,
+            pm_stall_recovery=(
+                args.supervise_pm_stall_recovery
+                or args.supervise_autonomous_until_done
+            ),
+            autonomous_until_done=args.supervise_autonomous_until_done,
         )
         if can_supervise
         else []
@@ -1812,6 +1820,7 @@ def job_status_supervision_payload(
         "next_supervise_command": (
             _acos_command(supervise_args) if supervise_args else None
         ),
+        "autonomous_until_done": bool(args.supervise_autonomous_until_done),
     }
 
 
@@ -2750,7 +2759,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                 allow_repeated_failure_recovery=(
                     args.supervise_allow_repeated_failure_recovery
                 ),
-                pm_stall_recovery=args.supervise_pm_stall_recovery,
+                pm_stall_recovery=(
+                    args.supervise_pm_stall_recovery
+                    or args.supervise_autonomous_until_done
+                ),
+                autonomous_until_done=args.supervise_autonomous_until_done,
             )
             if args.supervise_after_planning
             else None
@@ -2762,6 +2775,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             jobs_dir=args.jobs_dir,
             next_supervise_cli_args=next_supervise_cli_args,
             prefer_supervise=args.supervise_after_planning,
+            autonomous_until_done=args.supervise_autonomous_until_done,
         )
         emit_json_summary(payload, args.summary_file)
         return 0 if payload["planning_complete"] else 1

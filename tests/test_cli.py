@@ -653,6 +653,7 @@ def test_plan_job_can_suggest_supervised_execution_after_planning(
             "local_ornith",
             "--supervise-preflight-timeout",
             "0.5",
+            "--supervise-autonomous-until-done",
         ]
     )
 
@@ -685,9 +686,12 @@ def test_plan_job_can_suggest_supervised_execution_after_planning(
         "local_ornith",
         "--preflight-timeout",
         "0.5",
+        "--pm-stall-recovery",
+        "--autonomous-until-done",
     ]
     assert payload["planning_complete"] is True
     assert payload["terminal_reason"] == "planned"
+    assert payload["autonomous_until_done"] is True
     assert payload["can_supervise_continue"] is True
     assert payload["next_supervise_cli_args"] == expected_supervise_args
     assert payload["next_supervise_command"] == "acos " + " ".join(
@@ -2068,6 +2072,65 @@ def test_job_status_can_print_next_supervise_command(tmp_path: Path, capsys) -> 
     )
 
 
+def test_job_status_preserves_autonomous_until_done_in_supervise_command_and_json(
+    tmp_path: Path,
+    capsys,
+) -> None:
+    from packages.orchestrator.job_store import FileJobStore
+
+    jobs_dir = tmp_path / "jobs"
+    spec = JobSpec(
+        job_id="job-status-autonomous-until-done",
+        request_text="Build something useful.",
+        repo_path=str(tmp_path),
+    )
+    store = FileJobStore(jobs_dir)
+    record = store.create(spec)
+    record.status = JobStatus.BLOCKED
+    store.update(record)
+
+    exit_code = main(
+        [
+            "job-status",
+            "--jobs-dir",
+            str(jobs_dir),
+            "--job-id",
+            "job-status-autonomous-until-done",
+            "--next-supervise-command",
+            "--supervise-max-runtime-seconds",
+            "60",
+            "--supervise-autonomous-until-done",
+        ]
+    )
+
+    assert exit_code == 0
+    command = capsys.readouterr().out.strip()
+    assert "--autonomous-until-done" in command
+    assert "--pm-stall-recovery" in command
+
+    exit_code = main(
+        [
+            "job-status",
+            "--jobs-dir",
+            str(jobs_dir),
+            "--job-id",
+            "job-status-autonomous-until-done",
+            "--json",
+            "--supervise-max-runtime-seconds",
+            "60",
+            "--supervise-autonomous-until-done",
+        ]
+    )
+
+    assert exit_code == 0
+    payload = json.loads(capsys.readouterr().out)
+    supervision = payload["supervision"]
+    assert supervision["autonomous_until_done"] is True
+    assert "--autonomous-until-done" in supervision["next_supervise_cli_args"]
+    assert "--autonomous-until-done" in supervision["next_supervise_command"]
+    assert "--pm-stall-recovery" in supervision["next_supervise_cli_args"]
+
+
 def test_job_status_next_supervise_command_is_empty_for_done_job(
     tmp_path: Path,
     capsys,
@@ -2170,6 +2233,7 @@ def test_job_status_can_print_json_summary(tmp_path: Path, capsys) -> None:
         "can_supervise_continue": True,
         "next_supervise_cli_args": expected_supervise_args,
         "next_supervise_command": "acos " + " ".join(expected_supervise_args),
+        "autonomous_until_done": False,
     }
     assert payload["operator_decision"] == {
         "action": "continue",
@@ -2548,6 +2612,7 @@ def test_job_status_json_marks_done_job_as_not_supervisable(tmp_path: Path, caps
         "can_supervise_continue": False,
         "next_supervise_cli_args": [],
         "next_supervise_command": None,
+        "autonomous_until_done": False,
     }
     assert payload["operator_decision"] == {
         "action": "done",
