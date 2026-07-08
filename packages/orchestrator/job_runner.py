@@ -1126,8 +1126,40 @@ class JobRunner:
         constraints = record.spec.metadata.get("constraints")
         if not isinstance(constraints, dict):
             return
+        stale_planning_context_keys = {
+            "prd_quality_missing",
+            "prd_quality_warnings",
+            "prd_open_questions",
+            "uncovered_acceptance_small_parts",
+            "invalid_required_artifacts",
+            "test_required_artifacts",
+            "task_graph_validation_errors",
+            "uncovered_small_parts",
+            "uncovered_acceptance_tests",
+            "unassigned_required_artifacts",
+            "invalid_prd_required_artifacts",
+            "unowned_required_artifacts",
+            "role_mismatched_target_files",
+            "role_mismatched_required_artifacts",
+            "required_artifacts_missing_target_files",
+            "target_files_missing_required_artifacts",
+            "duplicate_task_ids",
+            "unknown_dependencies",
+            "dependency_cycle_task_ids",
+            "prd_test_required_artifacts",
+            "executable_tasks_missing_required_artifacts",
+            "implementation_tasks_missing_target_files",
+            "test_writer_missing_implementation_dependencies",
+            "executor_order_dependency_violations",
+            "invalid_task_artifacts",
+            "recovery_mode",
+            "recovery_strategy",
+            "recovery_next_actor",
+            "recovery_next_status",
+            "recovery_step_count",
+        }
         for key in list(constraints):
-            if key.startswith("planning_repair_"):
+            if key.startswith("planning_repair_") or key in stale_planning_context_keys:
                 constraints.pop(key, None)
 
     def _recovery_guidance_logs(self, record: JobRecord, role: str) -> list[str]:

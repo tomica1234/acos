@@ -7205,6 +7205,19 @@ def test_job_runner_clears_planning_repair_constraints_after_prd_passes(
                 "require_prd_quality": True,
                 "planning_repair_strategy_change": True,
                 "planning_repair_repeated_prd_missing": "acceptance_tests",
+                "prd_quality_missing": ["acceptance_tests"],
+                "prd_quality_warnings": ["open_questions_present"],
+                "prd_open_questions": ["Which backend?"],
+                "uncovered_acceptance_small_parts": [
+                    {"small_part_index": 1, "small_part": "Create module"}
+                ],
+                "invalid_required_artifacts": ["../outside.py"],
+                "test_required_artifacts": ["tests/test_feature.py"],
+                "recovery_mode": "prd_quality_revision",
+                "recovery_strategy": "REVISE_PRD_AND_ARCHITECTURE",
+                "recovery_next_actor": "pm",
+                "recovery_next_status": "analyzing",
+                "recovery_step_count": 1,
             }
         },
     )
@@ -7224,8 +7237,23 @@ def test_job_runner_clears_planning_repair_constraints_after_prd_passes(
     result = runner._refine_prd_quality_for_autonomy(record, prd)
 
     assert result == prd
-    assert "planning_repair_strategy_change" not in record.spec.metadata["constraints"]
-    assert "planning_repair_repeated_prd_missing" not in record.spec.metadata["constraints"]
+    constraints = record.spec.metadata["constraints"]
+    for key in (
+        "planning_repair_strategy_change",
+        "planning_repair_repeated_prd_missing",
+        "prd_quality_missing",
+        "prd_quality_warnings",
+        "prd_open_questions",
+        "uncovered_acceptance_small_parts",
+        "invalid_required_artifacts",
+        "test_required_artifacts",
+        "recovery_mode",
+        "recovery_strategy",
+        "recovery_next_actor",
+        "recovery_next_status",
+        "recovery_step_count",
+    ):
+        assert key not in constraints
 
 
 def test_job_runner_clears_planning_repair_constraints_after_task_graph_validates(
@@ -7252,6 +7280,26 @@ def test_job_runner_clears_planning_repair_constraints_after_task_graph_validate
             "constraints": {
                 "planning_repair_strategy_change": True,
                 "planning_repair_repeated_task_graph_error_types": "unknown_dependencies",
+                "task_graph_validation_errors": ["unknown_dependencies"],
+                "unknown_dependencies": [
+                    {"task_id": "views", "dependency": "models"}
+                ],
+                "duplicate_task_ids": ["core"],
+                "dependency_cycle_task_ids": ["core"],
+                "uncovered_small_parts": [
+                    {"small_part_index": 1, "small_part": "Create module"}
+                ],
+                "uncovered_acceptance_tests": [
+                    {"acceptance_test_index": 1, "acceptance_test": "VALUE equals 1"}
+                ],
+                "role_mismatched_target_files": [
+                    {"task_id": "core", "path": "tests/test_feature.py"}
+                ],
+                "recovery_mode": "task_graph_repair",
+                "recovery_strategy": "REPLAN_TASK",
+                "recovery_next_actor": "planner",
+                "recovery_next_status": "replanning",
+                "recovery_step_count": 1,
             }
         },
     )
@@ -7273,11 +7321,24 @@ def test_job_runner_clears_planning_repair_constraints_after_task_graph_validate
     result = runner._load_or_repair_task_graph_for_autonomy(record, prd)
 
     assert result is not None
-    assert "planning_repair_strategy_change" not in record.spec.metadata["constraints"]
-    assert (
-        "planning_repair_repeated_task_graph_error_types"
-        not in record.spec.metadata["constraints"]
-    )
+    constraints = record.spec.metadata["constraints"]
+    for key in (
+        "planning_repair_strategy_change",
+        "planning_repair_repeated_task_graph_error_types",
+        "task_graph_validation_errors",
+        "unknown_dependencies",
+        "duplicate_task_ids",
+        "dependency_cycle_task_ids",
+        "uncovered_small_parts",
+        "uncovered_acceptance_tests",
+        "role_mismatched_target_files",
+        "recovery_mode",
+        "recovery_strategy",
+        "recovery_next_actor",
+        "recovery_next_status",
+        "recovery_step_count",
+    ):
+        assert key not in constraints
 
 
 def test_job_runner_adds_recovery_guidance_to_agent_logs(
