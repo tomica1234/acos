@@ -2978,6 +2978,98 @@ def test_task_graph_validation_rejects_role_mismatched_target_files() -> None:
     assert "unowned_required_artifacts" in error_types
 
 
+def test_task_graph_validation_attempt_preserves_artifact_role_details(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    registry = ModelRegistry.from_paths(
+        provider_path=config_dir() / "model_providers.yaml",
+        agents_path=config_dir() / "agents.yaml",
+        routing_path=config_dir() / "model_routing.yaml",
+    )
+    policy = PolicyEngine.from_path(config_dir() / "policies.yaml")
+    environment = FakeMCPEnvironment(
+        workspace_root=workspace,
+        memory_db_path=workspace / ".memory.sqlite3",
+    )
+    runner = JobRunner(
+        registry=registry,
+        policy=policy,
+        router=environment.build_router(),
+    )
+    record = runner.store.create(
+        JobSpec(request_text="Build feature", repo_path=str(workspace))
+    )
+    prd = PRD(
+        title="Feature",
+        problem_statement="Need feature",
+        small_parts=["Create feature module"],
+        acceptance_tests=["VALUE equals 1"],
+        required_artifacts=["feature.py", "tests/test_feature.py"],
+    )
+    task_graph = TaskGraph(
+        goal="Build feature",
+        tasks=[
+            PlannedTask(
+                id="core",
+                title="Build core",
+                description="Create feature module",
+                role="implementer",
+                acceptance_criteria=["VALUE equals 1"],
+                target_files=["tests/test_feature.py"],
+                required_artifacts=["tests/test_feature.py"],
+            ),
+            PlannedTask(
+                id="tests",
+                title="Test core",
+                description="Add focused tests",
+                role="test_writer",
+                acceptance_criteria=["VALUE is covered"],
+                target_files=["feature.py"],
+                required_artifacts=["feature.py"],
+            ),
+        ],
+    )
+    validation = JobRunner._build_task_graph_validation(
+        task_graph,
+        prd=prd,
+        require_acceptance_criteria=True,
+        require_task_artifacts=True,
+    )
+
+    runner._record_task_graph_validation_attempt(
+        record,
+        attempt=0,
+        action="initial",
+        validation=validation,
+    )
+
+    attempt = record.outputs["task_graph_validation_attempts"][0]
+    assert attempt["role_mismatched_target_files"] == [
+        {
+            "task_id": "core",
+            "role": "implementer",
+            "path": "tests/test_feature.py",
+            "expected_roles": ["test_writer"],
+        },
+        {
+            "task_id": "tests",
+            "role": "test_writer",
+            "path": "feature.py",
+            "expected_roles": ["implementer", "scaffold"],
+        },
+    ]
+    assert attempt["unowned_required_artifacts"] == [
+        {"path": "feature.py", "expected_roles": ["implementer", "scaffold"]},
+        {"path": "tests/test_feature.py", "expected_roles": ["test_writer"]},
+    ]
+    assert (
+        f"task_graph_validation_detail: role_mismatched_target_files="
+        f"{attempt['role_mismatched_target_files']}"
+    ) in JobRunner._task_graph_validation_repair_logs(prd, validation)
+
+
 def test_task_graph_validation_rejects_role_mismatched_required_artifacts() -> None:
     task_graph = TaskGraph(
         goal="Build feature",
@@ -7399,6 +7491,102 @@ def test_job_runner_adds_planning_repair_guidance_to_planner_logs(
             "planning_repair_instruction: change the task graph strategy; simplify or split "
             "the plan so repeated validation errors are removed instead of reusing the same graph."
         ),
+    ]
+
+
+def test_job_runner_adds_task_graph_details_to_planner_repair_logs(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    registry = ModelRegistry.from_paths(
+        provider_path=config_dir() / "model_providers.yaml",
+        agents_path=config_dir() / "agents.yaml",
+        routing_path=config_dir() / "model_routing.yaml",
+    )
+    attach_mock_adapter(
+        registry,
+        {
+            "planner": TaskGraph(
+                goal="Repair graph",
+                tasks=[
+                    PlannedTask(
+                        id="core",
+                        title="Core",
+                        description="Build core",
+                        role="implementer",
+                    )
+                ],
+            ).model_dump(),
+        },
+    )
+    policy = PolicyEngine.from_path(config_dir() / "policies.yaml")
+    environment = FakeMCPEnvironment(
+        workspace_root=workspace,
+        memory_db_path=workspace / ".memory.sqlite3",
+    )
+    runner = JobRunner(registry=registry, policy=policy, router=environment.build_router())
+    spec = JobSpec(request_text="Repair task graph", repo_path=str(workspace))
+    store = InMemoryJobStore()
+    record = store.create(spec)
+    record.status = JobStatus.DESIGNING
+    role_mismatch_detail = [
+        {
+            "task_id": "core",
+            "role": "implementer",
+            "path": "frontend/test/project_scaffold.test.tsx",
+            "expected_roles": ["test_writer"],
+        }
+    ]
+    record.outputs["task_graph_validation_attempts"] = [
+        {
+            "attempt": 0,
+            "action": "initial",
+            "valid": False,
+            "errors": [{"type": "role_mismatched_target_files"}],
+            "role_mismatched_target_files": role_mismatch_detail,
+        },
+        {
+            "attempt": 1,
+            "action": "repair",
+            "valid": False,
+            "errors": [{"type": "role_mismatched_target_files"}],
+            "role_mismatched_target_files": role_mismatch_detail,
+        },
+        {
+            "attempt": 2,
+            "action": "repair",
+            "valid": False,
+            "errors": [{"type": "role_mismatched_target_files"}],
+            "role_mismatched_target_files": role_mismatch_detail,
+        },
+    ]
+    runner.store = store
+    captured: dict[str, object] = {}
+    original_run = runner.agent_runner.run
+
+    def capture_run(*args, **kwargs):
+        if kwargs.get("role") == "planner":
+            captured["logs"] = list(kwargs["context_packet"].logs)
+        return original_run(*args, **kwargs)
+
+    monkeypatch.setattr(runner.agent_runner, "run", capture_run)
+
+    runner._run_structured_role(record, "planner", TaskGraph, "Repair task graph")
+
+    assert captured["logs"] == [
+        (
+            "planning_repair_context: consecutive_prd_failures=0; "
+            "consecutive_task_graph_failures=3; "
+            "repeated_prd_missing=none; "
+            "repeated_task_graph_error_types=role_mismatched_target_files"
+        ),
+        (
+            "planning_repair_instruction: change the task graph strategy; simplify or split "
+            "the plan so repeated validation errors are removed instead of reusing the same graph."
+        ),
+        f"planning_repair_task_graph_detail: role_mismatched_target_files={role_mismatch_detail}",
     ]
 
 

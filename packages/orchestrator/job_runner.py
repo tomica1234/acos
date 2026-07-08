@@ -136,6 +136,21 @@ class JobRunner:
         "upload",
     }
     CRUD_OPERATION_TOKENS = {"create", "read", "update", "delete"}
+    TASK_GRAPH_VALIDATION_DETAIL_KEYS = (
+        "unassigned_required_artifacts",
+        "invalid_prd_required_artifacts",
+        "unowned_required_artifacts",
+        "role_mismatched_target_files",
+        "role_mismatched_required_artifacts",
+        "required_artifacts_missing_target_files",
+        "target_files_missing_required_artifacts",
+        "prd_test_required_artifacts",
+        "executable_tasks_missing_required_artifacts",
+        "implementation_tasks_missing_target_files",
+        "test_writer_missing_implementation_dependencies",
+        "executor_order_dependency_violations",
+        "invalid_task_artifacts",
+    )
 
     def __init__(
         self,
@@ -1207,6 +1222,9 @@ class JobRunner:
             return []
         if not planning_repair.get("strategy_change_recommended"):
             return []
+        last_task_graph_attempt = planning_quality.get("last_task_graph_validation_attempt")
+        if not isinstance(last_task_graph_attempt, dict):
+            last_task_graph_attempt = planning_quality.get("task_graph_validation")
         repeated_prd_missing = [
             str(item) for item in planning_repair.get("repeated_prd_missing", [])
         ]
@@ -1233,6 +1251,49 @@ class JobRunner:
                 "planning_repair_instruction: change the task graph strategy; simplify or split "
                 "the plan so repeated validation errors are removed instead of reusing the same graph."
             )
+            if isinstance(last_task_graph_attempt, dict):
+                logs.extend(
+                    self._non_empty_task_graph_validation_detail_logs(
+                        last_task_graph_attempt,
+                        prefix="planning_repair_task_graph_detail",
+                    )
+                )
+        return logs
+
+    @classmethod
+    def _non_empty_task_graph_validation_detail_logs(
+        cls,
+        validation: dict[str, Any],
+        *,
+        prefix: str,
+    ) -> list[str]:
+        logs: list[str] = []
+        for key in cls.TASK_GRAPH_VALIDATION_DETAIL_KEYS:
+            value = validation.get(key)
+            if value:
+                logs.append(f"{prefix}: {key}={value}")
+        return logs
+
+    @classmethod
+    def _task_graph_validation_repair_logs(
+        cls,
+        prd: PRD,
+        validation: dict[str, Any],
+    ) -> list[str]:
+        logs = [
+            "The previous task graph failed autonomy validation.",
+            f"Validation errors: {validation['errors']}",
+            f"PRD small_parts: {cls._non_empty_items(prd.small_parts)}",
+        ]
+        prd_required_artifacts = cls._valid_unique_artifact_paths(prd.required_artifacts)
+        if prd_required_artifacts:
+            logs.append(f"PRD required_artifacts: {prd_required_artifacts}")
+        logs.extend(
+            cls._non_empty_task_graph_validation_detail_logs(
+                validation,
+                prefix="task_graph_validation_detail",
+            )
+        )
         return logs
 
     def _pm_stall_guidance_logs(self, record: JobRecord, role: str) -> list[str]:
@@ -3047,11 +3108,7 @@ class JobRunner:
                     "and PRD required_artifacts assigned to their owning role target_files, "
                     "and only autonomous-executable task roles."
                 ),
-                logs=[
-                    "The previous task graph failed autonomy validation.",
-                    f"Validation errors: {validation['errors']}",
-                    f"PRD small_parts: {self._non_empty_items(prd.small_parts)}",
-                ],
+                logs=self._task_graph_validation_repair_logs(prd, validation),
             )
             self._write_memory_item(record, "planner", "task_graph", task_graph.model_dump_json())
             task_graph = self._refine_task_graph_for_autonomy(record, prd, task_graph)
@@ -3100,22 +3157,23 @@ class JobRunner:
         if not isinstance(attempts, list):
             attempts = []
             record.outputs["task_graph_validation_attempts"] = attempts
-        attempts.append(
-            {
-                "attempt": attempt,
-                "action": action,
-                "valid": validation["valid"],
-                "errors": list(validation["errors"]),
-                "small_part_coverage": list(validation.get("small_part_coverage", [])),
-                "uncovered_small_parts": list(validation.get("uncovered_small_parts", [])),
-                "acceptance_test_coverage": list(
-                    validation.get("acceptance_test_coverage", [])
-                ),
-                "uncovered_acceptance_tests": list(
-                    validation.get("uncovered_acceptance_tests", [])
-                ),
-            }
-        )
+        attempt_record = {
+            "attempt": attempt,
+            "action": action,
+            "valid": validation["valid"],
+            "errors": list(validation["errors"]),
+            "small_part_coverage": list(validation.get("small_part_coverage", [])),
+            "uncovered_small_parts": list(validation.get("uncovered_small_parts", [])),
+            "acceptance_test_coverage": list(
+                validation.get("acceptance_test_coverage", [])
+            ),
+            "uncovered_acceptance_tests": list(
+                validation.get("uncovered_acceptance_tests", [])
+            ),
+        }
+        for key in self.TASK_GRAPH_VALIDATION_DETAIL_KEYS:
+            attempt_record[key] = list(validation.get(key, []))
+        attempts.append(attempt_record)
 
     def _validate_task_graph_for_autonomy(
         self,
