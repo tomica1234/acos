@@ -1656,6 +1656,34 @@ def test_job_runner_blocks_strict_task_without_acceptance_criteria_before_implem
     assert not (workspace / "feature.py").exists()
 
 
+def test_task_graph_validation_requires_task_artifacts_when_requested() -> None:
+    task_graph = TaskGraph(
+        goal="Build feature",
+        tasks=[
+            PlannedTask(
+                id="core",
+                title="Build core",
+                description="Build the smallest feature.",
+                role="implementer",
+                acceptance_criteria=["VALUE equals 1"],
+            )
+        ],
+    )
+
+    validation = JobRunner._build_task_graph_validation(
+        task_graph,
+        require_acceptance_criteria=True,
+        require_task_artifacts=True,
+    )
+
+    assert validation["valid"] is False
+    assert validation["require_task_artifacts"] is True
+    assert validation["implementation_task_artifact_count"] == 0
+    assert validation["errors"] == [
+        {"type": "missing_task_artifacts", "task_ids": ["core"]}
+    ]
+
+
 def test_job_runner_stops_when_implementation_reports_blocked(
     tmp_path: Path,
 ) -> None:

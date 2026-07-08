@@ -2399,6 +2399,10 @@ class JobRunner:
                 record,
                 "require_completion_integrity",
             ),
+            require_task_artifacts=self._constraint_flag(
+                record,
+                "require_task_artifacts",
+            ),
         )
         record.outputs["task_graph_validation"] = validation
         self._record_task_graph_validation_attempt(
@@ -2433,6 +2437,7 @@ class JobRunner:
                     "known dependencies, no duplicate ids, no dependency cycles, "
                     "implementation task coverage for every PRD small_part, "
                     "testable acceptance_criteria on every implementer task, "
+                    "target_files or required_artifacts on every implementation task, "
                     "and only autonomous-executable task roles."
                 ),
                 logs=[
@@ -2454,6 +2459,10 @@ class JobRunner:
                 require_executable_task_roles=self._constraint_flag(
                     record,
                     "require_completion_integrity",
+                ),
+                require_task_artifacts=self._constraint_flag(
+                    record,
+                    "require_task_artifacts",
                 ),
             )
             record.outputs["task_graph_validation"] = validation
@@ -2521,6 +2530,7 @@ class JobRunner:
         prd: PRD | None = None,
         require_acceptance_criteria: bool = False,
         require_executable_task_roles: bool = False,
+        require_task_artifacts: bool = False,
     ) -> dict[str, Any]:
         ids = [task.id for task in task_graph.tasks]
         duplicate_ids = sorted({task_id for task_id in ids if ids.count(task_id) > 1})
@@ -2611,6 +2621,21 @@ class JobRunner:
                     "task_ids": tasks_missing_acceptance_criteria,
                 }
             )
+        tasks_missing_artifacts = [
+            task.id
+            for task in task_graph.tasks
+            if task.role in JobRunner.IMPLEMENTATION_TASK_ROLES
+            and not JobRunner._non_empty_items(
+                [*task.target_files, *task.required_artifacts]
+            )
+        ]
+        if require_task_artifacts and tasks_missing_artifacts:
+            errors.append(
+                {
+                    "type": "missing_task_artifacts",
+                    "task_ids": tasks_missing_artifacts,
+                }
+            )
         executable_roles = JobRunner.IMPLEMENTATION_TASK_ROLES | JobRunner.TEST_TASK_ROLES
         unsupported_task_roles = [
             {"task_id": task.id, "role": task.role}
@@ -2634,6 +2659,10 @@ class JobRunner:
             ),
             "require_acceptance_criteria": require_acceptance_criteria,
             "require_executable_task_roles": require_executable_task_roles,
+            "require_task_artifacts": require_task_artifacts,
+            "implementation_task_artifact_count": (
+                len(implementation_task_ids) - len(tasks_missing_artifacts)
+            ),
             "unsupported_task_role_count": len(unsupported_task_roles),
             "small_part_count": len(small_parts),
             "small_part_coverage": small_part_coverage,

@@ -412,6 +412,7 @@ def test_summarize_job_progress_reports_ready_for_large_autonomy(tmp_path) -> No
                 description="Build core",
                 role="implementer",
                 acceptance_criteria=["VALUE equals 1"],
+                target_files=["feature.py"],
             ),
             PlannedTask(
                 id="tests",
@@ -430,6 +431,7 @@ def test_summarize_job_progress_reports_ready_for_large_autonomy(tmp_path) -> No
             "constraints": {
                 "require_prd_quality": True,
                 "require_task_acceptance_criteria": True,
+                "require_task_artifacts": True,
                 "require_completion_integrity": True,
                 "require_test_evidence": True,
                 "require_stage_test_patches": True,
@@ -463,8 +465,10 @@ def test_summarize_job_progress_reports_ready_for_large_autonomy(tmp_path) -> No
             "prd_quality_passed": True,
             "task_graph_valid": True,
             "implementation_tasks_have_acceptance_criteria": True,
+            "implementation_tasks_have_artifacts": True,
             "require_prd_quality": True,
             "require_task_acceptance_criteria": True,
+            "require_task_artifacts": True,
             "require_completion_integrity": True,
             "require_test_evidence": True,
             "require_stage_test_patches": True,
@@ -506,6 +510,48 @@ def test_summarize_job_progress_blocks_autonomy_without_task_acceptance(
     ]
     assert payload["autonomy_readiness"]["checks"][
         "implementation_tasks_have_acceptance_criteria"
+    ] is False
+
+
+def test_summarize_job_progress_blocks_autonomy_without_task_artifacts(
+    tmp_path,
+) -> None:
+    task_graph = TaskGraph(
+        goal="Build incrementally",
+        tasks=[
+            PlannedTask(
+                id="core",
+                title="Core",
+                description="Build core",
+                role="implementer",
+                acceptance_criteria=["VALUE equals 1"],
+            ),
+        ],
+    )
+    spec = JobSpec(
+        job_id="autonomy-missing-artifacts-job",
+        request_text="Build it carefully",
+        repo_path=str(tmp_path),
+        metadata={"constraints": {"require_task_artifacts": True}},
+    )
+    record = JobRecord(job_id=spec.job_id, spec=spec, status=JobStatus.TESTING)
+    record.outputs["task_graph"] = task_graph.model_dump()
+    record.outputs["task_graph_validation"] = {
+        "valid": True,
+        "task_count": 1,
+        "implementation_task_count": 1,
+        "implementation_task_artifact_count": 0,
+        "errors": [],
+    }
+
+    payload = summarize_job_progress(record)
+
+    assert payload["autonomy_readiness"]["ready"] is False
+    assert payload["autonomy_readiness"]["blocking_items"] == [
+        {"type": "missing_task_artifacts", "task_ids": ["core"]}
+    ]
+    assert payload["autonomy_readiness"]["checks"][
+        "implementation_tasks_have_artifacts"
     ] is False
 
 

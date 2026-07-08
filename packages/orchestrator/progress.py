@@ -1087,6 +1087,7 @@ def _autonomy_readiness(
     require_acceptance_criteria = bool(
         constraints.get("require_task_acceptance_criteria")
     )
+    require_task_artifacts = bool(constraints.get("require_task_artifacts"))
     require_completion_integrity = bool(constraints.get("require_completion_integrity"))
     require_test_evidence = bool(constraints.get("require_test_evidence"))
     require_stage_test_patches = bool(constraints.get("require_stage_test_patches"))
@@ -1095,6 +1096,7 @@ def _autonomy_readiness(
         [
             require_prd_quality,
             require_acceptance_criteria,
+            require_task_artifacts,
             require_completion_integrity,
             require_test_evidence,
             require_stage_test_patches,
@@ -1115,6 +1117,18 @@ def _autonomy_readiness(
     ]
     implementation_tasks_have_acceptance_criteria = (
         None if not implementation_tasks else not missing_acceptance_task_ids
+    )
+    missing_artifact_task_ids = [
+        task["id"]
+        for task in implementation_tasks
+        if isinstance(task.get("id"), str)
+        and not (
+            _non_empty_strings(task.get("target_files"))
+            or _non_empty_strings(task.get("required_artifacts"))
+        )
+    ]
+    implementation_tasks_have_artifacts = (
+        None if not implementation_tasks else not missing_artifact_task_ids
     )
 
     blocking_items: list[dict[str, Any]] = []
@@ -1155,6 +1169,13 @@ def _autonomy_readiness(
                 "task_ids": missing_acceptance_task_ids,
             }
         )
+    if require_task_artifacts and missing_artifact_task_ids:
+        blocking_items.append(
+            {
+                "type": "missing_task_artifacts",
+                "task_ids": missing_artifact_task_ids,
+            }
+        )
 
     return {
         "ready": not blocking_items,
@@ -1167,8 +1188,10 @@ def _autonomy_readiness(
             "implementation_tasks_have_acceptance_criteria": (
                 implementation_tasks_have_acceptance_criteria
             ),
+            "implementation_tasks_have_artifacts": implementation_tasks_have_artifacts,
             "require_prd_quality": require_prd_quality,
             "require_task_acceptance_criteria": require_acceptance_criteria,
+            "require_task_artifacts": require_task_artifacts,
             "require_completion_integrity": require_completion_integrity,
             "require_test_evidence": require_test_evidence,
             "require_stage_test_patches": require_stage_test_patches,
