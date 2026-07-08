@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 from packages.orchestrator.quality_gates import artifact_path_exists, invalid_artifact_paths
@@ -35,11 +36,15 @@ class DefinitionOfDoneVerifier:
         for artifact in self._required_artifacts(outputs):
             if invalid_artifact_paths([artifact]):
                 missing.append(f"required_artifact_invalid:{artifact}")
+            elif self._artifact_is_non_file(record, artifact):
+                missing.append(f"required_artifact_non_file:{artifact}")
             elif not self._artifact_exists(record, artifact):
                 missing.append(f"required_artifact_missing:{artifact}")
         for target in self._target_files(outputs):
             if invalid_artifact_paths([target]):
                 missing.append(f"target_file_invalid:{target}")
+            elif self._artifact_is_non_file(record, target):
+                missing.append(f"target_file_non_file:{target}")
             elif not self._artifact_exists(record, target):
                 missing.append(f"target_file_missing:{target}")
 
@@ -104,3 +109,15 @@ class DefinitionOfDoneVerifier:
     def _artifact_exists(record: JobRecord, relative_path: str) -> bool:
         root = record.spec.workspace_root or record.spec.repo_path
         return artifact_path_exists(relative_path, workspace_root=root)
+
+    @staticmethod
+    def _artifact_is_non_file(record: JobRecord, relative_path: str) -> bool:
+        if invalid_artifact_paths([relative_path]):
+            return False
+        value = str(relative_path).replace("\\", "/").strip()
+        normalized = PurePosixPath(value)
+        workspace = Path(record.spec.workspace_root or record.spec.repo_path).resolve()
+        target = (workspace / Path(*normalized.parts)).resolve()
+        if workspace not in [target, *target.parents]:
+            return False
+        return target.exists() and not target.is_file()

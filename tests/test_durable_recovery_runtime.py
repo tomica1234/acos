@@ -189,7 +189,7 @@ def test_completion_verifier_rejects_invalid_and_non_file_artifacts(
                 "description": "Core",
                 "role": "implementer",
                 "target_files": ["C:\\outside.py", "docs"],
-                "required_artifacts": ["../outside.py"],
+                "required_artifacts": ["../outside.py", "docs"],
             }
         ],
     }
@@ -201,5 +201,6 @@ def test_completion_verifier_rejects_invalid_and_non_file_artifacts(
 
     assert not result.passed
     assert "required_artifact_invalid:../outside.py" in result.missing_evidence
+    assert "required_artifact_non_file:docs" in result.missing_evidence
     assert "target_file_invalid:C:\\outside.py" in result.missing_evidence
-    assert "target_file_missing:docs" in result.missing_evidence
+    assert "target_file_non_file:docs" in result.missing_evidence
