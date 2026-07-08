@@ -116,6 +116,39 @@ def test_repo_server_patch_conflicts_are_recoverable_errors(tmp_path: Path) -> N
     assert (tmp_path / "app.py").read_text(encoding="utf-8") == "VALUE = 2\n"
 
 
+def test_recovery_executor_prioritizes_implementation_for_mixed_missing_artifacts(
+    tmp_path: Path,
+) -> None:
+    record = _record(tmp_path, status=JobStatus.RECOVERING, error="")
+    record.runtime_state["recovery_plan"] = {
+        "id": "plan-mixed-missing",
+        "trigger": "target_files_missing",
+        "strategy": "RETURN_TO_IMPLEMENTER",
+        "next_status": JobStatus.IMPLEMENTING.value,
+        "next_actor": "implementer",
+        "steps": ["RETURN_TO_IMPLEMENTER", "RECREATE_TARGET_FILES"],
+        "current_step_index": 0,
+        "status": "pending",
+        "constraints": {
+            "required_artifacts": ["src/app.py", "tests/test_app.py"],
+            "target_files": ["src/app.py", "tests/test_app.py"],
+        },
+    }
+
+    RecoveryExecutor().execute_until_ready(record)
+
+    plan = record.runtime_state["recovery_plan"]
+    assert plan["status"] == "running"
+    assert plan["next_actor"] == "implementer"
+    assert plan["next_status"] == JobStatus.IMPLEMENTING.value
+    assert plan["constraints"]["return_to_role"] == "implementer"
+    assert plan["constraints"]["missing_artifacts"] == [
+        "src/app.py",
+        "tests/test_app.py",
+    ]
+    assert record.status == JobStatus.IMPLEMENTING
+
+
 def test_completion_verifier_reports_missing_evidence(tmp_path: Path) -> None:
     record = _record(tmp_path, status=JobStatus.FINALIZING, error="")
     record.outputs["task_graph"] = {

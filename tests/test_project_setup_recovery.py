@@ -373,6 +373,51 @@ def test_recreate_target_files_recovery_waits_until_artifacts_exist(
     assert record.status == JobStatus.WRITING_TESTS
 
 
+def test_recreate_target_files_routes_project_setup_bundle_to_scaffold(
+    tmp_path: Path,
+) -> None:
+    spec = JobSpec(
+        request_text="Build it",
+        repo_path=str(tmp_path),
+        workspace_root=str(tmp_path),
+        target_branch="acos/recovery-project-setup-owner",
+    )
+    record = JobRecord(job_id=spec.job_id, spec=spec, status=JobStatus.RECOVERING)
+    record.runtime_state["recovery_plan"] = {
+        "id": "plan-project-setup-owner",
+        "trigger": "target_files_missing",
+        "strategy": "RETURN_TO_IMPLEMENTER",
+        "next_status": JobStatus.IMPLEMENTING.value,
+        "next_actor": "implementer",
+        "steps": ["RETURN_TO_IMPLEMENTER", "RECREATE_TARGET_FILES"],
+        "current_step_index": 0,
+        "status": "pending",
+        "constraints": {
+            "required_artifacts": [
+                "backend/main.py",
+                "backend/tests/test_project_setup.py",
+            ],
+            "target_files": [
+                "backend/main.py",
+                "backend/tests/test_project_setup.py",
+            ],
+        },
+    }
+
+    RecoveryExecutor().execute_until_ready(record)
+
+    plan = record.runtime_state["recovery_plan"]
+    assert plan["status"] == "running"
+    assert plan["next_actor"] == "scaffold"
+    assert plan["next_status"] == JobStatus.IMPLEMENTING.value
+    assert plan["constraints"]["return_to_role"] == "scaffold"
+    assert plan["constraints"]["missing_artifacts"] == [
+        "backend/main.py",
+        "backend/tests/test_project_setup.py",
+    ]
+    assert record.status == JobStatus.IMPLEMENTING
+
+
 def test_recreate_target_files_recovery_replans_invalid_artifact_paths(
     tmp_path: Path,
 ) -> None:

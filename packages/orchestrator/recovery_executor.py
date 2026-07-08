@@ -151,10 +151,15 @@ class RecoveryExecutor:
 
     @classmethod
     def _owner_for_missing_paths(cls, missing: list[str]) -> str:
+        non_test_paths = [
+            path for path in missing if not cls._looks_like_test_path(path)
+        ]
+        if any(cls._looks_like_project_setup_path(path) for path in non_test_paths):
+            return "scaffold"
+        if non_test_paths:
+            return "implementer"
         if any(cls._looks_like_test_path(path) for path in missing):
             return "test_writer"
-        if any(cls._looks_like_project_setup_path(path) for path in missing):
-            return "scaffold"
         return "implementer"
 
     @staticmethod
