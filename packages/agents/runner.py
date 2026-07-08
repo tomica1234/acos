@@ -96,6 +96,7 @@ class AgentRunner:
         require_json_schema: bool = True,
         max_steps: int = 6,
         audit_events: list[AuditEvent] | None = None,
+        request_timeout_seconds: float | None = None,
     ) -> tuple[T, ModelSelection, ModelCallRecord]:
         agent_config = self.registry.get_agent(role)
         configured_tools = (
@@ -163,6 +164,7 @@ class AgentRunner:
                         "model_key": selection.model_key,
                         "model_name": self.registry.get_model(selection.model_key).model,
                         "provider_name": selection.provider_key,
+                        "request_timeout_seconds": request_timeout_seconds,
                     },
                 )
             except AdapterError as exc:

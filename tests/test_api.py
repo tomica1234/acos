@@ -461,6 +461,7 @@ def test_supervised_api_preserves_autonomous_until_done(
             "plan_first": False,
             "max_cycles": 1,
             "steps_per_cycle": 1,
+            "max_runtime_seconds": 33,
             "autonomous_until_done": True,
         },
     )
@@ -468,6 +469,7 @@ def test_supervised_api_preserves_autonomous_until_done(
     assert response.status_code == 200
     payload = response.json()
     assert captured["autonomous_until_done"] is True
+    assert captured["spec"].metadata["constraints"]["model_timeout_seconds"] == 33.0
     assert payload["autonomous_until_done"] is True
     assert "--autonomous-until-done" in payload["next_supervise_cli_args"]
 

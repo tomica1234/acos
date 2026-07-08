@@ -419,6 +419,7 @@ def create_app(
             require_prd_quality=payload.require_prd_quality,
             stage_review=payload.stage_review,
             test_timeout_seconds=payload.test_timeout_seconds,
+            model_timeout_seconds=payload.max_runtime_seconds,
         )
         store = FileJobStore(payload.jobs_dir)
         runner, _ = build_default_runner(

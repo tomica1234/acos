@@ -207,6 +207,44 @@ def test_openai_adapter_uses_json_schema_response_format_when_supported(monkeypa
     }
 
 
+def test_openai_adapter_passes_request_timeout_from_metadata(monkeypatch) -> None:
+    monkeypatch.setenv("TEST_API_KEY", "sk-test-secret")
+    adapter = OpenAICompatibleAdapter(_provider(), _model())
+    captured_kwargs: dict[str, object] = {}
+
+    class FakeMessage:
+        content = "{\"summary\":\"ok\"}"
+        tool_calls = []
+
+    class FakeChoice:
+        message = FakeMessage()
+        finish_reason = "stop"
+
+    class FakeResponse:
+        choices = [FakeChoice()]
+        usage = None
+
+        def model_dump(self):
+            return {"choices": [{}]}
+
+    def fake_create(**kwargs):
+        captured_kwargs.update(kwargs)
+        return FakeResponse()
+
+    adapter.client.chat.completions.create = fake_create
+
+    adapter.generate(
+        messages=[{"role": "user", "content": "hello"}],
+        tools=None,
+        temperature=0.0,
+        top_p=None,
+        max_tokens=128,
+        metadata={"request_timeout_seconds": 12.5},
+    )
+
+    assert captured_kwargs["timeout"] == 12.5
+
+
 def test_openai_adapter_uses_json_object_when_only_json_mode_is_supported(monkeypatch) -> None:
     monkeypatch.setenv("TEST_API_KEY", "sk-test-secret")
     provider = _provider()

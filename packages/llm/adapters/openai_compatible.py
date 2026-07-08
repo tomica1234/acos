@@ -61,6 +61,9 @@ class OpenAICompatibleAdapter:
             kwargs["top_p"] = top_p
         if tools:
             kwargs["tools"] = tools
+        request_timeout = self._request_timeout_seconds(metadata)
+        if request_timeout is not None:
+            kwargs["timeout"] = request_timeout
         role = str((metadata or {}).get("role", ""))
         use_provider_json_mode = (
             self.provider.supports_json_mode
@@ -212,6 +215,19 @@ class OpenAICompatibleAdapter:
             if isinstance(value, int):
                 normalized[key] = value
         return normalized or None
+
+    @staticmethod
+    def _request_timeout_seconds(metadata: dict[str, Any] | None) -> float | None:
+        if not isinstance(metadata, dict):
+            return None
+        value = metadata.get("request_timeout_seconds")
+        try:
+            timeout = float(value)
+        except (TypeError, ValueError):
+            return None
+        if timeout <= 0:
+            return None
+        return timeout
 
     @staticmethod
     def _resolve_api_key(provider: ModelProviderConfig) -> str:

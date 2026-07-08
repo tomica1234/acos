@@ -1176,6 +1176,8 @@ def test_run_supervised_can_start_from_direct_request(
             "Direct Supervised",
             "--jobs-dir",
             str(tmp_path / "jobs"),
+            "--max-runtime-seconds",
+            "45",
         ]
     )
 
@@ -1199,6 +1201,7 @@ def test_run_supervised_can_start_from_direct_request(
         "require_stage_test_patches": True,
         "stage_review": True,
         "test_timeout_seconds": 1200,
+        "model_timeout_seconds": 45.0,
     }
     assert captured["store"] is not None
     payload = json.loads(capsys.readouterr().out)
@@ -4340,6 +4343,7 @@ def test_supervise_job_stops_after_runtime_limit(
         def resume_job(self, job_id: str) -> JobRecord:
             captured["resume_count"] += 1
             resumed = captured["store"].get(job_id)
+            assert resumed.spec.metadata["constraints"]["model_timeout_seconds"] == 1.0
             limit = resumed.spec.metadata["constraints"]["max_autonomous_stages"]
             resumed.status = JobStatus.BLOCKED
             resumed.last_error = "autonomous_stage_limit_reached"

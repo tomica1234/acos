@@ -623,6 +623,7 @@ def apply_constraint_overrides(
     require_prd_quality: bool = False,
     stage_review: bool = False,
     test_timeout_seconds: int | None = None,
+    model_timeout_seconds: float | None = None,
 ) -> None:
     if (
         max_autonomous_stages is None
@@ -630,6 +631,7 @@ def apply_constraint_overrides(
         and not require_prd_quality
         and not stage_review
         and test_timeout_seconds is None
+        and model_timeout_seconds is None
     ):
         return
     spec = getattr(spec_or_record, "spec", spec_or_record)
@@ -655,6 +657,8 @@ def apply_constraint_overrides(
         constraints["stage_review"] = True
     if test_timeout_seconds is not None:
         constraints["test_timeout_seconds"] = test_timeout_seconds
+    if model_timeout_seconds is not None and model_timeout_seconds > 0:
+        constraints["model_timeout_seconds"] = float(model_timeout_seconds)
 
 
 def apply_recovery_overrides(record: JobRecord, summary: dict[str, object]) -> dict[str, object] | None:
@@ -903,6 +907,7 @@ def apply_resume_overrides(
     require_prd_quality: bool = False,
     stage_review: bool = False,
     test_timeout_seconds: int | None = None,
+    model_timeout_seconds: float | None = None,
 ) -> None:
     if max_autonomous_stages is None and bump_stage_limit:
         max_autonomous_stages = suggested_next_stage_limit(record)
@@ -913,6 +918,7 @@ def apply_resume_overrides(
         require_prd_quality=require_prd_quality,
         stage_review=stage_review,
         test_timeout_seconds=test_timeout_seconds,
+        model_timeout_seconds=model_timeout_seconds,
     )
     if max_autonomous_stages is None:
         return
@@ -944,6 +950,7 @@ def continue_persisted_job(
     require_prd_quality: bool = False,
     stage_review: bool = False,
     test_timeout_seconds: int | None = None,
+    model_timeout_seconds: float | None = None,
     allow_repeated_failure_recovery: bool = False,
     autonomous_recovery: bool = False,
 ) -> tuple[JobRecord, int, dict[str, object] | None, list[dict[str, Any]]]:
@@ -1007,7 +1014,10 @@ def continue_persisted_job(
             require_prd_quality=require_prd_quality,
             stage_review=stage_review,
             test_timeout_seconds=test_timeout_seconds,
+            model_timeout_seconds=model_timeout_seconds,
         )
+        if model_timeout_seconds is not None and model_timeout_seconds > 0:
+            event["model_timeout_seconds"] = float(model_timeout_seconds)
         event["max_autonomous_stages"] = (
             record.spec.metadata.get("constraints", {}).get("max_autonomous_stages")
             if isinstance(record.spec.metadata.get("constraints"), dict)
@@ -1248,6 +1258,12 @@ def supervise_persisted_job(
     latest_pm_decision: dict[str, Any] | None = None
     effective_max_cycles = 1_000_000 if autonomous_until_done else max_cycles
     for cycle_index in range(effective_max_cycles):
+        model_timeout_seconds = None
+        if max_runtime_seconds is not None:
+            model_timeout_seconds = max(max_runtime_seconds - elapsed_seconds, 0.0)
+            if model_timeout_seconds <= 0:
+                stopped_for_runtime = True
+                break
         provider_preflight = maybe_probe_provider(
             config_dir=config_dir,
             provider_name=preflight_provider,
@@ -1275,6 +1291,7 @@ def supervise_persisted_job(
             require_prd_quality=require_prd_quality,
             stage_review=stage_review,
             test_timeout_seconds=test_timeout_seconds,
+            model_timeout_seconds=model_timeout_seconds,
             allow_repeated_failure_recovery=(
                 allow_repeated_failure_recovery
                 or pm_stall_recovery
@@ -2770,6 +2787,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             require_prd_quality=args.require_prd_quality,
             stage_review=args.stage_review,
             test_timeout_seconds=args.test_timeout_seconds,
+            model_timeout_seconds=args.max_runtime_seconds,
         )
         store = FileJobStore(args.jobs_dir)
         runner, _ = build_default_runner(

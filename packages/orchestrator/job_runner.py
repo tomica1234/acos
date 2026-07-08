@@ -596,7 +596,16 @@ class JobRunner:
             )
         )
         selected_model = self.registry.get_model(preselection.model_key)
+        model_timeout_seconds = self._constraint_float(
+            record,
+            "model_timeout_seconds",
+            0.0,
+        )
         record.runtime_state["active_model"] = preselection.model_key
+        if model_timeout_seconds > 0:
+            record.runtime_state["active_model_timeout_seconds"] = model_timeout_seconds
+        else:
+            record.runtime_state.pop("active_model_timeout_seconds", None)
         self.store.update(record)
         effective_logs = [
             *self._recovery_guidance_logs(record, role),
@@ -642,11 +651,20 @@ class JobRunner:
             require_json_schema=agent_cfg.require_json_schema,
             max_steps=self.max_steps_per_agent,
             audit_events=record.audit_events,
+            request_timeout_seconds=(
+                model_timeout_seconds if model_timeout_seconds > 0 else None
+            ),
         )
         output = self._result_with_rewritten_missing_target_patches(record, role, output)
         record.outputs[role] = output.model_dump()
         record.outputs[f"{role}_model_selection"] = selection.model_dump()
-        for key in ("active_role", "active_objective", "active_task_id", "active_model"):
+        for key in (
+            "active_role",
+            "active_objective",
+            "active_task_id",
+            "active_model",
+            "active_model_timeout_seconds",
+        ):
             record.runtime_state.pop(key, None)
         self.store.update(record)
         return output
@@ -4777,6 +4795,13 @@ class JobRunner:
         value = self._constraints(record).get(key, default)
         try:
             return int(value)
+        except (TypeError, ValueError):
+            return default
+
+    def _constraint_float(self, record: JobRecord, key: str, default: float) -> float:
+        value = self._constraints(record).get(key, default)
+        try:
+            return float(value)
         except (TypeError, ValueError):
             return default
 

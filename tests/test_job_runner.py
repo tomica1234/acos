@@ -90,6 +90,7 @@ def test_run_structured_role_persists_active_status_before_model_call(
             request_text="Build a feature.",
             repo_path=str(workspace),
             target_branch="acos/active-role-status",
+            metadata={"constraints": {"model_timeout_seconds": 7.5}},
         )
     )
 
@@ -99,6 +100,8 @@ def test_run_structured_role_persists_active_status_before_model_call(
         assert persisted.runtime_state["active_role"] == "pm"
         assert persisted.runtime_state["active_objective"] == "Produce requirements"
         assert isinstance(persisted.runtime_state["active_model"], str)
+        assert persisted.runtime_state["active_model_timeout_seconds"] == 7.5
+        assert kwargs["request_timeout_seconds"] == 7.5
         selection = runner.model_router.select_model("pm")
         return (
             PRD(title="Feature", problem_statement="Need feature"),
@@ -130,6 +133,7 @@ def test_run_structured_role_persists_active_status_before_model_call(
     assert persisted.status == JobStatus.ANALYZING
     assert "active_role" not in persisted.runtime_state
     assert "active_model" not in persisted.runtime_state
+    assert "active_model_timeout_seconds" not in persisted.runtime_state
 
 
 def test_job_runner_review_request_changes_then_fix(tmp_path: Path) -> None:
