@@ -35,15 +35,18 @@ def summarize_job_progress(record: JobRecord) -> dict[str, Any]:
     )
     execution_limits = _execution_limits(record)
     completion_integrity = _completion_integrity(record)
+    active_recovery_context = _has_active_recovery_context(record)
     failure_analysis = _failure_analysis(record, failed_stage, recovery_history)
-    failure_diagnosis = None if done else _failure_diagnosis(record)
+    failure_diagnosis = (
+        _failure_diagnosis(record) if active_recovery_context else None
+    )
     model_metrics = _model_metrics(record)
     active_model_call = _active_model_call(record)
-    recovery_plan = None if done else record.runtime_state.get("recovery_plan")
-    if not isinstance(recovery_plan, dict):
-        recovery_plan = None
+    recovery_plan = _active_recovery_plan(record)
     current_recovery_event = (
-        None if done else record.runtime_state.get("current_recovery_event")
+        record.runtime_state.get("current_recovery_event")
+        if active_recovery_context
+        else None
     )
     if not isinstance(current_recovery_event, dict):
         current_recovery_event = None
@@ -316,7 +319,7 @@ def _failure_diagnosis(record: JobRecord) -> dict[str, Any] | None:
 
 
 def _last_recoverable_error(record: JobRecord) -> str | None:
-    if _is_done(record):
+    if not _has_active_recovery_context(record):
         return None
     value = record.runtime_state.get("last_recoverable_error")
     if isinstance(value, str) and value:
@@ -341,6 +344,27 @@ def _effective_failure_error(record: JobRecord) -> str | None:
 
 def _is_done(record: JobRecord) -> bool:
     return record.status.value == "done"
+
+
+def _active_recovery_plan(record: JobRecord) -> dict[str, Any] | None:
+    if _is_done(record):
+        return None
+    plan = record.runtime_state.get("recovery_plan")
+    if not isinstance(plan, dict):
+        return None
+    if plan.get("status") == "completed" and plan.get("consumed_by_runner") is True:
+        return None
+    return plan
+
+
+def _has_active_recovery_context(record: JobRecord) -> bool:
+    if _is_done(record):
+        return False
+    if isinstance(record.last_error, str) and record.last_error:
+        return True
+    if _active_recovery_plan(record) is not None:
+        return True
+    return record.status.value in {"blocked", "failed", "stuck"}
 
 
 def _planned_tasks(record: JobRecord) -> list[dict[str, Any]]:
@@ -547,7 +571,7 @@ def _resume_recommendation(
             "suggested_cli_args": [],
             "suggested_continue_cli_args": [],
         }
-    recovery_plan = record.runtime_state.get("recovery_plan")
+    recovery_plan = _active_recovery_plan(record)
     if isinstance(recovery_plan, dict) and not recovery_plan.get("hard_stop"):
         return {
             "action": str(recovery_plan.get("strategy") or "run_recovery_plan").lower(),

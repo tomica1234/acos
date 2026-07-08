@@ -294,6 +294,7 @@ class JobRunner:
                 "ready_for_implementation": True,
             }
             record.last_error = None
+            self._clear_active_recovery_state(record)
             return self.store.update(record)
         except QualityGateError as exc:
             self._recover_record(

@@ -1547,6 +1547,12 @@ def test_job_runner_plan_job_stops_after_validated_task_graph(tmp_path: Path) ->
             "constraints": {
                 "require_prd_quality": True,
                 "require_task_acceptance_criteria": True,
+                "recovery_mode": "task_graph_replanning",
+                "recovery_strategy": "REPLAN_TASK",
+                "recovery_next_actor": "planner",
+                "recovery_next_status": "planning",
+                "patch_operation_hint": "create",
+                "missing_target_file": "frontend/test/project_scaffold.test.tsx",
             }
         },
     )
@@ -1564,6 +1570,10 @@ def test_job_runner_plan_job_stops_after_validated_task_graph(tmp_path: Path) ->
         "Create double helper",
     ]
     assert record.outputs["task_graph_validation"]["valid"] is True
+    assert record.spec.metadata["constraints"] == {
+        "require_prd_quality": True,
+        "require_task_acceptance_criteria": True,
+    }
     assert "implementation" not in record.outputs
     assert "implementation_tasks" not in record.outputs
     assert not (workspace / "feature.py").exists()

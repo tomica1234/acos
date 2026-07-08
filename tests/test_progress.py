@@ -447,6 +447,66 @@ def test_summarize_job_progress_reports_planning_summary_for_plan_only_job(
     assert payload["next_task"]["id"] == "core"
 
 
+def test_consumed_recovery_plan_is_not_reported_as_active_progress(
+    tmp_path,
+) -> None:
+    task_graph = TaskGraph(
+        goal="Build after recovery",
+        tasks=[
+            PlannedTask(
+                id="core",
+                title="Core",
+                description="Build core",
+                role="implementer",
+                acceptance_criteria=["core works"],
+            )
+        ],
+    )
+    spec = JobSpec(
+        job_id="consumed-recovery-plan",
+        request_text="Build it carefully",
+        repo_path=str(tmp_path),
+    )
+    record = JobRecord(job_id=spec.job_id, spec=spec, status=JobStatus.PLANNING)
+    record.outputs["planning_only"] = {
+        "complete": True,
+        "ready_for_implementation": True,
+    }
+    record.outputs["task_graph"] = task_graph.model_dump()
+    record.outputs["prd_quality"] = {"passed": True, "missing": [], "warnings": []}
+    record.outputs["task_graph_validation"] = {"valid": True, "errors": []}
+    record.outputs["failure_diagnosis"] = {
+        "classification": "invalid_task_graph",
+        "root_cause": "A previous task graph was invalid.",
+    }
+    record.outputs["last_recoverable_error"] = "invalid_task_graph"
+    record.runtime_state["last_recoverable_error"] = "invalid_task_graph"
+    record.runtime_state["current_recovery_event"] = {
+        "error": "invalid_task_graph",
+        "reason": "invalid_task_graph",
+    }
+    record.runtime_state["recovery_plan"] = {
+        "status": "completed",
+        "consumed_by_runner": True,
+        "strategy": "REPLAN_TASK",
+        "reason": "invalid_task_graph",
+        "next_status": "planning",
+    }
+
+    payload = summarize_job_progress(record)
+
+    assert payload["recovery_plan"] is None
+    assert payload["current_recovery_event"] is None
+    assert payload["last_recoverable_error"] is None
+    assert "failure_diagnosis" not in payload
+    assert payload["failure_analysis"]["classification"] is None
+    assert payload["failure_analysis"]["last_error"] is None
+    assert payload["failure_analysis"]["auto_continue_blocked"] is False
+    assert payload["resume"]["action"] == "continue_next_task"
+    assert payload["resume"]["reason"] is None
+    assert payload["next_task"]["id"] == "core"
+
+
 def test_summarize_job_progress_recommends_strategy_change_after_repeated_planning_failures(
     tmp_path,
 ) -> None:
