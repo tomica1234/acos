@@ -1012,6 +1012,52 @@ def test_zero_patch_implementation_stage_is_failed_for_recovery_even_if_tests_pa
     }
 
 
+def test_stage_checkpoint_rejects_missing_target_file_without_required_artifact(
+    tmp_path: Path,
+) -> None:
+    runner, _environment, record = _runner(tmp_path)
+    implementation = ImplementationResult(
+        status=ImplementationStatus.IMPLEMENTED,
+        summary="Created a different feature module.",
+        changed_files=["feature.py"],
+        patches=[
+            FilePatch(
+                path="feature.py",
+                operation="create",
+                content="VALUE = 1\n",
+            )
+        ],
+    )
+    stage_result = {
+        "stage": 1,
+        "task": PlannedTask(
+            id="core",
+            title="Core",
+            description="Build core",
+            role="implementer",
+            target_files=["src/app.py"],
+            required_artifacts=[],
+        ).model_dump(),
+        "implementation": implementation.model_dump(),
+        "test_writer_results": [],
+        "change_summary": runner._build_stage_change_summary(implementation, []),
+        "test_run": TestRunResult(success=True).model_dump(),
+    }
+
+    runner._record_stage_checkpoint(record, stage_result)
+
+    assert stage_result["status"] == "failed_for_recovery"
+    assert stage_result["failure_reason"] == "required_artifacts_missing"
+    assert stage_result["missing_artifacts"] == ["src/app.py"]
+    plan = record.runtime_state["recovery_plan"]
+    assert plan["trigger"] == "required_artifacts_missing"
+    assert plan["strategy"] == "REPLAN_TASK_WITH_REQUIRED_ARTIFACTS"
+    assert plan["constraints"]["target_files"] == ["src/app.py"]
+    assert plan["constraints"]["missing_artifacts"] == ["src/app.py"]
+    assert "required_artifacts" not in plan["constraints"]
+    assert record.status == JobStatus.REPLANNING
+
+
 def test_stage_checkpoint_rejects_invalid_required_artifact_paths(
     tmp_path: Path,
 ) -> None:

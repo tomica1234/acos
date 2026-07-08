@@ -5783,11 +5783,14 @@ class JobRunner:
     ) -> list[str]:
         if not isinstance(task, dict):
             return []
-        artifacts = [
-            str(item)
-            for item in task.get("required_artifacts", [])
-            if str(item).strip()
-        ]
+        artifacts = self._unique_paths(
+            [
+                str(item)
+                for key in ("required_artifacts", "target_files")
+                for item in task.get(key, [])
+                if str(item).strip()
+            ]
+        )
         if not artifacts:
             return []
         root = self._workspace_root(record)
