@@ -581,91 +581,102 @@ class JobRunner:
         else:
             record.runtime_state.pop("active_task_id", None)
         self.store.update(record)
-        agent_cfg = self.registry.get_agent(role)
-        relevant_files = self._gather_relevant_files(role, record=record, task=task)
-        diff = (
-            self._call_tool(role, "git_server.diff").get("diff", "")
-            if self.policy.is_tool_allowed(role, "git_server.diff")
-            else ""
-        )
-        memory_summaries = self._read_memory(role)
-        preselection = self.model_router.select_model(
-            RoutingContext(
+        try:
+            agent_cfg = self.registry.get_agent(role)
+            relevant_files = self._gather_relevant_files(role, record=record, task=task)
+            diff = (
+                self._call_tool(role, "git_server.diff").get("diff", "")
+                if self.policy.is_tool_allowed(role, "git_server.diff")
+                else ""
+            )
+            memory_summaries = self._read_memory(role)
+            preselection = self.model_router.select_model(
+                RoutingContext(
+                    role=role,
+                    failure_count=record.failure_count,
+                    same_test_failure_count=record.same_test_failure_count,
+                    changed_files_count=len(relevant_files),
+                    security_sensitive=security_sensitive,
+                    context_tokens=0,
+                )
+            )
+            selected_model = self.registry.get_model(preselection.model_key)
+            model_timeout_seconds = self._constraint_float(
+                record,
+                "model_timeout_seconds",
+                0.0,
+            )
+            model_timeout_seconds = self._effective_model_timeout_seconds(
+                record,
+                model_timeout_seconds,
+            )
+            record.runtime_state["active_model"] = preselection.model_key
+            if model_timeout_seconds > 0:
+                record.runtime_state["active_model_timeout_seconds"] = model_timeout_seconds
+            else:
+                record.runtime_state.pop("active_model_timeout_seconds", None)
+            self.store.update(record)
+            effective_logs = [
+                *self._recovery_guidance_logs(record, role),
+                *self._pm_stall_guidance_logs(record, role),
+                *self._planning_repair_guidance_logs(record, role),
+                *self._recovery_history_logs(record, role),
+                *(logs or []),
+            ]
+            packet = self.context_builder.build(
+                job_id=record.job_id,
+                role=role,
+                objective=objective,
+                repo_path=record.spec.repo_path,
+                request_text=record.spec.request_text,
+                constraints=self._context_constraints(record),
+                relevant_files=relevant_files,
+                diff=diff,
+                memory_summaries=memory_summaries,
+                logs=effective_logs,
+                token_budget=agent_cfg.context_budget_tokens,
+                agent_config=agent_cfg,
+                selected_model=selected_model,
+                task=task,
+                metadata={
+                    "output_schema": agent_cfg.output_schema,
+                    "retrieval_trace": record.runtime_state.get("retrieval_trace", []),
+                },
+            )
+            routing_context = RoutingContext(
                 role=role,
                 failure_count=record.failure_count,
                 same_test_failure_count=record.same_test_failure_count,
                 changed_files_count=len(relevant_files),
                 security_sensitive=security_sensitive,
-                context_tokens=0,
+                context_tokens=estimate_tokens(packet.render_text()),
             )
-        )
-        selected_model = self.registry.get_model(preselection.model_key)
-        model_timeout_seconds = self._constraint_float(
-            record,
-            "model_timeout_seconds",
-            0.0,
-        )
-        model_timeout_seconds = self._effective_model_timeout_seconds(
-            record,
-            model_timeout_seconds,
-        )
-        record.runtime_state["active_model"] = preselection.model_key
-        if model_timeout_seconds > 0:
-            record.runtime_state["active_model_timeout_seconds"] = model_timeout_seconds
-        else:
-            record.runtime_state.pop("active_model_timeout_seconds", None)
-        self.store.update(record)
-        effective_logs = [
-            *self._recovery_guidance_logs(record, role),
-            *self._pm_stall_guidance_logs(record, role),
-            *self._planning_repair_guidance_logs(record, role),
-            *self._recovery_history_logs(record, role),
-            *(logs or []),
-        ]
-        packet = self.context_builder.build(
-            job_id=record.job_id,
-            role=role,
-            objective=objective,
-            repo_path=record.spec.repo_path,
-            request_text=record.spec.request_text,
-            constraints=self._context_constraints(record),
-            relevant_files=relevant_files,
-            diff=diff,
-            memory_summaries=memory_summaries,
-            logs=effective_logs,
-            token_budget=agent_cfg.context_budget_tokens,
-            agent_config=agent_cfg,
-            selected_model=selected_model,
-            task=task,
-            metadata={
-                "output_schema": agent_cfg.output_schema,
-                "retrieval_trace": record.runtime_state.get("retrieval_trace", []),
-            },
-        )
-        routing_context = RoutingContext(
-            role=role,
-            failure_count=record.failure_count,
-            same_test_failure_count=record.same_test_failure_count,
-            changed_files_count=len(relevant_files),
-            security_sensitive=security_sensitive,
-            context_tokens=estimate_tokens(packet.render_text()),
-        )
-        output, selection, model_record = self.agent_runner.run(
-            role=role,
-            response_model=response_model,
-            context_packet=packet,
-            routing_context=routing_context,
-            allowed_tools=self._allowed_tools_for_role(role),
-            require_json_schema=agent_cfg.require_json_schema,
-            max_steps=self.max_steps_per_agent,
-            audit_events=record.audit_events,
-            request_timeout_seconds=(
-                model_timeout_seconds if model_timeout_seconds > 0 else None
-            ),
-        )
+            output, selection, model_record = self.agent_runner.run(
+                role=role,
+                response_model=response_model,
+                context_packet=packet,
+                routing_context=routing_context,
+                allowed_tools=self._allowed_tools_for_role(role),
+                require_json_schema=agent_cfg.require_json_schema,
+                max_steps=self.max_steps_per_agent,
+                audit_events=record.audit_events,
+                request_timeout_seconds=(
+                    model_timeout_seconds if model_timeout_seconds > 0 else None
+                ),
+            )
+        except Exception:
+            self._clear_active_role_state(record)
+            self.store.update(record)
+            raise
         output = self._result_with_rewritten_missing_target_patches(record, role, output)
         record.outputs[role] = output.model_dump()
         record.outputs[f"{role}_model_selection"] = selection.model_dump()
+        self._clear_active_role_state(record)
+        self.store.update(record)
+        return output
+
+    @staticmethod
+    def _clear_active_role_state(record: JobRecord) -> None:
         for key in (
             "active_role",
             "active_objective",
@@ -675,8 +686,6 @@ class JobRunner:
             "active_started_at",
         ):
             record.runtime_state.pop(key, None)
-        self.store.update(record)
-        return output
 
     def _gather_relevant_files(
         self,

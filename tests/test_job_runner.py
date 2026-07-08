@@ -257,6 +257,65 @@ def test_run_structured_role_does_not_call_model_after_runtime_deadline(
             PRD,
             "Produce requirements",
         )
+    persisted = store.get(record.job_id)
+    assert "active_role" not in persisted.runtime_state
+    assert "active_model" not in persisted.runtime_state
+    assert "active_model_timeout_seconds" not in persisted.runtime_state
+    assert "active_started_at" not in persisted.runtime_state
+
+
+def test_run_structured_role_clears_active_status_after_adapter_error(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    registry = ModelRegistry.from_paths(
+        provider_path=config_dir() / "model_providers.yaml",
+        agents_path=config_dir() / "agents.yaml",
+        routing_path=config_dir() / "model_routing.yaml",
+    )
+    policy = PolicyEngine.from_path(config_dir() / "policies.yaml")
+    store = InMemoryJobStore()
+    environment = FakeMCPEnvironment(
+        workspace_root=workspace,
+        memory_db_path=workspace / ".memory.sqlite3",
+    )
+    runner = JobRunner(
+        registry=registry,
+        policy=policy,
+        router=environment.build_router(),
+        store=store,
+    )
+    record = store.create(
+        JobSpec(
+            request_text="Build a feature.",
+            repo_path=str(workspace),
+            target_branch="acos/adapter-error-active-status",
+            metadata={"constraints": {"model_timeout_seconds": 7.5}},
+        )
+    )
+
+    def fake_run(**kwargs):
+        persisted = store.get(record.job_id)
+        assert persisted.runtime_state["active_role"] == "pm"
+        assert persisted.runtime_state["active_model_timeout_seconds"] == 7.5
+        assert kwargs["request_timeout_seconds"] == 7.5
+        raise AdapterError("temporary timeout", code="timeout")
+
+    runner.agent_runner.run = fake_run
+
+    with pytest.raises(AdapterError, match="temporary timeout"):
+        runner._run_structured_role(
+            record,
+            "pm",
+            PRD,
+            "Produce requirements",
+        )
+    persisted = store.get(record.job_id)
+    assert "active_role" not in persisted.runtime_state
+    assert "active_model" not in persisted.runtime_state
+    assert "active_model_timeout_seconds" not in persisted.runtime_state
+    assert "active_started_at" not in persisted.runtime_state
 
 
 def test_job_runner_review_request_changes_then_fix(tmp_path: Path) -> None:
