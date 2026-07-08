@@ -2734,6 +2734,8 @@ class JobRunner:
                     "known dependencies, no duplicate ids, no dependency cycles, "
                     "implementation task coverage for every PRD small_part, "
                     "testable acceptance_criteria on every implementer/scaffold task, "
+                    "at least one test_writer task whenever the PRD has acceptance_tests "
+                    "or test required_artifacts, "
                     "target_files on every test_writer task, "
                     "depends_on from every test_writer task to the implementer/scaffold task it verifies, "
                     "repo source target_files on implementer/scaffold tasks, "
@@ -2853,6 +2855,9 @@ class JobRunner:
         implementation_task_ids = [
             task.id for task in task_graph.tasks if task.role in JobRunner.IMPLEMENTATION_TASK_ROLES
         ]
+        test_writer_task_ids = [
+            task.id for task in task_graph.tasks if task.role in JobRunner.TEST_TASK_ROLES
+        ]
         executable_roles = JobRunner.IMPLEMENTATION_TASK_ROLES | JobRunner.TEST_TASK_ROLES
         executable_task_ids = [
             task.id for task in task_graph.tasks if task.role in executable_roles
@@ -2880,6 +2885,9 @@ class JobRunner:
         )
         invalid_prd_required_artifacts = (
             invalid_artifact_paths(prd.required_artifacts) if prd is not None else []
+        )
+        prd_test_required_artifacts = sorted(
+            path for path in prd_required_artifacts if JobRunner._looks_like_test_path(path)
         )
         assigned_artifacts = valid_artifact_paths(
             [
@@ -2976,6 +2984,30 @@ class JobRunner:
                 for dependency in task.depends_on
             )
         ]
+        project_setup_scaffold_covers_test_artifacts = (
+            bool(prd_test_required_artifacts)
+            and all(
+                path in JobRunner.PROJECT_SETUP_REQUIRED_ARTIFACTS
+                for path in prd_test_required_artifacts
+            )
+            and any(
+                task.role == "scaffold"
+                and JobRunner._is_project_setup_task(task)
+                and set(prd_test_required_artifacts).issubset(
+                    valid_artifact_paths(task.target_files)
+                )
+                for task in task_graph.tasks
+            )
+        )
+        test_writer_required = bool(
+            acceptance_tests or test_focused_small_parts or prd_test_required_artifacts
+        )
+        missing_test_writer_tasks = (
+            require_task_artifacts
+            and test_writer_required
+            and not test_writer_task_ids
+            and not project_setup_scaffold_covers_test_artifacts
+        )
         cycle = JobRunner._find_task_graph_cycle(task_graph)
         errors: list[dict[str, Any]] = []
         if not task_graph.tasks:
@@ -3093,6 +3125,17 @@ class JobRunner:
                     "task_ids": test_writer_tasks_missing_target_files,
                 }
             )
+        if missing_test_writer_tasks:
+            errors.append(
+                {
+                    "type": "missing_test_writer_tasks",
+                    "required_by": {
+                        "acceptance_tests": bool(acceptance_tests),
+                        "test_focused_small_parts": bool(test_focused_small_parts),
+                        "prd_test_required_artifacts": prd_test_required_artifacts,
+                    },
+                }
+            )
         implementation_tasks_missing_target_files = [
             task.id
             for task in task_graph.tasks
@@ -3156,6 +3199,7 @@ class JobRunner:
             "valid": not errors,
             "task_count": len(task_graph.tasks),
             "implementation_task_count": len(implementation_task_ids),
+            "test_writer_task_count": len(test_writer_task_ids),
             "executable_task_count": len(executable_task_ids),
             "implementation_task_acceptance_criteria_count": (
                 len(implementation_task_ids) - len(tasks_missing_acceptance_criteria)
@@ -3180,6 +3224,11 @@ class JobRunner:
             "unowned_required_artifacts": unowned_required_artifacts,
             "role_mismatched_target_files": role_mismatched_target_files,
             "role_mismatched_required_artifacts": role_mismatched_required_artifacts,
+            "prd_test_required_artifacts": prd_test_required_artifacts,
+            "missing_test_writer_tasks": missing_test_writer_tasks,
+            "project_setup_scaffold_covers_test_artifacts": (
+                project_setup_scaffold_covers_test_artifacts
+            ),
             "implementation_tasks_missing_target_files": (
                 implementation_tasks_missing_target_files
             ),
