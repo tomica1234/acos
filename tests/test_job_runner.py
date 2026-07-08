@@ -1143,7 +1143,7 @@ def test_job_runner_refinement_preserves_task_artifact_contracts(
 
     assert record.status == JobStatus.DONE
     assert record.outputs["task_graph_validation"]["valid"] is True
-    assert record.outputs["task_graph_validation"]["executable_task_artifact_count"] == 2
+    assert record.outputs["task_graph_validation"]["executable_task_artifact_count"] == 4
     assert record.outputs["task_graph_refinement"]["inherited_target_files"] == [
         "feature.py"
     ]
@@ -1153,9 +1153,24 @@ def test_job_runner_refinement_preserves_task_artifact_contracts(
     assert record.outputs["task_graph_refinement"][
         "invalid_inherited_artifacts"
     ] == ["docs/", "../outside.py", "C:\\outside.py"]
-    for task in record.outputs["task_graph"]["tasks"]:
-        assert task["target_files"] == ["feature.py"]
-        assert task["required_artifacts"] == ["feature.py", "tests/test_feature.py"]
+    assert record.outputs["task_graph_refinement"]["paired_test_task_count"] == 2
+    refined_tasks = record.outputs["task_graph"]["tasks"]
+    assert [task["id"] for task in refined_tasks] == [
+        "part-01",
+        "part-01-tests",
+        "part-02",
+        "part-02-tests",
+    ]
+    for task in refined_tasks:
+        if task["role"] == "test_writer":
+            assert task["target_files"] == ["tests/test_feature.py"]
+            assert task["required_artifacts"] == ["tests/test_feature.py"]
+        else:
+            assert task["target_files"] == ["feature.py"]
+            assert task["required_artifacts"] == [
+                "feature.py",
+                "tests/test_feature.py",
+            ]
 
 
 def test_test_work_item_classifier_uses_word_tokens() -> None:
@@ -1871,7 +1886,8 @@ def test_task_graph_validation_requires_test_writer_artifacts_when_requested() -
     assert validation["implementation_task_artifact_count"] == 1
     assert validation["executable_task_artifact_count"] == 1
     assert validation["errors"] == [
-        {"type": "missing_task_artifacts", "task_ids": ["tests"]}
+        {"type": "missing_task_artifacts", "task_ids": ["tests"]},
+        {"type": "missing_test_writer_target_files", "task_ids": ["tests"]},
     ]
 
 
@@ -1993,6 +2009,167 @@ def test_task_graph_validation_rejects_invalid_prd_required_artifacts() -> None:
     assert "invalid_prd_required_artifacts" in {
         item["type"] for item in validation["errors"]
     }
+
+
+def test_task_graph_validation_requires_owner_target_files_for_prd_artifacts() -> None:
+    prd = PRD(
+        title="Feature",
+        problem_statement="Need feature",
+        smallest_working_core=["Expose VALUE"],
+        small_parts=["Create feature module"],
+        incremental_milestones=["Module exists"],
+        acceptance_tests=["VALUE equals 1"],
+        definition_of_done=["All tests pass"],
+        required_artifacts=["feature.py", "tests/test_feature.py"],
+    )
+    task_graph = TaskGraph(
+        goal="Build feature",
+        tasks=[
+            PlannedTask(
+                id="core",
+                title="Build core",
+                description="Create feature module",
+                role="implementer",
+                acceptance_criteria=["VALUE equals 1"],
+                required_artifacts=["feature.py"],
+            ),
+            PlannedTask(
+                id="tests",
+                title="Test core",
+                description="Add focused tests.",
+                role="test_writer",
+                acceptance_criteria=["VALUE is covered"],
+                required_artifacts=["tests/test_feature.py"],
+            ),
+        ],
+    )
+
+    validation = JobRunner._build_task_graph_validation(
+        task_graph,
+        prd=prd,
+        require_acceptance_criteria=True,
+        require_task_artifacts=True,
+    )
+
+    assert validation["valid"] is False
+    assert validation["assigned_required_artifact_count"] == 2
+    assert validation["unassigned_required_artifacts"] == []
+    assert validation["unowned_required_artifacts"] == [
+        {"path": "feature.py", "expected_roles": ["implementer", "scaffold"]},
+        {"path": "tests/test_feature.py", "expected_roles": ["test_writer"]},
+    ]
+    error_types = {item["type"] for item in validation["errors"]}
+    assert "unowned_required_artifacts" in error_types
+    assert "missing_test_writer_target_files" in error_types
+
+
+def test_task_graph_validation_rejects_role_mismatched_target_files() -> None:
+    prd = PRD(
+        title="Feature",
+        problem_statement="Need feature",
+        smallest_working_core=["Expose VALUE"],
+        small_parts=["Create feature module"],
+        incremental_milestones=["Module exists"],
+        acceptance_tests=["VALUE equals 1"],
+        definition_of_done=["All tests pass"],
+        required_artifacts=["feature.py", "tests/test_feature.py"],
+    )
+    task_graph = TaskGraph(
+        goal="Build feature",
+        tasks=[
+            PlannedTask(
+                id="core",
+                title="Build core",
+                description="Create feature module",
+                role="implementer",
+                acceptance_criteria=["VALUE equals 1"],
+                target_files=["tests/test_feature.py"],
+                required_artifacts=["tests/test_feature.py"],
+            ),
+            PlannedTask(
+                id="tests",
+                title="Test core",
+                description="Add focused tests.",
+                role="test_writer",
+                acceptance_criteria=["VALUE is covered"],
+                target_files=["feature.py"],
+                required_artifacts=["feature.py"],
+            ),
+        ],
+    )
+
+    validation = JobRunner._build_task_graph_validation(
+        task_graph,
+        prd=prd,
+        require_acceptance_criteria=True,
+        require_task_artifacts=True,
+    )
+
+    assert validation["valid"] is False
+    assert validation["role_mismatched_target_files"] == [
+        {
+            "task_id": "core",
+            "role": "implementer",
+            "path": "tests/test_feature.py",
+            "expected_roles": ["test_writer"],
+        },
+        {
+            "task_id": "tests",
+            "role": "test_writer",
+            "path": "feature.py",
+            "expected_roles": ["implementer", "scaffold"],
+        },
+    ]
+    error_types = {item["type"] for item in validation["errors"]}
+    assert "role_mismatched_target_files" in error_types
+    assert "unowned_required_artifacts" in error_types
+
+
+def test_task_graph_validation_allows_project_setup_test_artifact_on_scaffold() -> None:
+    prd = PRD(
+        title="Project setup",
+        problem_statement="Need runnable starter app",
+        smallest_working_core=["Create deterministic scaffold"],
+        small_parts=["Create project scaffold"],
+        incremental_milestones=["Scaffold files exist"],
+        acceptance_tests=["Project setup smoke test exists"],
+        definition_of_done=["All scaffold artifacts exist"],
+        required_artifacts=[
+            "backend/main.py",
+            "backend/tests/test_project_setup.py",
+        ],
+    )
+    task_graph = TaskGraph(
+        goal="Create scaffold",
+        tasks=[
+            PlannedTask(
+                id="project-scaffold",
+                title="Project scaffold",
+                description="Create deterministic starter files.",
+                role="scaffold",
+                acceptance_criteria=["Scaffold files exist"],
+                target_files=[
+                    "backend/main.py",
+                    "backend/tests/test_project_setup.py",
+                ],
+                required_artifacts=[
+                    "backend/main.py",
+                    "backend/tests/test_project_setup.py",
+                ],
+            )
+        ],
+    )
+
+    validation = JobRunner._build_task_graph_validation(
+        task_graph,
+        prd=prd,
+        require_acceptance_criteria=True,
+        require_task_artifacts=True,
+    )
+
+    assert validation["valid"] is True
+    assert validation["unowned_required_artifacts"] == []
+    assert validation["role_mismatched_target_files"] == []
 
 
 def test_job_runner_stops_when_implementation_reports_blocked(

@@ -1980,6 +1980,16 @@ class JobRunner:
         source_required_artifacts = self._valid_unique_artifact_paths(
             raw_source_required_artifacts
         )
+        source_implementation_artifacts = [
+            path
+            for path in source_required_artifacts
+            if not self._looks_like_test_path(path)
+        ]
+        source_implementation_targets = [
+            path
+            for path in source_target_files
+            if not self._looks_like_test_path(path)
+        ] or source_implementation_artifacts
         source_test_artifacts = [
             path for path in source_required_artifacts if self._looks_like_test_path(path)
         ]
@@ -2016,16 +2026,37 @@ class JobRunner:
                 depends_on=[previous_id] if previous_id is not None else [],
                 acceptance_criteria=criteria,
                 target_files=(
-                    source_test_artifacts if role == "test_writer" else source_target_files
+                    source_test_artifacts
+                    if role == "test_writer"
+                    else source_implementation_targets
                 ),
                 required_artifacts=(
                     source_test_artifacts
                     if role == "test_writer"
-                    else source_required_artifacts or source_target_files
+                    else source_required_artifacts or source_implementation_targets
                 ),
             )
             tasks.append(task)
             previous_id = task_id
+            if role != "test_writer" and source_test_artifacts:
+                test_task_id = f"{task_id}-tests"
+                tasks.append(
+                    PlannedTask(
+                        id=test_task_id,
+                        title=f"{task.title} tests",
+                        description=(
+                            "Write focused tests for this completed small part before "
+                            f"the next implementation task: {part}."
+                        ),
+                        role="test_writer",
+                        complexity=TaskComplexity.MEDIUM,
+                        depends_on=[task_id],
+                        acceptance_criteria=criteria,
+                        target_files=source_test_artifacts,
+                        required_artifacts=source_test_artifacts,
+                    )
+                )
+                previous_id = test_task_id
 
         refined = TaskGraph(
             goal=task_graph.goal,
@@ -2044,8 +2075,18 @@ class JobRunner:
             "refined_task_count": len(refined.tasks),
             "inherited_target_files": source_target_files,
             "inherited_required_artifacts": source_required_artifacts,
+            "inherited_implementation_artifacts": source_implementation_artifacts,
+            "inherited_implementation_targets": source_implementation_targets,
             "inherited_test_artifacts": source_test_artifacts,
             "invalid_inherited_artifacts": invalid_inherited_artifacts,
+            "paired_test_task_count": len(
+                [
+                    task
+                    for task in refined.tasks
+                    if task.role == "test_writer"
+                    and task.id.endswith("-tests")
+                ]
+            ),
         }
         self.store.update(record)
         return refined
@@ -2579,8 +2620,10 @@ class JobRunner:
                     "known dependencies, no duplicate ids, no dependency cycles, "
                     "implementation task coverage for every PRD small_part, "
                     "testable acceptance_criteria on every implementer/scaffold task, "
-                    "target_files or required_artifacts on every implementer, "
-                    "scaffold, and test_writer task, "
+                    "target_files on every test_writer task, "
+                    "repo source target_files on implementer/scaffold tasks, "
+                    "test target_files on test_writer tasks, "
+                    "and PRD required_artifacts assigned to their owning role target_files, "
                     "and only autonomous-executable task roles."
                 ),
                 logs=[
@@ -2733,6 +2776,40 @@ class JobRunner:
         unassigned_required_artifacts = sorted(
             prd_required_artifacts - assigned_artifacts
         )
+        target_artifacts_by_role: dict[str, set[str]] = {}
+        for task in executable_tasks:
+            target_artifacts_by_role.setdefault(task.role, set()).update(
+                valid_artifact_paths(task.target_files)
+            )
+        unowned_required_artifacts: list[dict[str, Any]] = []
+        for artifact in sorted(prd_required_artifacts):
+            expected_roles = JobRunner._artifact_owner_roles(artifact)
+            owned_targets = set().union(
+                *[
+                    target_artifacts_by_role.get(role, set())
+                    for role in expected_roles
+                ]
+            )
+            if artifact not in owned_targets:
+                unowned_required_artifacts.append(
+                    {
+                        "path": artifact,
+                        "expected_roles": sorted(expected_roles),
+                    }
+                )
+        role_mismatched_target_files: list[dict[str, Any]] = []
+        for task in executable_tasks:
+            for path in sorted(valid_artifact_paths(task.target_files)):
+                expected_roles = JobRunner._artifact_owner_roles(path)
+                if task.role not in expected_roles:
+                    role_mismatched_target_files.append(
+                        {
+                            "task_id": task.id,
+                            "role": task.role,
+                            "path": path,
+                            "expected_roles": sorted(expected_roles),
+                        }
+                    )
         small_part_coverage = JobRunner._semantic_task_coverage(
             implementation_small_parts,
             implementation_tasks,
@@ -2806,6 +2883,20 @@ class JobRunner:
                     "paths": unassigned_required_artifacts,
                 }
             )
+        if require_task_artifacts and unowned_required_artifacts:
+            errors.append(
+                {
+                    "type": "unowned_required_artifacts",
+                    "items": unowned_required_artifacts,
+                }
+            )
+        if require_task_artifacts and role_mismatched_target_files:
+            errors.append(
+                {
+                    "type": "role_mismatched_target_files",
+                    "items": role_mismatched_target_files,
+                }
+            )
         if duplicate_ids:
             errors.append({"type": "duplicate_task_ids", "task_ids": duplicate_ids})
         if unknown_dependencies:
@@ -2838,6 +2929,19 @@ class JobRunner:
                 {
                     "type": "missing_task_artifacts",
                     "task_ids": tasks_missing_artifacts,
+                }
+            )
+        test_writer_tasks_missing_target_files = [
+            task.id
+            for task in task_graph.tasks
+            if task.role in JobRunner.TEST_TASK_ROLES
+            and not valid_artifact_paths(task.target_files)
+        ]
+        if require_task_artifacts and test_writer_tasks_missing_target_files:
+            errors.append(
+                {
+                    "type": "missing_test_writer_target_files",
+                    "task_ids": test_writer_tasks_missing_target_files,
                 }
             )
         implementation_tasks_missing_artifacts = [
@@ -2904,6 +3008,8 @@ class JobRunner:
             ),
             "unassigned_required_artifacts": unassigned_required_artifacts,
             "invalid_prd_required_artifacts": invalid_prd_required_artifacts,
+            "unowned_required_artifacts": unowned_required_artifacts,
+            "role_mismatched_target_files": role_mismatched_target_files,
             "unsupported_task_role_count": len(unsupported_task_roles),
             "small_part_count": len(small_parts),
             "implementation_small_part_count": len(implementation_small_parts),
@@ -2915,6 +3021,14 @@ class JobRunner:
             "uncovered_acceptance_tests": uncovered_acceptance_tests,
             "errors": errors,
         }
+
+    @staticmethod
+    def _artifact_owner_roles(path: str) -> set[str]:
+        if JobRunner._looks_like_test_path(path):
+            if path in JobRunner.PROJECT_SETUP_REQUIRED_ARTIFACTS:
+                return {"scaffold", "test_writer"}
+            return set(JobRunner.TEST_TASK_ROLES)
+        return set(JobRunner.IMPLEMENTATION_TASK_ROLES)
 
     @classmethod
     def _semantic_item_coverage(

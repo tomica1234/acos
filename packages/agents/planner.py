@@ -23,6 +23,10 @@ Prefer a complete autonomous development plan over a short plan:
 - include concrete repo-relative target_files or required_artifacts on every
   executable task (implementer, scaffold, and test_writer)
 - for test_writer tasks, name the exact test file path in target_files
+- do not assign app/source target_files to test_writer tasks
+- do not assign ordinary test target_files to implementer tasks
+- every PM required_artifact must appear in the target_files of the role that
+  owns creating or updating it
 - do not use directories, vague artifact names, or empty arrays when a task is
   expected to create or update files
 - do not omit follow-up tasks merely to save tokens
