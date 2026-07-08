@@ -2748,7 +2748,7 @@ class JobRunner:
                     "depends_on from every test_writer task to the implementer/scaffold task it verifies, "
                     "repo source target_files on implementer/scaffold tasks, "
                     "test target_files on test_writer tasks, "
-                    "every task required_artifact also listed in that same task's target_files, "
+                    "matching target_files and required_artifacts on every executable task, "
                     "dependencies that are satisfiable in the autonomous executor order, "
                     "and PRD required_artifacts assigned to their owning role target_files, "
                     "and only autonomous-executable task roles."
@@ -2933,6 +2933,7 @@ class JobRunner:
         role_mismatched_target_files: list[dict[str, Any]] = []
         role_mismatched_required_artifacts: list[dict[str, Any]] = []
         required_artifacts_missing_target_files: list[dict[str, Any]] = []
+        target_files_missing_required_artifacts: list[dict[str, Any]] = []
         for task in executable_tasks:
             task_target_files = valid_artifact_paths(task.target_files)
             task_required_artifacts = valid_artifact_paths(task.required_artifacts)
@@ -2943,6 +2944,15 @@ class JobRunner:
                         "task_id": task.id,
                         "role": task.role,
                         "paths": missing_target_files,
+                    }
+                )
+            missing_required_artifacts = sorted(task_target_files - task_required_artifacts)
+            if missing_required_artifacts:
+                target_files_missing_required_artifacts.append(
+                    {
+                        "task_id": task.id,
+                        "role": task.role,
+                        "paths": missing_required_artifacts,
                     }
                 )
             for path in sorted(task_target_files):
@@ -3110,6 +3120,13 @@ class JobRunner:
                 {
                     "type": "required_artifacts_missing_target_files",
                     "items": required_artifacts_missing_target_files,
+                }
+            )
+        if require_task_artifacts and target_files_missing_required_artifacts:
+            errors.append(
+                {
+                    "type": "target_files_missing_required_artifacts",
+                    "items": target_files_missing_required_artifacts,
                 }
             )
         if duplicate_ids:
@@ -3280,6 +3297,9 @@ class JobRunner:
             "role_mismatched_required_artifacts": role_mismatched_required_artifacts,
             "required_artifacts_missing_target_files": (
                 required_artifacts_missing_target_files
+            ),
+            "target_files_missing_required_artifacts": (
+                target_files_missing_required_artifacts
             ),
             "prd_test_required_artifacts": prd_test_required_artifacts,
             "missing_test_writer_tasks": missing_test_writer_tasks,

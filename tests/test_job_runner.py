@@ -2123,6 +2123,38 @@ def test_task_graph_validation_rejects_required_artifacts_not_targeted() -> None
     } in validation["errors"]
 
 
+def test_task_graph_validation_rejects_target_files_not_required() -> None:
+    task_graph = TaskGraph(
+        goal="Build feature",
+        tasks=[
+            PlannedTask(
+                id="core",
+                title="Build core",
+                description="Create feature module.",
+                role="implementer",
+                acceptance_criteria=["VALUE equals 1"],
+                target_files=["feature.py", "unverified.py"],
+                required_artifacts=["feature.py"],
+            )
+        ],
+    )
+
+    validation = JobRunner._build_task_graph_validation(
+        task_graph,
+        require_acceptance_criteria=True,
+        require_task_artifacts=True,
+    )
+
+    assert validation["valid"] is False
+    assert validation["target_files_missing_required_artifacts"] == [
+        {"task_id": "core", "role": "implementer", "paths": ["unverified.py"]}
+    ]
+    assert {
+        "type": "target_files_missing_required_artifacts",
+        "items": validation["target_files_missing_required_artifacts"],
+    } in validation["errors"]
+
+
 def test_task_graph_validation_requires_test_writer_artifacts_when_requested() -> None:
     task_graph = TaskGraph(
         goal="Build feature",
@@ -3588,6 +3620,81 @@ def test_job_runner_blocks_test_writer_without_implementation_dependency(
     ]
     assert not (workspace / "feature.py").exists()
     assert not (workspace / "tests" / "test_feature.py").exists()
+
+
+def test_job_runner_blocks_unverified_target_file_before_implementation(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    registry = ModelRegistry.from_paths(
+        provider_path=config_dir() / "model_providers.yaml",
+        agents_path=config_dir() / "agents.yaml",
+        routing_path=config_dir() / "model_routing.yaml",
+    )
+    attach_mock_adapter(
+        registry,
+        {
+            "pm": PRD(title="Feature", problem_statement="Need feature").model_dump(),
+            "architect": ArchitecturePlan(summary="Simple architecture").model_dump(),
+            "planner": TaskGraph(
+                goal="Build feature",
+                tasks=[
+                    PlannedTask(
+                        id="core",
+                        title="Build core",
+                        description="Create feature module.",
+                        role="implementer",
+                        acceptance_criteria=["VALUE equals 1"],
+                        target_files=["feature.py", "unverified.py"],
+                        required_artifacts=["feature.py"],
+                    ),
+                ],
+            ).model_dump(),
+            "implementer": ImplementationResult(
+                status=ImplementationStatus.IMPLEMENTED,
+                summary="Should not run",
+                patches=[
+                    {
+                        "path": "feature.py",
+                        "content": "VALUE = 1\n",
+                        "operation": "create",
+                    }
+                ],
+            ).model_dump(),
+        },
+    )
+    policy = PolicyEngine.from_path(config_dir() / "policies.yaml")
+    environment = FakeMCPEnvironment(
+        workspace_root=workspace,
+        memory_db_path=workspace / ".memory.sqlite3",
+    )
+    runner = JobRunner(registry=registry, policy=policy, router=environment.build_router())
+    spec = JobSpec(
+        request_text="Create feature",
+        repo_path=str(workspace),
+        target_branch="acos/unverified-target",
+        metadata={
+            "constraints": {
+                "require_task_artifacts": True,
+                "skip_review": True,
+                "skip_release": True,
+                "task_graph_validation_refinement_attempts": 0,
+            }
+        },
+    )
+
+    record = runner.run_job(spec)
+
+    assert_recovery_plan(record, status=JobStatus.REPLANNING, strategy="REPLAN_TASK")
+    assert_recoverable_error(record, "invalid_task_graph")
+    validation = record.outputs["task_graph_validation"]
+    assert validation["valid"] is False
+    assert validation["target_files_missing_required_artifacts"] == [
+        {"task_id": "core", "role": "implementer", "paths": ["unverified.py"]}
+    ]
+    assert not (workspace / "feature.py").exists()
+    assert not (workspace / "unverified.py").exists()
 
 
 def test_job_runner_blocks_executor_unsatisfiable_dependency_order_before_implementation(
