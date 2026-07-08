@@ -6375,6 +6375,15 @@ def test_job_runner_blocks_prd_quality_when_open_questions_remain(
         record,
         "prd_quality_gate_failed:open_questions_resolved",
     )
+    constraints = record.runtime_state["recovery_plan"]["constraints"]
+    assert constraints["prd_quality_missing"] == ["open_questions_resolved"]
+    assert constraints["prd_quality_warnings"] == ["open_questions_present"]
+    assert constraints["prd_open_questions"] == [
+        "Which persistence backend should be used?"
+    ]
+    assert record.spec.metadata["constraints"]["prd_quality_missing"] == [
+        "open_questions_resolved"
+    ]
     assert record.outputs["prd_quality"]["passed"] is False
     assert record.outputs["prd_quality"]["missing"] == ["open_questions_resolved"]
     assert record.outputs["prd_quality"]["warnings"] == ["open_questions_present"]

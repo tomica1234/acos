@@ -412,6 +412,7 @@ class RecoveryGovernor:
                 constraints={"recovery_mode": "task_graph_repair"},
             )
         if trigger == "prd_quality_gate_failed":
+            context_constraints = self._prd_quality_context_constraints(runtime_state)
             return RecoveryPlan(
                 trigger=trigger,
                 strategy="REVISE_PRD_AND_ARCHITECTURE",
@@ -420,7 +421,10 @@ class RecoveryGovernor:
                 steps=["REVISE_PRD", "REVISE_ARCHITECTURE", "REPLAN_TASK"],
                 reason=last_error,
                 checkpoint_policy="invalidate_planning",
-                constraints={"recovery_mode": "prd_quality_revision"},
+                constraints={
+                    "recovery_mode": "prd_quality_revision",
+                    **context_constraints,
+                },
             )
         if trigger == "autonomous_stage_limit_reached":
             return RecoveryPlan(
@@ -616,6 +620,24 @@ class RecoveryGovernor:
             value = cls._clean_string_list(runtime_state.get(key))
             if value:
                 constraints[key] = value
+        return constraints
+
+    @classmethod
+    def _prd_quality_context_constraints(cls, runtime_state: dict[str, Any]) -> dict[str, Any]:
+        constraints: dict[str, Any] = {}
+        for key in (
+            "prd_quality_missing",
+            "prd_quality_warnings",
+            "prd_open_questions",
+            "invalid_required_artifacts",
+            "test_required_artifacts",
+        ):
+            value = cls._clean_string_list(runtime_state.get(key))
+            if value:
+                constraints[key] = value
+        uncovered = runtime_state.get("uncovered_acceptance_small_parts")
+        if isinstance(uncovered, list) and uncovered:
+            constraints["uncovered_acceptance_small_parts"] = uncovered
         return constraints
 
     @staticmethod

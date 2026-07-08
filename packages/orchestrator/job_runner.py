@@ -2029,9 +2029,58 @@ class JobRunner:
         self._recover_record(
             record,
             error="prd_quality_gate_failed:" + ",".join(report["missing"]),
+            runtime_state=self._prd_quality_recovery_state(
+                record,
+                current_prd,
+                report,
+            ),
         )
         self.store.update(record)
         return None
+
+    @staticmethod
+    def _prd_quality_recovery_state(
+        record: JobRecord,
+        prd: PRD,
+        report: dict[str, Any],
+    ) -> dict[str, Any]:
+        runtime_state = dict(record.runtime_state)
+        for key in (
+            "prd_quality_missing",
+            "prd_quality_warnings",
+            "prd_open_questions",
+            "uncovered_acceptance_small_parts",
+            "invalid_required_artifacts",
+            "test_required_artifacts",
+        ):
+            runtime_state.pop(key, None)
+        missing = JobRunner._non_empty_items(
+            [str(item) for item in report.get("missing", [])]
+        )
+        warnings = JobRunner._non_empty_items(
+            [str(item) for item in report.get("warnings", [])]
+        )
+        open_questions = JobRunner._non_empty_items(prd.open_questions)
+        invalid_required_artifacts = JobRunner._non_empty_items(
+            [str(item) for item in report.get("invalid_required_artifacts", [])]
+        )
+        test_required_artifacts = JobRunner._non_empty_items(
+            [str(item) for item in report.get("test_required_artifacts", [])]
+        )
+        uncovered = report.get("uncovered_acceptance_small_parts")
+        if missing:
+            runtime_state["prd_quality_missing"] = missing
+        if warnings:
+            runtime_state["prd_quality_warnings"] = warnings
+        if open_questions:
+            runtime_state["prd_open_questions"] = open_questions
+        if isinstance(uncovered, list) and uncovered:
+            runtime_state["uncovered_acceptance_small_parts"] = uncovered
+        if invalid_required_artifacts:
+            runtime_state["invalid_required_artifacts"] = invalid_required_artifacts
+        if test_required_artifacts:
+            runtime_state["test_required_artifacts"] = test_required_artifacts
+        return runtime_state
 
     @classmethod
     def _deterministically_repair_prd_acceptance_tests(
