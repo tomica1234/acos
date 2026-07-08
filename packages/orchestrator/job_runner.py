@@ -1366,6 +1366,22 @@ class JobRunner:
             return patch
         if artifact_path_exists(patch_path, workspace_root=self._workspace_root(record)):
             return patch
+        invalid_paths = invalid_artifact_paths([patch_path])
+        if invalid_paths:
+            self._recover_record(
+                record,
+                error=f"target_files_invalid:{patch_path}",
+                runtime_state={
+                    **record.runtime_state,
+                    "failed_patch_role": role,
+                    "failed_patch_path": patch_path,
+                    "failed_patch_operation": "update",
+                    "invalid_artifacts": invalid_paths,
+                    "required_artifacts": [patch_path],
+                    "target_files": [patch_path],
+                },
+            )
+            return None
         known_missing = self._is_known_missing_patch_target(record, patch_path)
         if known_missing and getattr(patch, "content", None) is not None:
             rewritten = patch.model_copy(
@@ -1416,14 +1432,16 @@ class JobRunner:
         rewritten_patches: list[Any] = []
         changed = False
         for patch in patches:
+            patch_path = str(getattr(patch, "path", ""))
             if (
                 getattr(patch, "operation", None) == "update"
                 and getattr(patch, "content", None) is not None
+                and not invalid_artifact_paths([patch_path])
                 and not artifact_path_exists(
-                    str(getattr(patch, "path", "")),
+                    patch_path,
                     workspace_root=self._workspace_root(record),
                 )
-                and self._is_known_missing_patch_target(record, str(getattr(patch, "path", "")))
+                and self._is_known_missing_patch_target(record, patch_path)
             ):
                 patch = patch.model_copy(
                     update={
@@ -1523,6 +1541,24 @@ class JobRunner:
             or name.startswith("test_")
             or ".test." in name
             or ".spec." in name
+        )
+
+    @staticmethod
+    def _looks_like_test_work_item(text: str) -> bool:
+        lowered = text.lower()
+        return any(
+            token in lowered
+            for token in (
+                "add test",
+                "add focused test",
+                "focused test",
+                "write test",
+                "test coverage",
+                "tests",
+                "pytest",
+                "vitest",
+                "assert",
+            )
         )
 
     def _record_missing_target_repeat(self, record: JobRecord, path: str) -> int:
@@ -1926,25 +1962,38 @@ class JobRunner:
         tasks: list[PlannedTask] = []
         previous_id: str | None = None
         acceptance_tests = [item.strip() for item in prd.acceptance_tests if item.strip()]
-        source_target_files = self._unique_paths(
-            [
+        raw_source_target_files = [
+            path
+            for task in implementation_tasks
+            for path in task.target_files
+        ]
+        raw_source_required_artifacts = [
+            *[
                 path
                 for task in implementation_tasks
-                for path in task.target_files
-            ]
+                for path in task.required_artifacts
+            ],
+            *prd.required_artifacts,
+        ]
+        source_target_files = self._valid_unique_artifact_paths(raw_source_target_files)
+        source_required_artifacts = self._valid_unique_artifact_paths(
+            raw_source_required_artifacts
         )
-        source_required_artifacts = self._unique_paths(
-            [
-                *[
-                    path
-                    for task in implementation_tasks
-                    for path in task.required_artifacts
-                ],
-                *prd.required_artifacts,
-            ]
+        source_test_artifacts = [
+            path for path in source_required_artifacts if self._looks_like_test_path(path)
+        ]
+        invalid_inherited_artifacts = self._unique_paths(
+            invalid_artifact_paths(
+                [*raw_source_target_files, *raw_source_required_artifacts]
+            )
         )
         for index, part in enumerate(small_parts, start=1):
             task_id = f"part-{index:02d}"
+            role = (
+                "test_writer"
+                if self._looks_like_test_work_item(part)
+                else "implementer"
+            )
             criteria = (
                 [acceptance_tests[index - 1]]
                 if index <= len(acceptance_tests)
@@ -1954,15 +2003,25 @@ class JobRunner:
                 id=task_id,
                 title=self._task_title_from_part(part),
                 description=(
-                    "Implement only this small part before moving on: "
-                    f"{part}. Keep the change narrow enough to test immediately."
+                    (
+                        "Write only the focused tests for this small part before moving on: "
+                        if role == "test_writer"
+                        else "Implement only this small part before moving on: "
+                    )
+                    + f"{part}. Keep the change narrow enough to test immediately."
                 ),
-                role="implementer",
+                role=role,
                 complexity=TaskComplexity.MEDIUM,
                 depends_on=[previous_id] if previous_id is not None else [],
                 acceptance_criteria=criteria,
-                target_files=source_target_files,
-                required_artifacts=source_required_artifacts or source_target_files,
+                target_files=(
+                    source_test_artifacts if role == "test_writer" else source_target_files
+                ),
+                required_artifacts=(
+                    source_test_artifacts
+                    if role == "test_writer"
+                    else source_required_artifacts or source_target_files
+                ),
             )
             tasks.append(task)
             previous_id = task_id
@@ -1984,6 +2043,8 @@ class JobRunner:
             "refined_task_count": len(refined.tasks),
             "inherited_target_files": source_target_files,
             "inherited_required_artifacts": source_required_artifacts,
+            "inherited_test_artifacts": source_test_artifacts,
+            "invalid_inherited_artifacts": invalid_inherited_artifacts,
         }
         self.store.update(record)
         return refined
@@ -2638,6 +2699,14 @@ class JobRunner:
             task.id for task in task_graph.tasks if task.role in executable_roles
         ]
         small_parts = JobRunner._non_empty_items(prd.small_parts) if prd is not None else []
+        implementation_small_parts = [
+            part for part in small_parts if not JobRunner._looks_like_test_work_item(part)
+        ]
+        test_focused_small_parts = [
+            {"small_part_index": index, "small_part": part}
+            for index, part in enumerate(small_parts, start=1)
+            if JobRunner._looks_like_test_work_item(part)
+        ]
         acceptance_tests = (
             JobRunner._non_empty_items(prd.acceptance_tests) if prd is not None else []
         )
@@ -2645,14 +2714,14 @@ class JobRunner:
             task for task in task_graph.tasks if task.role in JobRunner.IMPLEMENTATION_TASK_ROLES
         ]
         small_part_coverage = JobRunner._semantic_task_coverage(
-            small_parts,
+            implementation_small_parts,
             implementation_tasks,
             item_key="small_part",
             index_key="small_part_index",
         )
         acceptance_test_coverage = JobRunner._semantic_task_coverage(
             acceptance_tests,
-            implementation_tasks,
+            [task for task in task_graph.tasks if task.role in executable_roles],
             item_key="acceptance_test",
             index_key="acceptance_test_index",
         )
@@ -2674,11 +2743,12 @@ class JobRunner:
             errors.append({"type": "empty_task_graph"})
         elif not implementation_task_ids:
             errors.append({"type": "missing_implementation_tasks"})
-        elif small_parts and len(implementation_task_ids) < len(small_parts):
+        elif implementation_small_parts and len(implementation_task_ids) < len(implementation_small_parts):
             errors.append(
                 {
                     "type": "undercovered_small_parts",
                     "small_part_count": len(small_parts),
+                    "implementation_small_part_count": len(implementation_small_parts),
                     "implementation_task_count": len(implementation_task_ids),
                     "uncovered_small_parts": uncovered_small_parts,
                 }
@@ -2688,6 +2758,7 @@ class JobRunner:
                 {
                     "type": "semantic_small_part_mismatch",
                     "small_part_count": len(small_parts),
+                    "implementation_small_part_count": len(implementation_small_parts),
                     "implementation_task_count": len(implementation_task_ids),
                     "uncovered_small_parts": uncovered_small_parts,
                 }
@@ -2795,6 +2866,8 @@ class JobRunner:
             "invalid_task_artifacts": invalid_task_artifacts,
             "unsupported_task_role_count": len(unsupported_task_roles),
             "small_part_count": len(small_parts),
+            "implementation_small_part_count": len(implementation_small_parts),
+            "test_focused_small_parts": test_focused_small_parts,
             "small_part_coverage": small_part_coverage,
             "uncovered_small_parts": uncovered_small_parts,
             "acceptance_test_count": len(acceptance_tests),
@@ -3253,6 +3326,7 @@ class JobRunner:
                 if stage_review is not None:
                     stage_result["stage_review"] = stage_review
                     self._annotate_stage_status_for_recovery(record, stage_result)
+                    self._recover_failed_stage_if_needed(record, stage_result)
                     self.store.update(record)
                     if self._should_pause_for_recovery(record):
                         return implementation_results, test_writer_results, last_test_result, stage_results
@@ -3353,6 +3427,7 @@ class JobRunner:
             if stage_review is not None:
                 stage_result["stage_review"] = stage_review
                 self._annotate_stage_status_for_recovery(record, stage_result)
+                self._recover_failed_stage_if_needed(record, stage_result)
                 self.store.update(record)
                 if self._should_pause_for_recovery(record):
                     return implementation_results, test_writer_results, last_test_result, stage_results
@@ -4196,7 +4271,45 @@ class JobRunner:
                 "test_success": test_run.get("success") if isinstance(test_run, dict) else None,
             }
         )
+        self._recover_failed_stage_if_needed(record, stage_result)
         self.store.update(record)
+
+    def _recover_failed_stage_if_needed(
+        self,
+        record: JobRecord,
+        stage_result: dict[str, Any],
+    ) -> None:
+        if stage_result.get("status") != "failed_for_recovery":
+            return
+        if self._has_pending_recovery_plan(record) or self._is_recoverable_status(record.status):
+            return
+        task = stage_result.get("task")
+        task_id = (
+            task.get("id")
+            if isinstance(task, dict) and isinstance(task.get("id"), str)
+            else "unknown"
+        )
+        failure_reason = str(stage_result.get("failure_reason") or "stage_failed")
+        runtime_state = {
+            "failed_stage": stage_result.get("stage"),
+            "failed_task_id": task_id,
+            "stage_failure_reason": failure_reason,
+        }
+        for key in ("missing_artifacts", "invalid_artifacts"):
+            value = stage_result.get(key)
+            if isinstance(value, list):
+                runtime_state[key] = value
+        if isinstance(task, dict):
+            for key in ("required_artifacts", "target_files"):
+                value = task.get(key)
+                if isinstance(value, list):
+                    runtime_state[key] = value
+        record.outputs["failed_stage"] = stage_result.get("stage")
+        self._recover_record(
+            record,
+            error=f"{failure_reason}:stage:{task_id}",
+            runtime_state=runtime_state,
+        )
 
     def _annotate_stage_status_for_recovery(
         self,
@@ -4333,11 +4446,18 @@ class JobRunner:
                 "missing_stage_test_patches:"
                 + "|".join(str(stage["stage"]) for stage in stages_missing_test_patches)
             )
+        failed_stages = JobRunner._failed_autonomous_stages(record)
+        if require_completion_integrity and failed_stages:
+            failure_reasons.append(
+                "failed_stages:"
+                + "|".join(str(stage["stage"]) for stage in failed_stages)
+            )
         return {
             "passed": (
                 (not require_completion_integrity or not missing_task_ids)
                 and (not require_test_evidence or not missing_test_evidence)
                 and (not require_stage_test_patches or not stages_missing_test_patches)
+                and (not require_completion_integrity or not failed_stages)
                 and test_result.success
             ),
             "failure_reasons": failure_reasons,
@@ -4352,7 +4472,27 @@ class JobRunner:
             "test_success": test_result.success,
             "executed_test_count": test_result.executed_test_count,
             "stages_missing_test_patches": stages_missing_test_patches,
+            "failed_stages": failed_stages,
         }
+
+    @staticmethod
+    def _failed_autonomous_stages(record: JobRecord) -> list[dict[str, Any]]:
+        stages = record.outputs.get("autonomous_stages", [])
+        if not isinstance(stages, list):
+            return []
+        failed: list[dict[str, Any]] = []
+        for stage in stages:
+            if not isinstance(stage, dict) or stage.get("status") != "failed_for_recovery":
+                continue
+            task = stage.get("task")
+            failed.append(
+                {
+                    "stage": stage.get("stage"),
+                    "task_id": task.get("id") if isinstance(task, dict) else None,
+                    "failure_reason": stage.get("failure_reason"),
+                }
+            )
+        return failed
 
     @staticmethod
     def _stages_missing_test_patches(record: JobRecord) -> list[dict[str, Any]]:
@@ -4433,6 +4573,20 @@ class JobRunner:
             if path and path not in seen:
                 unique.append(path)
                 seen.add(path)
+        return unique
+
+    @staticmethod
+    def _valid_unique_artifact_paths(paths: list[str]) -> list[str]:
+        seen: set[str] = set()
+        unique: list[str] = []
+        for path in paths:
+            normalized_paths = valid_artifact_paths([path])
+            if not normalized_paths:
+                continue
+            normalized = next(iter(normalized_paths))
+            if normalized not in seen:
+                unique.append(normalized)
+                seen.add(normalized)
         return unique
 
     @staticmethod

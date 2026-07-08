@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from typing import Any
 from uuid import uuid4
 
+from packages.orchestrator.quality_gates import invalid_artifact_paths
 from packages.orchestrator.statuses import (
     HARD_TERMINAL_STATUSES,
     RECOVERABLE_STATUSES,
@@ -422,12 +423,33 @@ class RecoveryGovernor:
             trigger in {
                 "target_files_missing",
                 "target_file_missing",
+                "target_files_invalid",
+                "target_file_invalid",
                 "PATCH_OPERATION_MISMATCH",
             }
             or "target file" in lowered
             or "patch_operation_mismatch" in lowered
         ):
             missing_path = self._missing_patch_path(last_error, runtime_state)
+            invalid_artifacts = runtime_state.get("invalid_artifacts")
+            if not isinstance(invalid_artifacts, list):
+                invalid_artifacts = invalid_artifact_paths([missing_path]) if missing_path else []
+            if invalid_artifacts:
+                return RecoveryPlan(
+                    trigger=trigger,
+                    strategy="REPLAN_TASK_WITH_REQUIRED_ARTIFACTS",
+                    next_status=JobStatus.REPLANNING,
+                    next_actor="planner",
+                    steps=["REPLAN_TASK_WITH_REQUIRED_ARTIFACTS"],
+                    reason=last_error,
+                    checkpoint_policy="invalidate_failed_stage",
+                    constraints={
+                        "recovery_mode": "invalid_artifacts_replan",
+                        "invalid_artifacts": [
+                            str(item) for item in invalid_artifacts if str(item).strip()
+                        ],
+                    },
+                )
             failed_role = str(runtime_state.get("failed_patch_role") or "")
             if not failed_role:
                 failed_role = "test_writer" if self._looks_like_test_path(missing_path) else "implementer"

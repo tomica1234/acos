@@ -264,6 +264,29 @@ def test_update_directory_target_recovery_returns_create_hint(
     assert constraints["missing_target_file"] == "backend/tests/test_project_setup.py"
 
 
+def test_update_invalid_target_replans_without_create_hint(
+    tmp_path: Path,
+) -> None:
+    runner, _environment, record = _runner(tmp_path)
+    patch = FilePatch(
+        path="../outside.py",
+        operation="update",
+        content="VALUE = 1\n",
+    )
+
+    runner._apply_patches(record, "implementer", [patch])
+
+    plan = record.runtime_state["recovery_plan"]
+    constraints = plan["constraints"]
+    assert plan["strategy"] == "REPLAN_TASK_WITH_REQUIRED_ARTIFACTS"
+    assert plan["next_actor"] == "planner"
+    assert record.status == JobStatus.REPLANNING
+    assert constraints["recovery_mode"] == "invalid_artifacts_replan"
+    assert constraints["invalid_artifacts"] == ["../outside.py"]
+    assert "patch_operation_hint" not in constraints
+    assert not (tmp_path.parent / "outside.py").exists()
+
+
 def test_missing_frontend_test_file_create_hint_rewrites_update_to_create(
     tmp_path: Path,
 ) -> None:
@@ -521,6 +544,63 @@ def test_project_setup_scaffold_blocks_on_non_file_artifact(
     assert not (tmp_path / "backend/main.py").exists()
 
 
+def test_failed_stage_enters_recovery_without_marking_task_complete(
+    tmp_path: Path,
+) -> None:
+    test_path = "tests/test_feature.py"
+    runner, _environment, record = _runner(
+        tmp_path,
+        scenario={
+            "implementer": ImplementationResult(
+                status=ImplementationStatus.IMPLEMENTED,
+                summary="Claimed implementation without changing files.",
+                changed_files=[],
+                patches=[],
+            ).model_dump(),
+            "test_writer": TestWriterResult(
+                summary="Add smoke test.",
+                changed_files=[test_path],
+                patches=[
+                    FilePatch(
+                        path=test_path,
+                        operation="create",
+                        content="def test_smoke() -> None:\n    assert 1 == 1\n",
+                    )
+                ],
+            ).model_dump(),
+        },
+        scripted_test_results=[TestRunResult(success=True)],
+    )
+    task_graph = TaskGraph(
+        goal="Build feature",
+        tasks=[
+            PlannedTask(
+                id="core",
+                title="Core feature",
+                description="Create the feature implementation.",
+                role="implementer",
+                acceptance_criteria=["Feature implementation exists."],
+            )
+        ],
+    )
+
+    runner._active_record = record
+    try:
+        _implementation_results, _test_writer_results, _test_result, stages = (
+            runner._run_autonomous_task_loop(record, task_graph)
+        )
+    finally:
+        runner._active_record = None
+
+    assert stages[0]["status"] == "failed_for_recovery"
+    assert stages[0]["failure_reason"] == "implementation_produced_no_changes"
+    assert record.completed_task_ids == []
+    assert record.status == JobStatus.DIAGNOSING
+    assert record.runtime_state["recovery_plan"]["trigger"] == (
+        "implementation_produced_no_changes"
+    )
+
+
 def test_zero_patch_implementation_stage_is_failed_for_recovery_even_if_tests_pass(
     tmp_path: Path,
 ) -> None:
@@ -550,6 +630,11 @@ def test_zero_patch_implementation_stage_is_failed_for_recovery_even_if_tests_pa
 
     assert stage_result["status"] == "failed_for_recovery"
     assert stage_result["failure_reason"] in {
+        "implementation_produced_no_changes",
+        "required_artifacts_missing",
+    }
+    assert record.status in {JobStatus.DIAGNOSING, JobStatus.REPLANNING}
+    assert record.runtime_state["recovery_plan"]["trigger"] in {
         "implementation_produced_no_changes",
         "required_artifacts_missing",
     }

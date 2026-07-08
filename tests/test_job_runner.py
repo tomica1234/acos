@@ -1033,7 +1033,12 @@ def test_job_runner_refinement_preserves_task_artifact_contracts(
                     "add_one(2) returns 3",
                     "double(4) returns 8",
                 ],
-                required_artifacts=["feature.py", "tests/test_feature.py"],
+                required_artifacts=[
+                    "feature.py",
+                    "tests/test_feature.py",
+                    "../outside.py",
+                    "C:\\outside.py",
+                ],
             ).model_dump(),
             "architect": ArchitecturePlan(summary="Simple architecture").model_dump(),
             "planner": TaskGraph(
@@ -1045,8 +1050,12 @@ def test_job_runner_refinement_preserves_task_artifact_contracts(
                         description="Implement all helpers in one pass.",
                         role="implementer",
                         complexity="high",
-                        target_files=["feature.py"],
-                        required_artifacts=["feature.py", "tests/test_feature.py"],
+                        target_files=["feature.py", "docs/"],
+                        required_artifacts=[
+                            "feature.py",
+                            "tests/test_feature.py",
+                            "../outside.py",
+                        ],
                     )
                 ],
             ).model_dump(),
@@ -1145,6 +1154,9 @@ def test_job_runner_refinement_preserves_task_artifact_contracts(
     assert record.outputs["task_graph_refinement"][
         "inherited_required_artifacts"
     ] == ["feature.py", "tests/test_feature.py"]
+    assert record.outputs["task_graph_refinement"][
+        "invalid_inherited_artifacts"
+    ] == ["docs/", "../outside.py", "C:\\outside.py"]
     for task in record.outputs["task_graph"]["tasks"]:
         assert task["target_files"] == ["feature.py"]
         assert task["required_artifacts"] == ["feature.py", "tests/test_feature.py"]
@@ -2275,7 +2287,59 @@ def test_job_runner_records_completion_integrity_when_all_planned_tasks_finish(
         "test_success": True,
         "executed_test_count": 1,
         "stages_missing_test_patches": [],
+        "failed_stages": [],
     }
+
+
+def test_completion_integrity_fails_when_autonomous_stage_failed(
+    tmp_path: Path,
+) -> None:
+    store = InMemoryJobStore()
+    spec = JobSpec(
+        request_text="Create feature with tests",
+        repo_path=str(tmp_path),
+        target_branch="acos/completion-integrity-failed-stage",
+    )
+    record = store.create(spec)
+    record.completed_task_ids = ["core"]
+    record.outputs["autonomous_stages"] = [
+        {
+            "stage": 1,
+            "status": "failed_for_recovery",
+            "failure_reason": "implementation_produced_no_changes",
+            "task": {"id": "core", "role": "implementer"},
+        }
+    ]
+    task_graph = TaskGraph(
+        goal="Build feature",
+        tasks=[
+            PlannedTask(
+                id="core",
+                title="Core",
+                description="Build core",
+                role="implementer",
+            )
+        ],
+    )
+
+    report = JobRunner._build_completion_integrity_report(
+        record,
+        task_graph,
+        TestRunResult(success=True, executed_test_count=1),
+        require_completion_integrity=True,
+        require_test_evidence=False,
+        require_stage_test_patches=False,
+    )
+
+    assert report["passed"] is False
+    assert report["failure_reasons"] == ["failed_stages:1"]
+    assert report["failed_stages"] == [
+        {
+            "stage": 1,
+            "task_id": "core",
+            "failure_reason": "implementation_produced_no_changes",
+        }
+    ]
 
 
 def test_job_runner_blocks_completion_without_test_evidence(
