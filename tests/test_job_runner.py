@@ -1033,12 +1033,7 @@ def test_job_runner_refinement_preserves_task_artifact_contracts(
                     "add_one(2) returns 3",
                     "double(4) returns 8",
                 ],
-                required_artifacts=[
-                    "feature.py",
-                    "tests/test_feature.py",
-                    "../outside.py",
-                    "C:\\outside.py",
-                ],
+                required_artifacts=["feature.py", "tests/test_feature.py"],
             ).model_dump(),
             "architect": ArchitecturePlan(summary="Simple architecture").model_dump(),
             "planner": TaskGraph(
@@ -1055,6 +1050,7 @@ def test_job_runner_refinement_preserves_task_artifact_contracts(
                             "feature.py",
                             "tests/test_feature.py",
                             "../outside.py",
+                            "C:\\outside.py",
                         ],
                     )
                 ],
@@ -1160,6 +1156,13 @@ def test_job_runner_refinement_preserves_task_artifact_contracts(
     for task in record.outputs["task_graph"]["tasks"]:
         assert task["target_files"] == ["feature.py"]
         assert task["required_artifacts"] == ["feature.py", "tests/test_feature.py"]
+
+
+def test_test_work_item_classifier_uses_word_tokens() -> None:
+    assert JobRunner._looks_like_test_work_item("Add focused tests")
+    assert JobRunner._looks_like_test_work_item("pytest covers the helper")
+    assert not JobRunner._looks_like_test_work_item("Create contests page")
+    assert not JobRunner._looks_like_test_work_item("Create protest workflow")
 
 
 def test_job_runner_plan_job_stops_after_validated_task_graph(tmp_path: Path) -> None:
@@ -1905,6 +1908,91 @@ def test_task_graph_validation_rejects_invalid_artifact_paths() -> None:
     error_types = {item["type"] for item in validation["errors"]}
     assert "missing_task_artifacts" in error_types
     assert "invalid_task_artifacts" in error_types
+
+
+def test_task_graph_validation_requires_prd_artifacts_assigned_to_tasks() -> None:
+    prd = PRD(
+        title="Feature",
+        problem_statement="Need feature",
+        smallest_working_core=["Expose VALUE"],
+        small_parts=["Create feature module"],
+        incremental_milestones=["Module exists"],
+        acceptance_tests=["VALUE equals 1"],
+        definition_of_done=["All tests pass"],
+        required_artifacts=["feature.py", "tests/test_feature.py"],
+    )
+    task_graph = TaskGraph(
+        goal="Build feature",
+        tasks=[
+            PlannedTask(
+                id="core",
+                title="Build core",
+                description="Create feature module",
+                role="implementer",
+                acceptance_criteria=["VALUE equals 1"],
+                target_files=["feature.py"],
+                required_artifacts=["feature.py"],
+            )
+        ],
+    )
+
+    validation = JobRunner._build_task_graph_validation(
+        task_graph,
+        prd=prd,
+        require_acceptance_criteria=True,
+        require_task_artifacts=True,
+    )
+
+    assert validation["valid"] is False
+    assert validation["prd_required_artifact_count"] == 2
+    assert validation["assigned_required_artifact_count"] == 1
+    assert validation["unassigned_required_artifacts"] == ["tests/test_feature.py"]
+    assert "unassigned_required_artifacts" in {
+        item["type"] for item in validation["errors"]
+    }
+
+
+def test_task_graph_validation_rejects_invalid_prd_required_artifacts() -> None:
+    prd = PRD(
+        title="Feature",
+        problem_statement="Need feature",
+        smallest_working_core=["Expose VALUE"],
+        small_parts=["Create feature module"],
+        incremental_milestones=["Module exists"],
+        acceptance_tests=["VALUE equals 1"],
+        definition_of_done=["All tests pass"],
+        required_artifacts=["feature.py", "../outside.py", "C:\\outside.py"],
+    )
+    task_graph = TaskGraph(
+        goal="Build feature",
+        tasks=[
+            PlannedTask(
+                id="core",
+                title="Build core",
+                description="Create feature module",
+                role="implementer",
+                acceptance_criteria=["VALUE equals 1"],
+                target_files=["feature.py"],
+                required_artifacts=["feature.py"],
+            )
+        ],
+    )
+
+    validation = JobRunner._build_task_graph_validation(
+        task_graph,
+        prd=prd,
+        require_acceptance_criteria=True,
+        require_task_artifacts=True,
+    )
+
+    assert validation["valid"] is False
+    assert validation["invalid_prd_required_artifacts"] == [
+        "../outside.py",
+        "C:\\outside.py",
+    ]
+    assert "invalid_prd_required_artifacts" in {
+        item["type"] for item in validation["errors"]
+    }
 
 
 def test_job_runner_stops_when_implementation_reports_blocked(

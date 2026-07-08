@@ -344,6 +344,7 @@ class RecoveryGovernor:
         if trigger in {"required_artifacts_missing", "completion_integrity_failed"}:
             missing_artifacts = runtime_state.get("missing_artifacts")
             non_file_artifacts = runtime_state.get("non_file_artifacts")
+            context_constraints = self._recovery_context_constraints(runtime_state)
             if runtime_state.get("force_project_setup_scaffold") is True and isinstance(
                 missing_artifacts,
                 list,
@@ -371,8 +372,17 @@ class RecoveryGovernor:
                         ],
                         "non_file_artifacts": non_file_artifacts,
                         "force_project_setup_scaffold": True,
+                        **context_constraints,
                     },
                 )
+            required_artifacts = self._clean_string_list(
+                runtime_state.get("required_artifacts")
+            )
+            target_files = self._clean_string_list(runtime_state.get("target_files"))
+            missing_artifacts = self._clean_string_list(missing_artifacts)
+            invalid_artifacts = self._clean_string_list(
+                runtime_state.get("invalid_artifacts")
+            )
             return RecoveryPlan(
                 trigger=trigger,
                 strategy="REPLAN_TASK_WITH_REQUIRED_ARTIFACTS",
@@ -381,7 +391,14 @@ class RecoveryGovernor:
                 steps=["REPLAN_TASK_WITH_REQUIRED_ARTIFACTS", "RETURN_TO_IMPLEMENTER"],
                 reason=last_error,
                 checkpoint_policy="invalidate_failed_stage",
-                constraints={"recovery_mode": "required_artifacts_replan"},
+                constraints={
+                    "recovery_mode": "required_artifacts_replan",
+                    **context_constraints,
+                    **({"required_artifacts": required_artifacts} if required_artifacts else {}),
+                    **({"target_files": target_files} if target_files else {}),
+                    **({"missing_artifacts": missing_artifacts} if missing_artifacts else {}),
+                    **({"invalid_artifacts": invalid_artifacts} if invalid_artifacts else {}),
+                },
             )
         if trigger in {"invalid_task_graph", "unmet_task_dependencies"}:
             return RecoveryPlan(
@@ -571,6 +588,35 @@ class RecoveryGovernor:
         if runtime_state.get("provider_unavailable") is True:
             return self.build_plan(record, error="provider_unavailable", runtime_state={})
         return None
+
+    @staticmethod
+    def _clean_string_list(value: Any) -> list[str]:
+        if not isinstance(value, list):
+            return []
+        return [str(item) for item in value if str(item).strip()]
+
+    @classmethod
+    def _recovery_context_constraints(cls, runtime_state: dict[str, Any]) -> dict[str, Any]:
+        constraints: dict[str, Any] = {}
+        for key in (
+            "failed_stage",
+            "failed_task_id",
+            "stage_failure_reason",
+            "failed_patch_role",
+            "failed_patch_path",
+            "failed_patch_operation",
+            "missing_target_file",
+        ):
+            value = runtime_state.get(key)
+            if isinstance(value, str) and value.strip():
+                constraints[key] = value.strip()
+            elif isinstance(value, (int, float, bool)):
+                constraints[key] = value
+        for key in ("missing_artifacts", "invalid_artifacts", "non_file_artifacts"):
+            value = cls._clean_string_list(runtime_state.get(key))
+            if value:
+                constraints[key] = value
+        return constraints
 
     @staticmethod
     def _agent_max_steps_role(last_error: str) -> str | None:

@@ -125,6 +125,37 @@ def test_recovery_governor_maps_review_attempts_to_revision_paths() -> None:
     assert acceptance.runtime_state["recovery_plan"]["next_actor"] == "planner"
 
 
+def test_recovery_governor_preserves_artifact_stage_context() -> None:
+    record = _record("required_artifacts_missing:stage:core")
+
+    RecoveryGovernor().recover(
+        record,
+        error="required_artifacts_missing:stage:core",
+        runtime_state={
+            "failed_stage": 2,
+            "failed_task_id": "core",
+            "stage_failure_reason": "required_artifacts_missing",
+            "required_artifacts": ["backend/main.py"],
+            "target_files": ["backend/main.py"],
+            "missing_artifacts": ["backend/main.py"],
+            "invalid_artifacts": ["../outside.py"],
+        },
+    )
+
+    plan = record.runtime_state["recovery_plan"]
+    constraints = plan["constraints"]
+    assert plan["strategy"] == "REPLAN_TASK_WITH_REQUIRED_ARTIFACTS"
+    assert record.status == JobStatus.REPLANNING
+    assert constraints["recovery_mode"] == "required_artifacts_replan"
+    assert constraints["failed_stage"] == 2
+    assert constraints["failed_task_id"] == "core"
+    assert constraints["stage_failure_reason"] == "required_artifacts_missing"
+    assert constraints["required_artifacts"] == ["backend/main.py"]
+    assert constraints["target_files"] == ["backend/main.py"]
+    assert constraints["missing_artifacts"] == ["backend/main.py"]
+    assert constraints["invalid_artifacts"] == ["../outside.py"]
+
+
 def test_quality_gate_error_is_recoverable_unless_policy_denied(tmp_path: Path) -> None:
     runner, _environment = _runner(tmp_path)
     record = _record(status=JobStatus.TESTING)

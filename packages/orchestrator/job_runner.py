@@ -1545,20 +1545,21 @@ class JobRunner:
 
     @staticmethod
     def _looks_like_test_work_item(text: str) -> bool:
-        lowered = text.lower()
-        return any(
-            token in lowered
-            for token in (
-                "add test",
-                "add focused test",
-                "focused test",
-                "write test",
-                "test coverage",
-                "tests",
-                "pytest",
-                "vitest",
+        tokens = set(re.findall(r"[a-z0-9_]+", text.lower()))
+        return bool(
+            tokens
+            & {
                 "assert",
-            )
+                "asserts",
+                "assertion",
+                "assertions",
+                "coverage",
+                "pytest",
+                "test",
+                "tests",
+                "testing",
+                "vitest",
+            }
         )
 
     def _record_missing_target_repeat(self, record: JobRecord, path: str) -> int:
@@ -2713,6 +2714,25 @@ class JobRunner:
         implementation_tasks = [
             task for task in task_graph.tasks if task.role in JobRunner.IMPLEMENTATION_TASK_ROLES
         ]
+        executable_tasks = [
+            task for task in task_graph.tasks if task.role in executable_roles
+        ]
+        prd_required_artifacts = (
+            valid_artifact_paths(prd.required_artifacts) if prd is not None else set()
+        )
+        invalid_prd_required_artifacts = (
+            invalid_artifact_paths(prd.required_artifacts) if prd is not None else []
+        )
+        assigned_artifacts = valid_artifact_paths(
+            [
+                path
+                for task in executable_tasks
+                for path in [*task.target_files, *task.required_artifacts]
+            ]
+        )
+        unassigned_required_artifacts = sorted(
+            prd_required_artifacts - assigned_artifacts
+        )
         small_part_coverage = JobRunner._semantic_task_coverage(
             implementation_small_parts,
             implementation_tasks,
@@ -2770,6 +2790,20 @@ class JobRunner:
                     "acceptance_test_count": len(acceptance_tests),
                     "implementation_task_count": len(implementation_task_ids),
                     "uncovered_acceptance_tests": uncovered_acceptance_tests,
+                }
+            )
+        if invalid_prd_required_artifacts:
+            errors.append(
+                {
+                    "type": "invalid_prd_required_artifacts",
+                    "paths": invalid_prd_required_artifacts,
+                }
+            )
+        if unassigned_required_artifacts:
+            errors.append(
+                {
+                    "type": "unassigned_required_artifacts",
+                    "paths": unassigned_required_artifacts,
                 }
             )
         if duplicate_ids:
@@ -2864,6 +2898,12 @@ class JobRunner:
             ),
             "invalid_task_artifact_count": len(invalid_task_artifacts),
             "invalid_task_artifacts": invalid_task_artifacts,
+            "prd_required_artifact_count": len(prd_required_artifacts),
+            "assigned_required_artifact_count": len(
+                prd_required_artifacts & assigned_artifacts
+            ),
+            "unassigned_required_artifacts": unassigned_required_artifacts,
+            "invalid_prd_required_artifacts": invalid_prd_required_artifacts,
             "unsupported_task_role_count": len(unsupported_task_roles),
             "small_part_count": len(small_parts),
             "implementation_small_part_count": len(implementation_small_parts),
