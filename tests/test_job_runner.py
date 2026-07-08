@@ -7565,6 +7565,22 @@ def test_job_runner_clears_planning_repair_constraints_after_task_graph_validate
                 "role_mismatched_target_files": [
                     {"task_id": "core", "path": "tests/test_feature.py"}
                 ],
+                "test_writer_dependency_semantic_mismatches": [
+                    {"task_id": "frontend-tests", "depends_on": ["backend-api"]}
+                ],
+                "test_writer_acceptance_dependency_mismatches": [
+                    {
+                        "task_id": "frontend-tests",
+                        "depends_on": ["backend-api"],
+                        "uncovered_acceptance_criteria": [
+                            {
+                                "acceptance_criteria_index": 1,
+                                "acceptance_criteria": "Frontend UI renders VALUE",
+                                "covered": False,
+                            }
+                        ],
+                    }
+                ],
                 "recovery_mode": "task_graph_repair",
                 "recovery_strategy": "REPLAN_TASK",
                 "recovery_next_actor": "planner",
@@ -7574,6 +7590,11 @@ def test_job_runner_clears_planning_repair_constraints_after_task_graph_validate
         },
     )
     record = store.create(spec)
+    for key in JobRunner.TASK_GRAPH_VALIDATION_DETAIL_KEYS:
+        record.spec.metadata["constraints"].setdefault(
+            key,
+            [{"detail_key": key}],
+        )
     record.outputs["task_graph"] = TaskGraph(
         goal="Build feature",
         tasks=[
@@ -7602,12 +7623,16 @@ def test_job_runner_clears_planning_repair_constraints_after_task_graph_validate
         "uncovered_small_parts",
         "uncovered_acceptance_tests",
         "role_mismatched_target_files",
+        "test_writer_dependency_semantic_mismatches",
+        "test_writer_acceptance_dependency_mismatches",
         "recovery_mode",
         "recovery_strategy",
         "recovery_next_actor",
         "recovery_next_status",
         "recovery_step_count",
     ):
+        assert key not in constraints
+    for key in JobRunner.TASK_GRAPH_VALIDATION_DETAIL_KEYS:
         assert key not in constraints
 
 

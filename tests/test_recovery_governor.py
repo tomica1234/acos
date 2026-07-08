@@ -83,6 +83,75 @@ def test_recovery_governor_maps_max_attempts_to_replanning() -> None:
     ]
 
 
+def test_recovery_governor_preserves_test_writer_dependency_context() -> None:
+    record = _record("invalid_task_graph")
+    plan = RecoveryGovernor().build_plan(
+        record,
+        error="invalid_task_graph",
+        runtime_state={
+            "task_graph_validation_errors": [
+                "test_writer_dependency_semantic_mismatch",
+                "test_writer_acceptance_dependency_mismatch",
+            ],
+            "test_writer_dependency_semantic_mismatches": [
+                {
+                    "task_id": "frontend-tests",
+                    "depends_on": ["backend-api"],
+                    "required_dependency_roles": ["implementer", "scaffold"],
+                }
+            ],
+            "test_writer_acceptance_dependency_mismatches": [
+                {
+                    "task_id": "frontend-tests",
+                    "depends_on": ["backend-api"],
+                    "required_dependency_roles": ["implementer", "scaffold"],
+                    "uncovered_acceptance_criteria": [
+                        {
+                            "acceptance_criteria_index": 1,
+                            "acceptance_criteria": "Frontend UI renders VALUE",
+                            "covered": False,
+                        }
+                    ],
+                }
+            ],
+        },
+    )
+
+    assert plan.constraints["test_writer_dependency_semantic_mismatches"] == [
+        {
+            "task_id": "frontend-tests",
+            "depends_on": ["backend-api"],
+            "required_dependency_roles": ["implementer", "scaffold"],
+        }
+    ]
+    assert plan.constraints["test_writer_acceptance_dependency_mismatches"] == [
+        {
+            "task_id": "frontend-tests",
+            "depends_on": ["backend-api"],
+            "required_dependency_roles": ["implementer", "scaffold"],
+            "uncovered_acceptance_criteria": [
+                {
+                    "acceptance_criteria_index": 1,
+                    "acceptance_criteria": "Frontend UI renders VALUE",
+                    "covered": False,
+                }
+            ],
+        }
+    ]
+
+
+def test_recovery_governor_preserves_all_task_graph_validation_details() -> None:
+    runtime_state = {
+        key: [{"detail_key": key}]
+        for key in JobRunner.TASK_GRAPH_VALIDATION_DETAIL_KEYS
+    }
+
+    constraints = RecoveryGovernor._task_graph_context_constraints(runtime_state)
+
+    for key in JobRunner.TASK_GRAPH_VALIDATION_DETAIL_KEYS:
+        assert constraints[key] == [{"detail_key": key}]
+
+
 def test_recovery_governor_maps_agent_max_steps_to_strategy_change() -> None:
     record = _record(
         "Agent fixer exceeded max_steps=24 without a valid structured response; "
