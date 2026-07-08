@@ -800,6 +800,59 @@ def test_project_setup_scaffold_blocks_on_non_file_artifact(
     assert not (tmp_path / "backend/main.py").exists()
 
 
+def test_completion_integrity_passes_non_file_artifacts_to_recovery(
+    tmp_path: Path,
+) -> None:
+    runner, _environment, record = _runner(tmp_path)
+    (tmp_path / "docs").mkdir()
+    record.spec.metadata["constraints"] = {
+        "require_completion_integrity": True,
+        "require_test_evidence": True,
+    }
+    task_graph = TaskGraph(
+        goal="Build docs-backed feature",
+        tasks=[
+            PlannedTask(
+                id="core",
+                title="Build core",
+                description="Create the implementation artifact.",
+                role="implementer",
+                target_files=["docs"],
+                required_artifacts=["docs"],
+            )
+        ],
+    )
+    test_result = TestRunResult(
+        success=True,
+        command=["pytest"],
+        output_excerpt="1 passed",
+        exit_code=0,
+        executed_test_count=1,
+    )
+    record.completed_task_ids.append("core")
+    record.outputs["task_graph"] = task_graph.model_dump()
+    record.outputs["test_run"] = test_result.model_dump()
+    record.runtime_state["missing_artifacts"] = ["stale.py"]
+    record.audit_events.append({"event": "verified"})
+    record.checkpoints.append({"kind": "stage"})
+
+    passed = runner._validate_completion_integrity(record, task_graph, test_result)
+
+    assert passed is False
+    report = record.outputs["completion_integrity"]
+    assert "required_artifact_non_file:docs" in report["failure_reasons"]
+    assert "target_file_non_file:docs" in report["failure_reasons"]
+    plan = record.runtime_state["recovery_plan"]
+    constraints = plan["constraints"]
+    assert plan["trigger"] == "completion_integrity_failed"
+    assert plan["strategy"] == "REPLAN_TASK_WITH_REQUIRED_ARTIFACTS"
+    assert record.status == JobStatus.REPLANNING
+    assert constraints["required_artifacts"] == ["docs"]
+    assert constraints["target_files"] == ["docs"]
+    assert constraints["non_file_artifacts"] == ["docs"]
+    assert "missing_artifacts" not in constraints
+
+
 def test_failed_stage_enters_recovery_without_marking_task_complete(
     tmp_path: Path,
 ) -> None:

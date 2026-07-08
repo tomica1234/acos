@@ -5398,11 +5398,60 @@ class JobRunner:
         if report["passed"]:
             self.store.update(record)
             return True
+        runtime_state = self._completion_integrity_recovery_state(
+            record,
+            report["failure_reasons"],
+        )
         self._recover_record(
             record,
             error="completion_integrity_failed:" + ",".join(report["failure_reasons"]),
+            runtime_state=runtime_state,
         )
         return False
+
+    @staticmethod
+    def _completion_integrity_recovery_state(
+        record: JobRecord,
+        failure_reasons: list[str],
+    ) -> dict[str, Any]:
+        runtime_state = dict(record.runtime_state)
+        parsed: dict[str, list[str]] = {
+            "required_artifacts": [],
+            "target_files": [],
+            "missing_artifacts": [],
+            "non_file_artifacts": [],
+            "invalid_artifacts": [],
+        }
+        for key in (*parsed.keys(), "completion_integrity_failure_reasons"):
+            runtime_state.pop(key, None)
+        prefix_map = {
+            "required_artifact_missing": ("required_artifacts", "missing_artifacts"),
+            "target_file_missing": ("target_files", "missing_artifacts"),
+            "required_artifact_non_file": ("required_artifacts", "non_file_artifacts"),
+            "target_file_non_file": ("target_files", "non_file_artifacts"),
+            "required_artifact_invalid": ("required_artifacts", "invalid_artifacts"),
+            "target_file_invalid": ("target_files", "invalid_artifacts"),
+        }
+        for reason in failure_reasons:
+            if not isinstance(reason, str) or ":" not in reason:
+                continue
+            prefix, artifact = reason.split(":", 1)
+            artifact = artifact.strip()
+            if not artifact or prefix not in prefix_map:
+                continue
+            owner_key, evidence_key = prefix_map[prefix]
+            parsed[owner_key].append(artifact)
+            parsed[evidence_key].append(artifact)
+
+        for key, values in parsed.items():
+            deduped = list(dict.fromkeys(value for value in values if value.strip()))
+            if deduped:
+                runtime_state[key] = deduped
+        if any(parsed.values()):
+            runtime_state["completion_integrity_failure_reasons"] = [
+                str(reason) for reason in failure_reasons
+            ]
+        return runtime_state
 
     @staticmethod
     def _build_completion_integrity_report(
