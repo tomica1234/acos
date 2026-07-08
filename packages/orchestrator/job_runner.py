@@ -149,6 +149,7 @@ class JobRunner:
         "dependency_cycle_task_ids",
         "prd_test_required_artifacts",
         "executable_tasks_missing_required_artifacts",
+        "test_writer_tasks_missing_acceptance_criteria",
         "implementation_tasks_missing_target_files",
         "test_writer_missing_implementation_dependencies",
         "executor_order_dependency_violations",
@@ -3213,7 +3214,7 @@ class JobRunner:
                     "Return a valid graph with at least one implementer task, "
                     "known dependencies, no duplicate ids, no dependency cycles, "
                     "implementation task coverage for every PRD small_part, "
-                    "testable acceptance_criteria on every implementer/scaffold task, "
+                    "testable acceptance_criteria on every executable task, "
                     "at least one test_writer task whenever the PRD has acceptance_tests "
                     "or test required_artifacts, "
                     "target_files on every test_writer task, "
@@ -3673,6 +3674,19 @@ class JobRunner:
                     "task_ids": tasks_missing_acceptance_criteria,
                 }
             )
+        test_writer_tasks_missing_acceptance_criteria = [
+            task.id
+            for task in task_graph.tasks
+            if task.role in JobRunner.TEST_TASK_ROLES
+            and not JobRunner._non_empty_items(task.acceptance_criteria)
+        ]
+        if require_acceptance_criteria and test_writer_tasks_missing_acceptance_criteria:
+            errors.append(
+                {
+                    "type": "missing_test_writer_acceptance_criteria",
+                    "task_ids": test_writer_tasks_missing_acceptance_criteria,
+                }
+            )
         tasks_missing_artifacts = [
             task.id
             for task in task_graph.tasks
@@ -3793,6 +3807,15 @@ class JobRunner:
             "implementation_task_acceptance_criteria_count": (
                 len(implementation_task_ids) - len(tasks_missing_acceptance_criteria)
             ),
+            "test_writer_task_acceptance_criteria_count": (
+                len(test_writer_task_ids)
+                - len(test_writer_tasks_missing_acceptance_criteria)
+            ),
+            "executable_task_acceptance_criteria_count": (
+                len(executable_task_ids)
+                - len(tasks_missing_acceptance_criteria)
+                - len(test_writer_tasks_missing_acceptance_criteria)
+            ),
             "require_acceptance_criteria": require_acceptance_criteria,
             "require_executable_task_roles": require_executable_task_roles,
             "require_task_artifacts": require_task_artifacts,
@@ -3829,6 +3852,9 @@ class JobRunner:
             ),
             "executable_tasks_missing_required_artifacts": (
                 executable_tasks_missing_required_artifacts
+            ),
+            "test_writer_tasks_missing_acceptance_criteria": (
+                test_writer_tasks_missing_acceptance_criteria
             ),
             "implementation_tasks_missing_target_files": (
                 implementation_tasks_missing_target_files

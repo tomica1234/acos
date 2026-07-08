@@ -2469,6 +2469,47 @@ def test_task_graph_validation_requires_test_writer_implementation_dependency() 
     } in validation["errors"]
 
 
+def test_task_graph_validation_requires_test_writer_acceptance_criteria() -> None:
+    task_graph = TaskGraph(
+        goal="Build feature",
+        tasks=[
+            PlannedTask(
+                id="core",
+                title="Build core",
+                description="Build the smallest feature.",
+                role="implementer",
+                acceptance_criteria=["VALUE equals 1"],
+                target_files=["feature.py"],
+                required_artifacts=["feature.py"],
+            ),
+            PlannedTask(
+                id="tests",
+                title="Test core",
+                description="Add focused regression tests.",
+                role="test_writer",
+                depends_on=["core"],
+                target_files=["tests/test_feature.py"],
+                required_artifacts=["tests/test_feature.py"],
+            ),
+        ],
+    )
+
+    validation = JobRunner._build_task_graph_validation(
+        task_graph,
+        require_acceptance_criteria=True,
+        require_task_artifacts=True,
+    )
+
+    assert validation["valid"] is False
+    assert validation["test_writer_tasks_missing_acceptance_criteria"] == ["tests"]
+    assert validation["test_writer_task_acceptance_criteria_count"] == 0
+    assert validation["executable_task_acceptance_criteria_count"] == 1
+    assert {
+        "type": "missing_test_writer_acceptance_criteria",
+        "task_ids": ["tests"],
+    } in validation["errors"]
+
+
 def test_task_graph_validation_allows_test_writer_dependency_on_scaffold() -> None:
     task_graph = TaskGraph(
         goal="Build scaffold",

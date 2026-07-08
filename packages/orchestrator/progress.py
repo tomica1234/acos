@@ -1253,6 +1253,9 @@ def _autonomy_readiness(
     implementation_tasks = [
         task for task in planned_tasks if task.get("role") in implementation_roles
     ]
+    test_writer_tasks = [
+        task for task in planned_tasks if task.get("role") == "test_writer"
+    ]
     executable_tasks = [
         task for task in planned_tasks if task.get("role") in executable_roles
     ]
@@ -1264,6 +1267,17 @@ def _autonomy_readiness(
     ]
     implementation_tasks_have_acceptance_criteria = (
         None if not implementation_tasks else not missing_acceptance_task_ids
+    )
+    missing_test_writer_acceptance_task_ids = [
+        task["id"]
+        for task in test_writer_tasks
+        if isinstance(task.get("id"), str)
+        and not _non_empty_strings(task.get("acceptance_criteria"))
+    ]
+    test_writer_tasks_have_acceptance_criteria = (
+        None
+        if not test_writer_tasks
+        else not missing_test_writer_acceptance_task_ids
     )
     missing_implementation_artifact_task_ids = [
         task["id"]
@@ -1333,6 +1347,13 @@ def _autonomy_readiness(
                 "task_ids": missing_acceptance_task_ids,
             }
         )
+    if require_acceptance_criteria and missing_test_writer_acceptance_task_ids:
+        blocking_items.append(
+            {
+                "type": "missing_test_writer_acceptance_criteria",
+                "task_ids": missing_test_writer_acceptance_task_ids,
+            }
+        )
     if require_task_artifacts and missing_artifact_task_ids:
         blocking_items.append(
             {
@@ -1358,6 +1379,9 @@ def _autonomy_readiness(
             "task_graph_valid": task_graph_valid,
             "implementation_tasks_have_acceptance_criteria": (
                 implementation_tasks_have_acceptance_criteria
+            ),
+            "test_writer_tasks_have_acceptance_criteria": (
+                test_writer_tasks_have_acceptance_criteria
             ),
             "implementation_tasks_have_artifacts": implementation_tasks_have_artifacts,
             "executable_tasks_have_artifacts": executable_tasks_have_artifacts,
