@@ -523,6 +523,75 @@ class JobRunner:
         plan = record.runtime_state.get("recovery_plan")
         if isinstance(plan, dict) and plan.get("status") == "completed":
             plan["consumed_by_runner"] = True
+            if JobRunner._completed_file_recovery_resolved(record, plan):
+                JobRunner._clear_resolved_file_recovery_constraints(record)
+
+    @staticmethod
+    def _completed_file_recovery_resolved(
+        record: JobRecord,
+        plan: dict[str, Any],
+    ) -> bool:
+        plan_constraints = plan.get("constraints")
+        if not isinstance(plan_constraints, dict):
+            plan_constraints = {}
+        metadata_constraints = record.spec.metadata.get("constraints")
+        if not isinstance(metadata_constraints, dict):
+            metadata_constraints = {}
+        file_recovery_marker_keys = {
+            "missing_target_file",
+            "patch_operation_hint",
+            "failed_patch_path",
+            "failed_patch_operation",
+        }
+        if not any(
+            key in plan_constraints
+            or key in metadata_constraints
+            or key in record.runtime_state
+            for key in file_recovery_marker_keys
+        ):
+            return False
+        missing_artifacts = plan_constraints.get("missing_artifacts")
+        if isinstance(missing_artifacts, list):
+            return len(missing_artifacts) == 0
+        candidates: list[str] = []
+        for source in (
+            plan_constraints.get("missing_target_file"),
+            metadata_constraints.get("missing_target_file"),
+            record.runtime_state.get("missing_target_file"),
+            record.runtime_state.get("failed_patch_path"),
+        ):
+            if isinstance(source, str) and source.strip():
+                candidates.append(source.strip())
+        if not candidates:
+            return False
+        root = record.spec.workspace_root or record.spec.repo_path
+        return all(artifact_path_exists(path, workspace_root=root) for path in candidates)
+
+    @staticmethod
+    def _clear_resolved_file_recovery_constraints(record: JobRecord) -> None:
+        for key in (
+            "missing_target_file",
+            "patch_operation_hint",
+            "missing_artifacts",
+            "failed_patch_path",
+            "failed_patch_operation",
+        ):
+            record.runtime_state.pop(key, None)
+        constraints = record.spec.metadata.get("constraints")
+        if not isinstance(constraints, dict):
+            return
+        for key in (
+            "recovery_mode",
+            "recovery_strategy",
+            "recovery_next_actor",
+            "recovery_next_status",
+            "missing_target_file",
+            "patch_operation_hint",
+            "missing_artifacts",
+            "failed_patch_path",
+            "failed_patch_operation",
+        ):
+            constraints.pop(key, None)
 
     def _should_pause_for_recovery(self, record: JobRecord) -> bool:
         return (

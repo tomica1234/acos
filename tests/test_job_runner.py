@@ -104,6 +104,128 @@ def test_clear_active_recovery_state_removes_stale_done_markers(tmp_path: Path) 
     assert record.spec.metadata["constraints"] == {"max_autonomous_stages": 12}
 
 
+def test_consume_completed_recovery_plan_clears_resolved_file_recovery_constraints(
+    tmp_path: Path,
+) -> None:
+    target = "frontend/test/project_scaffold.test.tsx"
+    (tmp_path / target).parent.mkdir(parents=True)
+    (tmp_path / target).write_text("import { expect, it } from 'vitest'\n", encoding="utf-8")
+    spec = JobSpec(
+        job_id="consume-resolved-file-recovery",
+        request_text="Build it",
+        repo_path=str(tmp_path),
+        workspace_root=str(tmp_path),
+        metadata={
+            "constraints": {
+                "recovery_mode": "patch_operation_mismatch",
+                "recovery_strategy": "RETURN_TO_TEST_WRITER",
+                "recovery_next_actor": "test_writer",
+                "recovery_next_status": JobStatus.WRITING_TESTS.value,
+                "patch_operation_hint": "create",
+                "missing_target_file": target,
+                "missing_artifacts": [],
+                "max_autonomous_stages": 12,
+            }
+        },
+    )
+    record = JobRecord(job_id=spec.job_id, spec=spec, status=JobStatus.WRITING_TESTS)
+    record.runtime_state.update(
+        {
+            "missing_target_file": target,
+            "failed_patch_path": target,
+            "failed_patch_operation": "update",
+            "recovery_plan": {
+                "status": "completed",
+                "next_status": JobStatus.WRITING_TESTS.value,
+                "constraints": {
+                    "missing_target_file": target,
+                    "patch_operation_hint": "create",
+                    "missing_artifacts": [],
+                },
+            },
+        }
+    )
+
+    JobRunner._consume_completed_recovery_plan(record)
+
+    assert record.runtime_state["recovery_plan"]["consumed_by_runner"] is True
+    assert "missing_target_file" not in record.runtime_state
+    assert "failed_patch_path" not in record.runtime_state
+    assert record.spec.metadata["constraints"] == {"max_autonomous_stages": 12}
+
+
+def test_consume_completed_recovery_plan_keeps_unresolved_missing_file_context(
+    tmp_path: Path,
+) -> None:
+    target = "src/app.py"
+    spec = JobSpec(
+        job_id="consume-unresolved-file-recovery",
+        request_text="Build it",
+        repo_path=str(tmp_path),
+        workspace_root=str(tmp_path),
+        metadata={
+            "constraints": {
+                "recovery_strategy": "RETURN_TO_IMPLEMENTER",
+                "recovery_next_actor": "implementer",
+                "missing_target_file": target,
+                "missing_artifacts": [target],
+            }
+        },
+    )
+    record = JobRecord(job_id=spec.job_id, spec=spec, status=JobStatus.IMPLEMENTING)
+    record.runtime_state["recovery_plan"] = {
+        "status": "completed",
+        "next_status": JobStatus.IMPLEMENTING.value,
+        "constraints": {
+            "missing_target_file": target,
+            "missing_artifacts": [target],
+        },
+    }
+
+    JobRunner._consume_completed_recovery_plan(record)
+
+    assert record.runtime_state["recovery_plan"]["consumed_by_runner"] is True
+    assert record.spec.metadata["constraints"]["missing_target_file"] == target
+    assert record.spec.metadata["constraints"]["missing_artifacts"] == [target]
+
+
+def test_consume_completed_recovery_plan_keeps_non_file_recovery_context(
+    tmp_path: Path,
+) -> None:
+    spec = JobSpec(
+        job_id="consume-invalid-artifact-recovery",
+        request_text="Build it",
+        repo_path=str(tmp_path),
+        workspace_root=str(tmp_path),
+        metadata={
+            "constraints": {
+                "recovery_mode": "invalid_artifacts_replan",
+                "recovery_strategy": "REPLAN_TASK_WITH_REQUIRED_ARTIFACTS",
+                "recovery_next_actor": "planner",
+                "recovery_next_status": JobStatus.REPLANNING.value,
+                "invalid_artifacts": ["../outside.py"],
+                "missing_artifacts": [],
+            }
+        },
+    )
+    record = JobRecord(job_id=spec.job_id, spec=spec, status=JobStatus.REPLANNING)
+    record.runtime_state["recovery_plan"] = {
+        "status": "completed",
+        "next_status": JobStatus.REPLANNING.value,
+        "constraints": {
+            "invalid_artifacts": ["../outside.py"],
+            "missing_artifacts": [],
+        },
+    }
+
+    JobRunner._consume_completed_recovery_plan(record)
+
+    assert record.runtime_state["recovery_plan"]["consumed_by_runner"] is True
+    assert record.spec.metadata["constraints"]["recovery_next_actor"] == "planner"
+    assert record.spec.metadata["constraints"]["invalid_artifacts"] == ["../outside.py"]
+    assert record.spec.metadata["constraints"]["missing_artifacts"] == []
+
+
 def test_run_structured_role_persists_active_status_before_model_call(
     tmp_path: Path,
 ) -> None:
