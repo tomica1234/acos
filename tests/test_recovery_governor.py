@@ -10,6 +10,7 @@ from packages.orchestrator.recovery_governor import (
     RecoveryGovernor,
     is_hard_terminal_status,
 )
+from packages.orchestrator.task_graph_validation import TASK_GRAPH_VALIDATION_DETAIL_KEYS
 from packages.orchestrator.worker_daemon import WorkerDaemon
 from packages.schemas.agent_outputs import TestRunResult
 from packages.schemas.jobs import JobRecord, JobSpec
@@ -141,14 +142,15 @@ def test_recovery_governor_preserves_test_writer_dependency_context() -> None:
 
 
 def test_recovery_governor_preserves_all_task_graph_validation_details() -> None:
+    assert JobRunner.TASK_GRAPH_VALIDATION_DETAIL_KEYS == TASK_GRAPH_VALIDATION_DETAIL_KEYS
     runtime_state = {
         key: [{"detail_key": key}]
-        for key in JobRunner.TASK_GRAPH_VALIDATION_DETAIL_KEYS
+        for key in TASK_GRAPH_VALIDATION_DETAIL_KEYS
     }
 
     constraints = RecoveryGovernor._task_graph_context_constraints(runtime_state)
 
-    for key in JobRunner.TASK_GRAPH_VALIDATION_DETAIL_KEYS:
+    for key in TASK_GRAPH_VALIDATION_DETAIL_KEYS:
         assert constraints[key] == [{"detail_key": key}]
 
 

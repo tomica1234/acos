@@ -17,6 +17,7 @@ from packages.orchestrator.statuses import (
     is_recoverable_status,
     is_waiting_status,
 )
+from packages.orchestrator.task_graph_validation import TASK_GRAPH_VALIDATION_DETAIL_KEYS
 from packages.schemas.jobs import JobRecord
 from packages.schemas.models import JobStatus
 
@@ -658,30 +659,7 @@ class RecoveryGovernor:
         )
         if errors:
             constraints["task_graph_validation_errors"] = errors
-        for key in (
-            "uncovered_small_parts",
-            "uncovered_acceptance_tests",
-            "uncovered_test_writer_acceptance_tests",
-            "unassigned_required_artifacts",
-            "invalid_prd_required_artifacts",
-            "unowned_required_artifacts",
-            "role_mismatched_target_files",
-            "role_mismatched_required_artifacts",
-            "required_artifacts_missing_target_files",
-            "target_files_missing_required_artifacts",
-            "duplicate_task_ids",
-            "unknown_dependencies",
-            "dependency_cycle_task_ids",
-            "prd_test_required_artifacts",
-            "executable_tasks_missing_required_artifacts",
-            "test_writer_tasks_missing_acceptance_criteria",
-            "implementation_tasks_missing_target_files",
-            "test_writer_missing_implementation_dependencies",
-            "test_writer_dependency_semantic_mismatches",
-            "test_writer_acceptance_dependency_mismatches",
-            "executor_order_dependency_violations",
-            "invalid_task_artifacts",
-        ):
+        for key in TASK_GRAPH_VALIDATION_DETAIL_KEYS:
             value = cls._non_empty_list(runtime_state.get(key))
             if value:
                 constraints[key] = value
