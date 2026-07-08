@@ -301,11 +301,19 @@ def test_update_directory_target_recovery_returns_create_hint(
     plan = record.runtime_state["recovery_plan"]
     constraints = plan["constraints"]
     assert target.is_dir()
-    assert plan["strategy"] == "RETURN_TO_TEST_WRITER"
-    assert plan["next_actor"] == "test_writer"
-    assert record.status == JobStatus.WRITING_TESTS
-    assert constraints["patch_operation_hint"] == "create"
+    assert plan["strategy"] == "REPLAN_TASK_WITH_REQUIRED_ARTIFACTS"
+    assert plan["next_actor"] == "planner"
+    assert record.status == JobStatus.REPLANNING
+    assert constraints["recovery_mode"] == "non_file_artifacts_replan"
+    assert "patch_operation_hint" not in constraints
     assert constraints["missing_target_file"] == "backend/tests/test_project_setup.py"
+    assert constraints["non_file_artifacts"] == ["backend/tests/test_project_setup.py"]
+    metadata_constraints = record.spec.metadata["constraints"]
+    assert metadata_constraints["recovery_next_actor"] == "planner"
+    assert metadata_constraints["recovery_strategy"] == (
+        "REPLAN_TASK_WITH_REQUIRED_ARTIFACTS"
+    )
+    assert "patch_operation_hint" not in metadata_constraints
 
 
 def test_update_invalid_target_replans_without_create_hint(
@@ -547,6 +555,7 @@ def test_recreate_target_files_recovery_replans_invalid_artifact_paths(
 
     plan = record.runtime_state["recovery_plan"]
     assert plan["status"] == "completed"
+    assert plan["strategy"] == "REPLAN_TASK_WITH_REQUIRED_ARTIFACTS"
     assert plan["next_actor"] == "planner"
     assert plan["next_status"] == JobStatus.REPLANNING.value
     assert plan["constraints"]["invalid_artifacts"] == [
@@ -556,6 +565,10 @@ def test_recreate_target_files_recovery_replans_invalid_artifact_paths(
     assert plan["constraints"]["missing_artifacts"] == []
     assert record.runtime_state["planner_repair_requested"] is True
     assert record.status == JobStatus.REPLANNING
+    assert record.spec.metadata["constraints"]["recovery_next_actor"] == "planner"
+    assert record.spec.metadata["constraints"]["recovery_strategy"] == (
+        "REPLAN_TASK_WITH_REQUIRED_ARTIFACTS"
+    )
     assert "deterministic_creation_attempted" not in plan["constraints"]
     assert not (tmp_path.parent / "outside.py").exists()
 
@@ -590,15 +603,113 @@ def test_recreate_target_files_treats_directory_target_as_missing(
     executor = RecoveryExecutor()
 
     executor.execute_until_ready(record)
-    executor.execute_until_ready(record)
 
     plan = record.runtime_state["recovery_plan"]
     assert (tmp_path / test_path).is_dir()
-    assert plan["status"] == "running"
+    assert plan["status"] == "completed"
+    assert plan["next_actor"] == "planner"
+    assert plan["next_status"] == JobStatus.REPLANNING.value
+    assert plan["constraints"]["recovery_mode"] == "non_file_artifacts_replan"
+    assert plan["constraints"]["non_file_artifacts"] == [test_path]
     assert plan["constraints"]["missing_artifacts"] == [test_path]
-    assert plan["constraints"]["recreate_target_files_attempt"] == 2
     assert "deterministically_created_files" not in plan["constraints"]
-    assert record.status == JobStatus.WRITING_TESTS
+    assert record.runtime_state["planner_repair_requested"] is True
+    assert record.status == JobStatus.REPLANNING
+
+
+def test_recreate_target_files_returns_uncreated_implementation_file_to_owner(
+    tmp_path: Path,
+) -> None:
+    source_path = "src/app.py"
+    spec = JobSpec(
+        request_text="Build it",
+        repo_path=str(tmp_path),
+        workspace_root=str(tmp_path),
+        target_branch="acos/recovery-source-owner",
+    )
+    record = JobRecord(job_id=spec.job_id, spec=spec, status=JobStatus.RECOVERING)
+    record.runtime_state["recovery_plan"] = {
+        "id": "plan-source-owner",
+        "trigger": "target_files_missing",
+        "strategy": "RETURN_TO_IMPLEMENTER",
+        "next_status": JobStatus.IMPLEMENTING.value,
+        "next_actor": "implementer",
+        "steps": ["RETURN_TO_IMPLEMENTER", "RECREATE_TARGET_FILES"],
+        "current_step_index": 0,
+        "status": "pending",
+        "constraints": {
+            "required_artifacts": [source_path],
+            "target_files": [source_path],
+            "missing_target_file": source_path,
+        },
+    }
+    executor = RecoveryExecutor()
+
+    executor.execute_until_ready(record)
+    assert not (tmp_path / source_path).exists()
+    assert record.runtime_state["recovery_plan"]["status"] == "running"
+
+    executor.execute_until_ready(record)
+
+    plan = record.runtime_state["recovery_plan"]
+    assert not (tmp_path / source_path).exists()
+    assert plan["status"] == "completed"
+    assert plan["next_actor"] == "implementer"
+    assert plan["next_status"] == JobStatus.IMPLEMENTING.value
+    assert plan["constraints"]["deterministic_creation_attempted"] is True
+    assert plan["constraints"]["deterministically_created_files"] == []
+    assert plan["constraints"]["missing_artifacts"] == [source_path]
+    assert record.spec.metadata["constraints"]["recovery_next_actor"] == "implementer"
+    assert record.spec.metadata["constraints"]["missing_artifacts"] == [source_path]
+    assert record.status == JobStatus.IMPLEMENTING
+
+
+def test_recreate_target_files_keeps_remaining_missing_after_partial_creation(
+    tmp_path: Path,
+) -> None:
+    source_path = "src/app.py"
+    test_path = "tests/test_app.py"
+    spec = JobSpec(
+        request_text="Build it",
+        repo_path=str(tmp_path),
+        workspace_root=str(tmp_path),
+        target_branch="acos/recovery-partial-create",
+    )
+    record = JobRecord(job_id=spec.job_id, spec=spec, status=JobStatus.RECOVERING)
+    record.runtime_state["recovery_plan"] = {
+        "id": "plan-partial-create",
+        "trigger": "target_files_missing",
+        "strategy": "RETURN_TO_IMPLEMENTER",
+        "next_status": JobStatus.IMPLEMENTING.value,
+        "next_actor": "implementer",
+        "steps": ["RETURN_TO_IMPLEMENTER", "RECREATE_TARGET_FILES"],
+        "current_step_index": 0,
+        "status": "pending",
+        "constraints": {
+            "required_artifacts": [source_path, test_path],
+            "target_files": [source_path, test_path],
+        },
+    }
+    executor = RecoveryExecutor()
+
+    executor.execute_until_ready(record)
+    executor.execute_until_ready(record)
+
+    plan = record.runtime_state["recovery_plan"]
+    assert (tmp_path / test_path).exists()
+    assert not (tmp_path / source_path).exists()
+    assert plan["status"] == "completed"
+    assert plan["next_actor"] == "implementer"
+    assert plan["next_status"] == JobStatus.IMPLEMENTING.value
+    assert plan["constraints"]["deterministic_creation_attempted"] is True
+    assert plan["constraints"]["deterministically_created_files"] == [test_path]
+    assert plan["constraints"]["missing_artifacts"] == [source_path]
+    assert record.spec.metadata["constraints"]["recovery_next_actor"] == "implementer"
+    assert record.spec.metadata["constraints"]["deterministically_created_files"] == [
+        test_path
+    ]
+    assert record.spec.metadata["constraints"]["missing_artifacts"] == [source_path]
+    assert record.status == JobStatus.IMPLEMENTING
 
 
 def test_repeated_missing_test_file_is_created_deterministically_after_two_failures(

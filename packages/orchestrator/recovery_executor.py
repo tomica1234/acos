@@ -64,6 +64,7 @@ class RecoveryExecutor:
                 if not record.history or record.history[-1] != next_status:
                     record.history.append(next_status)
         record.runtime_state["recovery_plan"] = plan
+        self._sync_plan_constraints_to_metadata(record, plan)
         record.updated_at = datetime.now(timezone.utc)
         self._persist(record)
         return record
@@ -85,6 +86,9 @@ class RecoveryExecutor:
             constraints["invalid_artifacts"] = invalid
             constraints["missing_artifacts"] = []
             constraints["recovery_mode"] = "invalid_artifacts_replan"
+            constraints["return_to_role"] = "planner"
+            constraints.pop("patch_operation_hint", None)
+            plan["strategy"] = "REPLAN_TASK_WITH_REQUIRED_ARTIFACTS"
             plan["next_actor"] = "planner"
             plan["next_status"] = JobStatus.REPLANNING.value
             record.runtime_state["planner_repair_requested"] = True
@@ -94,6 +98,15 @@ class RecoveryExecutor:
             return True
         paths = [path for path in paths if path not in set(invalid)]
         root = Path(record.spec.workspace_root or record.spec.repo_path).resolve()
+        non_file_artifacts = self._non_file_artifacts(root, paths)
+        if non_file_artifacts:
+            self._route_non_file_artifacts_to_planner(
+                record,
+                plan,
+                constraints,
+                non_file_artifacts,
+            )
+            return True
         missing = [
             path for path in paths if not artifact_path_exists(path, workspace_root=root)
         ]
@@ -111,27 +124,100 @@ class RecoveryExecutor:
             constraints["recreate_target_files_attempt"] = attempts[key]
             if attempts[key] >= 2:
                 attempted = self._attempt_deterministic_creation(root, missing)
-                if attempted:
-                    constraints["deterministic_creation_attempted"] = True
-                    constraints["deterministically_created_files"] = attempted
-                    missing = [
-                        path
-                        for path in paths
-                        if not artifact_path_exists(path, workspace_root=root)
-                    ]
-                    constraints["missing_artifacts"] = missing
-                    if not missing:
-                        return True
-                    self._assign_missing_file_owner(record, plan, constraints, missing)
+                constraints["deterministic_creation_attempted"] = True
+                constraints["deterministically_created_files"] = attempted
+                non_file_artifacts = self._non_file_artifacts(root, paths)
+                if non_file_artifacts:
+                    self._route_non_file_artifacts_to_planner(
+                        record,
+                        plan,
+                        constraints,
+                        non_file_artifacts,
+                    )
                     return True
-            if attempts[key] >= 3:
-                constraints["force_project_setup_scaffold"] = True
-                metadata_constraints = record.spec.metadata.setdefault("constraints", {})
-                if not isinstance(metadata_constraints, dict):
-                    metadata_constraints = {}
-                    record.spec.metadata["constraints"] = metadata_constraints
-                metadata_constraints["force_project_setup_scaffold"] = True
+                missing = [
+                    path
+                    for path in paths
+                    if not artifact_path_exists(path, workspace_root=root)
+                ]
+                constraints["missing_artifacts"] = missing
+                if not missing:
+                    return True
+                self._assign_missing_file_owner(record, plan, constraints, missing)
+                self._force_project_setup_scaffold_when_needed(record, constraints, missing)
+                return True
         return False
+
+    @staticmethod
+    def _non_file_artifacts(root: Path, paths: list[str]) -> list[str]:
+        non_files: list[str] = []
+        for path in paths:
+            normalized = path.replace("\\", "/").removeprefix("./")
+            if invalid_artifact_paths([normalized]):
+                continue
+            target = root / normalized
+            if target.exists() and not target.is_file():
+                non_files.append(normalized)
+        return non_files
+
+    @staticmethod
+    def _route_non_file_artifacts_to_planner(
+        record: JobRecord,
+        plan: dict[str, Any],
+        constraints: dict[str, Any],
+        non_file_artifacts: list[str],
+    ) -> None:
+        constraints["non_file_artifacts"] = non_file_artifacts
+        constraints["missing_artifacts"] = non_file_artifacts
+        constraints["recovery_mode"] = "non_file_artifacts_replan"
+        constraints["return_to_role"] = "planner"
+        constraints.pop("patch_operation_hint", None)
+        plan["strategy"] = "REPLAN_TASK_WITH_REQUIRED_ARTIFACTS"
+        plan["next_actor"] = "planner"
+        plan["next_status"] = JobStatus.REPLANNING.value
+        record.runtime_state["planner_repair_requested"] = True
+        record.status = JobStatus.REPLANNING
+        if record.history[-1:] != [JobStatus.REPLANNING]:
+            record.history.append(JobStatus.REPLANNING)
+
+    @staticmethod
+    def _sync_plan_constraints_to_metadata(
+        record: JobRecord,
+        plan: dict[str, Any],
+    ) -> None:
+        constraints = record.spec.metadata.setdefault("constraints", {})
+        if not isinstance(constraints, dict):
+            constraints = {}
+            record.spec.metadata["constraints"] = constraints
+        plan_constraints = plan.get("constraints")
+        if isinstance(plan_constraints, dict):
+            for stale_key in ("patch_operation_hint",):
+                if stale_key not in plan_constraints:
+                    constraints.pop(stale_key, None)
+            constraints.update(plan_constraints)
+        for target_key, source_key in (
+            ("recovery_strategy", "strategy"),
+            ("recovery_next_actor", "next_actor"),
+            ("recovery_next_status", "next_status"),
+        ):
+            value = plan.get(source_key)
+            if isinstance(value, str) and value.strip():
+                constraints[target_key] = value.strip()
+
+    def _force_project_setup_scaffold_when_needed(
+        self,
+        record: JobRecord,
+        constraints: dict[str, Any],
+        missing: list[str],
+    ) -> None:
+        if not any(self._looks_like_project_setup_path(path) for path in missing):
+            return
+        constraints["force_project_setup_scaffold"] = True
+        metadata_constraints = record.spec.metadata.setdefault("constraints", {})
+        if not isinstance(metadata_constraints, dict):
+            metadata_constraints = {}
+            record.spec.metadata["constraints"] = metadata_constraints
+        metadata_constraints["force_project_setup_scaffold"] = True
 
     def _assign_missing_file_owner(
         self,
