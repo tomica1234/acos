@@ -2737,6 +2737,7 @@ class JobRunner:
                     "at least one test_writer task whenever the PRD has acceptance_tests "
                     "or test required_artifacts, "
                     "target_files on every test_writer task, "
+                    "required_artifacts on every executable task, "
                     "depends_on from every test_writer task to the implementer/scaffold task it verifies, "
                     "repo source target_files on implementer/scaffold tasks, "
                     "test target_files on test_writer tasks, "
@@ -3112,6 +3113,19 @@ class JobRunner:
                     "task_ids": tasks_missing_artifacts,
                 }
             )
+        executable_tasks_missing_required_artifacts = [
+            task.id
+            for task in task_graph.tasks
+            if task.role in executable_roles
+            and not valid_artifact_paths(task.required_artifacts)
+        ]
+        if require_task_artifacts and executable_tasks_missing_required_artifacts:
+            errors.append(
+                {
+                    "type": "missing_required_artifacts",
+                    "task_ids": executable_tasks_missing_required_artifacts,
+                }
+            )
         test_writer_tasks_missing_target_files = [
             task.id
             for task in task_graph.tasks
@@ -3228,6 +3242,9 @@ class JobRunner:
             "missing_test_writer_tasks": missing_test_writer_tasks,
             "project_setup_scaffold_covers_test_artifacts": (
                 project_setup_scaffold_covers_test_artifacts
+            ),
+            "executable_tasks_missing_required_artifacts": (
+                executable_tasks_missing_required_artifacts
             ),
             "implementation_tasks_missing_target_files": (
                 implementation_tasks_missing_target_files

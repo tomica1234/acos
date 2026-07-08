@@ -2019,6 +2019,7 @@ def test_task_graph_validation_requires_task_artifacts_when_requested() -> None:
     assert validation["executable_task_artifact_count"] == 0
     assert validation["errors"] == [
         {"type": "missing_task_artifacts", "task_ids": ["core"]},
+        {"type": "missing_required_artifacts", "task_ids": ["core"]},
         {"type": "missing_implementation_target_files", "task_ids": ["core"]},
     ]
 
@@ -2051,6 +2052,35 @@ def test_task_graph_validation_rejects_implementation_artifacts_without_targets(
     }
 
 
+def test_task_graph_validation_rejects_target_files_without_required_artifacts() -> None:
+    task_graph = TaskGraph(
+        goal="Build feature",
+        tasks=[
+            PlannedTask(
+                id="core",
+                title="Build core",
+                description="Create feature module.",
+                role="implementer",
+                acceptance_criteria=["VALUE equals 1"],
+                target_files=["feature.py"],
+            )
+        ],
+    )
+
+    validation = JobRunner._build_task_graph_validation(
+        task_graph,
+        require_acceptance_criteria=True,
+        require_task_artifacts=True,
+    )
+
+    assert validation["valid"] is False
+    assert validation["executable_tasks_missing_required_artifacts"] == ["core"]
+    assert {
+        "type": "missing_required_artifacts",
+        "task_ids": ["core"],
+    } in validation["errors"]
+
+
 def test_task_graph_validation_requires_test_writer_artifacts_when_requested() -> None:
     task_graph = TaskGraph(
         goal="Build feature",
@@ -2062,6 +2092,7 @@ def test_task_graph_validation_requires_test_writer_artifacts_when_requested() -
                 role="implementer",
                 acceptance_criteria=["VALUE equals 1"],
                 target_files=["feature.py"],
+                required_artifacts=["feature.py"],
             ),
             PlannedTask(
                 id="tests",
@@ -2085,6 +2116,7 @@ def test_task_graph_validation_requires_test_writer_artifacts_when_requested() -
     assert validation["executable_task_artifact_count"] == 1
     assert validation["errors"] == [
         {"type": "missing_task_artifacts", "task_ids": ["tests"]},
+        {"type": "missing_required_artifacts", "task_ids": ["tests"]},
         {"type": "missing_test_writer_target_files", "task_ids": ["tests"]},
     ]
 
@@ -2108,6 +2140,7 @@ def test_task_graph_validation_requires_test_writer_implementation_dependency() 
                 role="test_writer",
                 acceptance_criteria=["VALUE is covered by a regression test"],
                 target_files=["tests/test_feature.py"],
+                required_artifacts=["tests/test_feature.py"],
             ),
         ],
     )
@@ -2143,6 +2176,7 @@ def test_task_graph_validation_allows_test_writer_dependency_on_scaffold() -> No
                 role="scaffold",
                 acceptance_criteria=["Scaffold exists"],
                 target_files=["backend/main.py"],
+                required_artifacts=["backend/main.py"],
             ),
             PlannedTask(
                 id="project-scaffold-tests",
@@ -2152,6 +2186,7 @@ def test_task_graph_validation_allows_test_writer_dependency_on_scaffold() -> No
                 depends_on=["project-scaffold"],
                 acceptance_criteria=["Scaffold is covered by a smoke test"],
                 target_files=["tests/test_project_scaffold.py"],
+                required_artifacts=["tests/test_project_scaffold.py"],
             ),
         ],
     )
