@@ -428,6 +428,50 @@ def test_zero_patch_implementation_stage_is_failed_for_recovery_even_if_tests_pa
     }
 
 
+def test_stage_checkpoint_rejects_invalid_required_artifact_paths(
+    tmp_path: Path,
+) -> None:
+    runner, _environment, record = _runner(tmp_path)
+    (tmp_path / "docs").mkdir()
+    implementation = ImplementationResult(
+        status=ImplementationStatus.IMPLEMENTED,
+        summary="Create feature module",
+        changed_files=["feature.py"],
+        patches=[
+            FilePatch(
+                path="feature.py",
+                operation="create",
+                content="VALUE = 1\n",
+            )
+        ],
+    )
+    stage_result = {
+        "stage": 1,
+        "task": PlannedTask(
+            id="core",
+            title="Core",
+            description="Build core",
+            role="implementer",
+            required_artifacts=["../outside.py", "C:\\outside.py", "docs"],
+        ).model_dump(),
+        "implementation": implementation.model_dump(),
+        "test_writer_results": [],
+        "change_summary": runner._build_stage_change_summary(implementation, []),
+        "test_run": TestRunResult(success=True).model_dump(),
+    }
+
+    runner._record_stage_checkpoint(record, stage_result)
+
+    assert stage_result["status"] == "failed_for_recovery"
+    assert stage_result["failure_reason"] == "required_artifacts_missing"
+    assert stage_result["missing_artifacts"] == [
+        "../outside.py",
+        "C:\\outside.py",
+        "docs",
+    ]
+    assert stage_result["invalid_artifacts"] == ["../outside.py", "C:\\outside.py"]
+
+
 def test_frontend_unlimited_mode_sets_autonomous_until_done() -> None:
     source = Path("frontend/src/App.tsx").read_text(encoding="utf-8")
 

@@ -141,6 +141,31 @@ def ensure_required_artifacts_exist(
         raise QualityGateError(f"{label} are incomplete; " + "; ".join(problems))
 
 
+def artifact_path_exists(
+    relative_path: str,
+    *,
+    workspace_root: str | Path,
+) -> bool:
+    target = _resolve_valid_artifact_path(relative_path, workspace_root=workspace_root)
+    return target is not None and target.is_file()
+
+
+def _resolve_valid_artifact_path(
+    relative_path: str,
+    *,
+    workspace_root: str | Path,
+) -> Path | None:
+    normalized_paths, invalid = _normalize_artifact_paths([relative_path])
+    if invalid or not normalized_paths:
+        return None
+    normalized = PurePosixPath(next(iter(normalized_paths)))
+    workspace = Path(workspace_root).resolve()
+    target = (workspace / Path(*normalized.parts)).resolve()
+    if workspace not in [target, *target.parents]:
+        return None
+    return target
+
+
 def _normalize_artifact_paths(paths: Iterable[str]) -> tuple[set[str], list[str]]:
     normalized_paths: set[str] = set()
     invalid_paths: list[str] = []

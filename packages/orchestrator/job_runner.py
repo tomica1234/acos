@@ -26,6 +26,7 @@ from packages.orchestrator.policy import PolicyEngine
 from packages.orchestrator.progress import summarize_job_progress
 from packages.orchestrator.quality_gates import (
     QualityGateError,
+    artifact_path_exists,
     ensure_fixer_safe,
     ensure_reviews_pass,
     invalid_artifact_paths,
@@ -4159,9 +4160,12 @@ class JobRunner:
             stage_result["failure_reason"] = "implementation_produced_no_changes"
         missing_artifacts = self._missing_artifacts_for_stage(record, task)
         if missing_artifacts:
+            invalid_artifacts = invalid_artifact_paths(missing_artifacts)
             stage_result["status"] = "failed_for_recovery"
             stage_result["failure_reason"] = "required_artifacts_missing"
             stage_result["missing_artifacts"] = missing_artifacts
+            if invalid_artifacts:
+                stage_result["invalid_artifacts"] = invalid_artifacts
         review = stage_result.get("stage_review")
         if isinstance(review, dict) and review.get("decision") in {
             ReviewDecision.REJECT.value,
@@ -4194,7 +4198,11 @@ class JobRunner:
         if not artifacts:
             return []
         root = self._workspace_root(record)
-        return [artifact for artifact in artifacts if not (root / artifact).exists()]
+        return [
+            artifact
+            for artifact in artifacts
+            if not artifact_path_exists(artifact, workspace_root=root)
+        ]
 
     def _validate_completion_integrity(
         self,

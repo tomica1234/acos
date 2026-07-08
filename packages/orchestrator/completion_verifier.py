@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Any
 
+from packages.orchestrator.quality_gates import artifact_path_exists, invalid_artifact_paths
 from packages.schemas.jobs import JobRecord
 from packages.schemas.models import ReviewDecision
 
@@ -33,10 +33,14 @@ class DefinitionOfDoneVerifier:
             missing.append(f"planned_task_not_done:{task_id}")
 
         for artifact in self._required_artifacts(outputs):
-            if not self._artifact_exists(record, artifact):
+            if invalid_artifact_paths([artifact]):
+                missing.append(f"required_artifact_invalid:{artifact}")
+            elif not self._artifact_exists(record, artifact):
                 missing.append(f"required_artifact_missing:{artifact}")
         for target in self._target_files(outputs):
-            if not self._artifact_exists(record, target):
+            if invalid_artifact_paths([target]):
+                missing.append(f"target_file_invalid:{target}")
+            elif not self._artifact_exists(record, target):
                 missing.append(f"target_file_missing:{target}")
 
         test_run = outputs.get("test_run")
@@ -98,5 +102,5 @@ class DefinitionOfDoneVerifier:
 
     @staticmethod
     def _artifact_exists(record: JobRecord, relative_path: str) -> bool:
-        root = Path(record.spec.workspace_root or record.spec.repo_path)
-        return (root / relative_path).exists()
+        root = record.spec.workspace_root or record.spec.repo_path
+        return artifact_path_exists(relative_path, workspace_root=root)

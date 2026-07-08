@@ -139,3 +139,34 @@ def test_completion_verifier_reports_missing_evidence(tmp_path: Path) -> None:
     assert "planned_task_not_done:core" in result.missing_evidence
     assert "target_file_missing:src/app.py" in result.missing_evidence
     assert "unit_tests_success" in result.missing_evidence
+
+
+def test_completion_verifier_rejects_invalid_and_non_file_artifacts(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "docs").mkdir()
+    record = _record(tmp_path, status=JobStatus.FINALIZING, error="")
+    record.completed_task_ids.append("core")
+    record.outputs["task_graph"] = {
+        "goal": "Build it",
+        "tasks": [
+            {
+                "id": "core",
+                "title": "Core",
+                "description": "Core",
+                "role": "implementer",
+                "target_files": ["C:\\outside.py", "docs"],
+                "required_artifacts": ["../outside.py"],
+            }
+        ],
+    }
+    record.outputs["test_run"] = {"success": True}
+    record.audit_events.append({"event": "verified"})
+    record.checkpoints.append({"kind": "stage"})
+
+    result = DefinitionOfDoneVerifier().verify(record)
+
+    assert not result.passed
+    assert "required_artifact_invalid:../outside.py" in result.missing_evidence
+    assert "target_file_invalid:C:\\outside.py" in result.missing_evidence
+    assert "target_file_missing:docs" in result.missing_evidence
