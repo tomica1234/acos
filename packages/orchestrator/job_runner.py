@@ -2748,6 +2748,7 @@ class JobRunner:
                     "depends_on from every test_writer task to the implementer/scaffold task it verifies, "
                     "repo source target_files on implementer/scaffold tasks, "
                     "test target_files on test_writer tasks, "
+                    "every task required_artifact also listed in that same task's target_files, "
                     "and PRD required_artifacts assigned to their owning role target_files, "
                     "and only autonomous-executable task roles."
                 ),
@@ -2930,8 +2931,20 @@ class JobRunner:
                 )
         role_mismatched_target_files: list[dict[str, Any]] = []
         role_mismatched_required_artifacts: list[dict[str, Any]] = []
+        required_artifacts_missing_target_files: list[dict[str, Any]] = []
         for task in executable_tasks:
-            for path in sorted(valid_artifact_paths(task.target_files)):
+            task_target_files = valid_artifact_paths(task.target_files)
+            task_required_artifacts = valid_artifact_paths(task.required_artifacts)
+            missing_target_files = sorted(task_required_artifacts - task_target_files)
+            if missing_target_files:
+                required_artifacts_missing_target_files.append(
+                    {
+                        "task_id": task.id,
+                        "role": task.role,
+                        "paths": missing_target_files,
+                    }
+                )
+            for path in sorted(task_target_files):
                 expected_roles = JobRunner._artifact_owner_roles(path)
                 if task.role not in expected_roles:
                     role_mismatched_target_files.append(
@@ -2942,7 +2955,7 @@ class JobRunner:
                             "expected_roles": sorted(expected_roles),
                         }
                     )
-            for path in sorted(valid_artifact_paths(task.required_artifacts)):
+            for path in sorted(task_required_artifacts):
                 expected_roles = JobRunner._artifact_owner_roles(path)
                 if task.role not in expected_roles:
                     role_mismatched_required_artifacts.append(
@@ -3084,6 +3097,13 @@ class JobRunner:
                 {
                     "type": "role_mismatched_required_artifacts",
                     "items": role_mismatched_required_artifacts,
+                }
+            )
+        if require_task_artifacts and required_artifacts_missing_target_files:
+            errors.append(
+                {
+                    "type": "required_artifacts_missing_target_files",
+                    "items": required_artifacts_missing_target_files,
                 }
             )
         if duplicate_ids:
@@ -3245,6 +3265,9 @@ class JobRunner:
             "unowned_required_artifacts": unowned_required_artifacts,
             "role_mismatched_target_files": role_mismatched_target_files,
             "role_mismatched_required_artifacts": role_mismatched_required_artifacts,
+            "required_artifacts_missing_target_files": (
+                required_artifacts_missing_target_files
+            ),
             "prd_test_required_artifacts": prd_test_required_artifacts,
             "missing_test_writer_tasks": missing_test_writer_tasks,
             "project_setup_scaffold_covers_test_artifacts": (

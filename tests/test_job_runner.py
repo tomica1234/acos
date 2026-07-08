@@ -2091,6 +2091,38 @@ def test_task_graph_validation_rejects_target_files_without_required_artifacts()
     } in validation["errors"]
 
 
+def test_task_graph_validation_rejects_required_artifacts_not_targeted() -> None:
+    task_graph = TaskGraph(
+        goal="Build feature",
+        tasks=[
+            PlannedTask(
+                id="core",
+                title="Build core",
+                description="Create feature module.",
+                role="implementer",
+                acceptance_criteria=["VALUE equals 1"],
+                target_files=["feature.py"],
+                required_artifacts=["other.py"],
+            )
+        ],
+    )
+
+    validation = JobRunner._build_task_graph_validation(
+        task_graph,
+        require_acceptance_criteria=True,
+        require_task_artifacts=True,
+    )
+
+    assert validation["valid"] is False
+    assert validation["required_artifacts_missing_target_files"] == [
+        {"task_id": "core", "role": "implementer", "paths": ["other.py"]}
+    ]
+    assert {
+        "type": "required_artifacts_missing_target_files",
+        "items": validation["required_artifacts_missing_target_files"],
+    } in validation["errors"]
+
+
 def test_task_graph_validation_requires_test_writer_artifacts_when_requested() -> None:
     task_graph = TaskGraph(
         goal="Build feature",
