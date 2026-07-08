@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from packages.orchestrator.quality_gates import invalid_artifact_paths
 from packages.orchestrator.statuses import is_hard_terminal_status, is_waiting_status
 from packages.schemas.checkpoints import CheckpointRecord
 from packages.schemas.jobs import JobRecord
@@ -79,6 +80,19 @@ class RecoveryExecutor:
         paths = self._recreate_target_paths(record, constraints)
         if not paths:
             return True
+        invalid = invalid_artifact_paths(paths)
+        if invalid:
+            constraints["invalid_artifacts"] = invalid
+            constraints["missing_artifacts"] = []
+            constraints["recovery_mode"] = "invalid_artifacts_replan"
+            plan["next_actor"] = "planner"
+            plan["next_status"] = JobStatus.REPLANNING.value
+            record.runtime_state["planner_repair_requested"] = True
+            record.status = JobStatus.REPLANNING
+            if record.history[-1:] != [JobStatus.REPLANNING]:
+                record.history.append(JobStatus.REPLANNING)
+            return True
+        paths = [path for path in paths if path not in set(invalid)]
         root = Path(record.spec.workspace_root or record.spec.repo_path).resolve()
         missing = [path for path in paths if not (root / path).exists()]
         if not missing:
@@ -176,12 +190,7 @@ class RecoveryExecutor:
         created: list[str] = []
         for path in missing:
             normalized = path.replace("\\", "/").removeprefix("./")
-            if (
-                not normalized
-                or normalized.startswith("../")
-                or normalized == ".."
-                or Path(normalized).is_absolute()
-            ):
+            if invalid_artifact_paths([normalized]):
                 continue
             content = self._deterministic_content_for_path(normalized)
             if content is None:
