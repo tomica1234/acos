@@ -2510,6 +2510,69 @@ def test_task_graph_validation_requires_test_writer_acceptance_criteria() -> Non
     } in validation["errors"]
 
 
+def test_task_graph_validation_requires_test_writer_to_cover_prd_acceptance() -> None:
+    prd = PRD(
+        title="Feature",
+        problem_statement="Need feature",
+        smallest_working_core=["Expose VALUE"],
+        small_parts=["Create feature module"],
+        incremental_milestones=["Module exists"],
+        acceptance_tests=["VALUE equals 1"],
+        definition_of_done=["All generated tests pass"],
+        required_artifacts=["feature.py", "tests/test_feature.py"],
+    )
+    task_graph = TaskGraph(
+        goal="Build feature",
+        tasks=[
+            PlannedTask(
+                id="core",
+                title="Build core",
+                description="Create feature module",
+                role="implementer",
+                acceptance_criteria=["VALUE equals 1"],
+                target_files=["feature.py"],
+                required_artifacts=["feature.py"],
+            ),
+            PlannedTask(
+                id="tests",
+                title="Test core",
+                description="Add generic regression tests.",
+                role="test_writer",
+                depends_on=["core"],
+                acceptance_criteria=["Generated tests pass"],
+                target_files=["tests/test_feature.py"],
+                required_artifacts=["tests/test_feature.py"],
+            ),
+        ],
+    )
+
+    validation = JobRunner._build_task_graph_validation(
+        task_graph,
+        prd=prd,
+        require_acceptance_criteria=True,
+        require_task_artifacts=True,
+    )
+
+    assert validation["valid"] is False
+    assert validation["uncovered_acceptance_tests"] == []
+    assert validation["uncovered_test_writer_acceptance_tests"] == [
+        {
+            "acceptance_test_index": 1,
+            "acceptance_test": "VALUE equals 1",
+            "task_id": None,
+            "covered": False,
+        }
+    ]
+    assert {
+        "type": "semantic_test_writer_acceptance_mismatch",
+        "acceptance_test_count": 1,
+        "test_writer_task_count": 1,
+        "uncovered_test_writer_acceptance_tests": (
+            validation["uncovered_test_writer_acceptance_tests"]
+        ),
+    } in validation["errors"]
+
+
 def test_task_graph_validation_allows_test_writer_dependency_on_scaffold() -> None:
     task_graph = TaskGraph(
         goal="Build scaffold",

@@ -140,6 +140,7 @@ class JobRunner:
         "unassigned_required_artifacts",
         "invalid_prd_required_artifacts",
         "unowned_required_artifacts",
+        "uncovered_test_writer_acceptance_tests",
         "role_mismatched_target_files",
         "role_mismatched_required_artifacts",
         "required_artifacts_missing_target_files",
@@ -3217,6 +3218,8 @@ class JobRunner:
                     "testable acceptance_criteria on every executable task, "
                     "at least one test_writer task whenever the PRD has acceptance_tests "
                     "or test required_artifacts, "
+                    "test_writer acceptance_criteria that directly cover every PRD "
+                    "acceptance_test, "
                     "target_files on every test_writer task, "
                     "required_artifacts on every executable task, "
                     "depends_on from every test_writer task to the implementer/scaffold task it verifies, "
@@ -3329,6 +3332,12 @@ class JobRunner:
             "uncovered_acceptance_tests": list(
                 validation.get("uncovered_acceptance_tests", [])
             ),
+            "test_writer_acceptance_test_coverage": list(
+                validation.get("test_writer_acceptance_test_coverage", [])
+            ),
+            "uncovered_test_writer_acceptance_tests": list(
+                validation.get("uncovered_test_writer_acceptance_tests", [])
+            ),
         }
         for key in self.TASK_GRAPH_VALIDATION_DETAIL_KEYS:
             attempt_record[key] = list(validation.get(key, []))
@@ -3404,6 +3413,9 @@ class JobRunner:
         )
         implementation_tasks = [
             task for task in task_graph.tasks if task.role in JobRunner.IMPLEMENTATION_TASK_ROLES
+        ]
+        test_writer_tasks = [
+            task for task in task_graph.tasks if task.role in JobRunner.TEST_TASK_ROLES
         ]
         executable_tasks = [
             task for task in task_graph.tasks if task.role in executable_roles
@@ -3508,11 +3520,21 @@ class JobRunner:
             index_key="acceptance_test_index",
             allow_reuse=True,
         )
+        test_writer_acceptance_test_coverage = JobRunner._semantic_task_coverage(
+            acceptance_tests,
+            test_writer_tasks,
+            item_key="acceptance_test",
+            index_key="acceptance_test_index",
+            allow_reuse=True,
+        )
         uncovered_small_parts = [
             item for item in small_part_coverage if not item["covered"]
         ]
         uncovered_acceptance_tests = [
             item for item in acceptance_test_coverage if not item["covered"]
+        ]
+        uncovered_test_writer_acceptance_tests = [
+            item for item in test_writer_acceptance_test_coverage if not item["covered"]
         ]
         unknown_dependencies = [
             {"task_id": task.id, "dependency": dependency}
@@ -3597,6 +3619,22 @@ class JobRunner:
                     "acceptance_test_count": len(acceptance_tests),
                     "implementation_task_count": len(implementation_task_ids),
                     "uncovered_acceptance_tests": uncovered_acceptance_tests,
+                }
+            )
+        if (
+            require_acceptance_criteria
+            and acceptance_tests
+            and test_writer_task_ids
+            and uncovered_test_writer_acceptance_tests
+        ):
+            errors.append(
+                {
+                    "type": "semantic_test_writer_acceptance_mismatch",
+                    "acceptance_test_count": len(acceptance_tests),
+                    "test_writer_task_count": len(test_writer_task_ids),
+                    "uncovered_test_writer_acceptance_tests": (
+                        uncovered_test_writer_acceptance_tests
+                    ),
                 }
             )
         if invalid_prd_required_artifacts:
@@ -3874,6 +3912,10 @@ class JobRunner:
             "acceptance_test_count": len(acceptance_tests),
             "acceptance_test_coverage": acceptance_test_coverage,
             "uncovered_acceptance_tests": uncovered_acceptance_tests,
+            "test_writer_acceptance_test_coverage": test_writer_acceptance_test_coverage,
+            "uncovered_test_writer_acceptance_tests": (
+                uncovered_test_writer_acceptance_tests
+            ),
             "errors": errors,
         }
 
