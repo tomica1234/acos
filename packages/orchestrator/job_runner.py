@@ -1857,13 +1857,11 @@ class JobRunner:
                 (
                     "Refine the product requirements before implementation. "
                     "Fill every missing PRD quality field for autonomous large-scale execution: "
-                    f"{', '.join(report['missing'])}."
+                    f"{', '.join(report['missing'])}. "
+                    "When acceptance coverage is missing, add or rewrite acceptance_tests "
+                    "so every small_part has a direct observable test using the same domain terms."
                 ),
-                logs=[
-                    "The previous PRD was not specific enough for autonomous execution.",
-                    f"Missing fields: {', '.join(report['missing'])}",
-                    f"Warnings: {', '.join(report['warnings'])}",
-                ],
+                logs=self._prd_quality_repair_logs(current_prd, report),
             )
             self._write_memory_item(record, "pm", "prd", current_prd.model_dump_json())
             report = self._build_prd_quality_report(current_prd)
@@ -1885,6 +1883,39 @@ class JobRunner:
         )
         self.store.update(record)
         return None
+
+    @staticmethod
+    def _prd_quality_repair_logs(prd: PRD, report: dict[str, Any]) -> list[str]:
+        logs = [
+            "The previous PRD was not specific enough for autonomous execution.",
+            f"Missing fields: {', '.join(report['missing'])}",
+            f"Warnings: {', '.join(report['warnings'])}",
+        ]
+        uncovered = report.get("uncovered_acceptance_small_parts")
+        if isinstance(uncovered, list) and uncovered:
+            summaries: list[str] = []
+            for item in uncovered:
+                if not isinstance(item, dict):
+                    continue
+                index = item.get("small_part_index")
+                part = item.get("small_part")
+                if isinstance(part, str) and part.strip():
+                    summaries.append(f"{index}: {part}" if index else part)
+            if summaries:
+                logs.append(
+                    "Uncovered PRD small_parts needing direct acceptance_tests: "
+                    + " | ".join(summaries)
+                )
+                logs.append(
+                    "Repair acceptance_tests by adding or rewriting one observable check "
+                    "for each uncovered small_part, reusing distinctive nouns and verbs from that small_part."
+                )
+        if prd.acceptance_tests:
+            logs.append(
+                "Current acceptance_tests: "
+                + " | ".join(self_item for self_item in prd.acceptance_tests)
+            )
+        return logs
 
     def _record_prd_quality_attempt(
         self,
@@ -2194,13 +2225,28 @@ class JobRunner:
                 implementation_task_count=implementation_task_count,
             )
             if task_artifacts:
-                if not valid_artifact_paths(task.target_files):
-                    updates["target_files"] = list(task_artifacts)
-                if not valid_artifact_paths(task.required_artifacts):
-                    updates["required_artifacts"] = list(task_artifacts)
+                target_files = self._unique_paths([*task.target_files, *task_artifacts])
+                required_artifacts = self._unique_paths(
+                    [*task.required_artifacts, *task_artifacts]
+                )
+                if target_files != task.target_files:
+                    updates["target_files"] = target_files
+                if required_artifacts != task.required_artifacts:
+                    updates["required_artifacts"] = required_artifacts
                 if "target_files" in updates or "required_artifacts" in updates:
                     artifact_updated_task_ids.append(task.id)
             tasks.append(task.model_copy(update=updates) if updates else task)
+
+        tasks, supplemental_artifact_assignments = (
+            self._assign_missing_prd_implementation_artifacts(
+                tasks,
+                source_implementation_artifacts,
+            )
+        )
+        if supplemental_artifact_assignments:
+            artifact_updated_task_ids.extend(
+                item["task_id"] for item in supplemental_artifact_assignments
+            )
 
         if not updated_task_ids and not artifact_updated_task_ids:
             record.outputs["task_graph_acceptance_enrichment"] = {
@@ -2216,8 +2262,14 @@ class JobRunner:
             "updated_task_ids": updated_task_ids,
         }
         if artifact_updated_task_ids:
-            enrichment["artifact_updated_task_ids"] = artifact_updated_task_ids
+            enrichment["artifact_updated_task_ids"] = self._unique_paths(
+                artifact_updated_task_ids
+            )
             enrichment["inherited_required_artifacts"] = source_implementation_artifacts
+        if supplemental_artifact_assignments:
+            enrichment["supplemental_artifact_assignments"] = (
+                supplemental_artifact_assignments
+            )
         record.outputs["task_graph_acceptance_enrichment"] = enrichment
         return TaskGraph(
             goal=task_graph.goal,
@@ -2227,6 +2279,115 @@ class JobRunner:
                 "ACOS filled missing task acceptance_criteria from the PRD.",
             ],
         )
+
+    @classmethod
+    def _assign_missing_prd_implementation_artifacts(
+        cls,
+        tasks: list[PlannedTask],
+        artifacts: list[str],
+    ) -> tuple[list[PlannedTask], list[dict[str, str]]]:
+        if not artifacts:
+            return tasks, []
+        updated_tasks = list(tasks)
+        assignments: list[dict[str, str]] = []
+
+        def implementation_indexes() -> list[int]:
+            return [
+                index
+                for index, task in enumerate(updated_tasks)
+                if task.role in cls.IMPLEMENTATION_TASK_ROLES
+            ]
+
+        for artifact in artifacts:
+            target_owners = [
+                index
+                for index in implementation_indexes()
+                if artifact in valid_artifact_paths(updated_tasks[index].target_files)
+            ]
+            required_owners = [
+                index
+                for index in implementation_indexes()
+                if artifact in valid_artifact_paths(
+                    updated_tasks[index].required_artifacts
+                )
+            ]
+            owner_index = (
+                target_owners[0]
+                if target_owners
+                else required_owners[0]
+                if required_owners
+                else cls._best_prd_artifact_owner_task_index(updated_tasks, artifact)
+            )
+            if owner_index is None:
+                continue
+            task = updated_tasks[owner_index]
+            target_files = cls._unique_paths([*task.target_files, artifact])
+            required_artifacts = cls._unique_paths([*task.required_artifacts, artifact])
+            if (
+                target_files == task.target_files
+                and required_artifacts == task.required_artifacts
+            ):
+                continue
+            updated_tasks[owner_index] = task.model_copy(
+                update={
+                    "target_files": target_files,
+                    "required_artifacts": required_artifacts,
+                }
+            )
+            assignments.append({"task_id": task.id, "path": artifact})
+        return updated_tasks, assignments
+
+    @classmethod
+    def _best_prd_artifact_owner_task_index(
+        cls,
+        tasks: list[PlannedTask],
+        artifact: str,
+    ) -> int | None:
+        implementation_indexes = [
+            index
+            for index, task in enumerate(tasks)
+            if task.role in cls.IMPLEMENTATION_TASK_ROLES
+        ]
+        if not implementation_indexes:
+            return None
+        artifact_tokens = cls._artifact_semantic_tokens(artifact)
+        best_index: int | None = None
+        best_score = 0
+        if artifact_tokens:
+            for index in implementation_indexes:
+                task_tokens = cls._semantic_tokens(cls._task_semantic_text(tasks[index]))
+                score = cls._semantic_overlap_score(artifact_tokens, task_tokens)
+                if score > best_score:
+                    best_score = score
+                    best_index = index
+            if best_index is not None and best_score > 0:
+                return best_index
+
+        category_tokens = cls._artifact_category_tokens(artifact)
+        if category_tokens:
+            category_matches: list[int] = []
+            for index in implementation_indexes:
+                task_tokens = cls._semantic_tokens(cls._task_semantic_text(tasks[index]))
+                if category_tokens & task_tokens:
+                    category_matches.append(index)
+            if len(category_matches) == 1:
+                return category_matches[0]
+        if len(implementation_indexes) == 1:
+            return implementation_indexes[0]
+        return None
+
+    @staticmethod
+    def _artifact_category_tokens(path: str) -> set[str]:
+        normalized = path.replace("\\", "/").lower()
+        parts = {part for part in re.split(r"[./_-]+", normalized) if part}
+        categories: set[str] = set()
+        if parts & {"frontend", "client", "ui", "web"}:
+            categories.update({"frontend", "client", "react"})
+        if parts & {"backend", "server", "api"}:
+            categories.update({"backend", "server", "api"})
+        if parts & {"shared", "common", "types"}:
+            categories.update({"shared", "type"})
+        return categories
 
     def _normalize_project_setup_task_graph(
         self,
@@ -2988,6 +3149,7 @@ class JobRunner:
             [task for task in task_graph.tasks if task.role in executable_roles],
             item_key="acceptance_test",
             index_key="acceptance_test_index",
+            allow_reuse=True,
         )
         uncovered_small_parts = [
             item for item in small_part_coverage if not item["covered"]
@@ -3466,26 +3628,25 @@ class JobRunner:
                     ]
                 continue
 
+            required_score = cls._semantic_overlap_required(item_tokens)
+            anchor_tokens = cls._semantic_anchor_tokens(item_tokens)
             best_candidate: tuple[int, str] | None = None
             best_score = 0
-            best_tokens: set[str] = set()
             for candidate in remaining_candidates:
                 candidate_tokens = cls._semantic_tokens(candidate[1])
                 score = cls._semantic_overlap_score(
                     item_tokens,
                     candidate_tokens,
                 )
-                if score > best_score:
+                if (
+                    score >= required_score
+                    and anchor_tokens.issubset(candidate_tokens)
+                    and score > best_score
+                ):
                     best_score = score
                     best_candidate = candidate
-                    best_tokens = candidate_tokens
 
-            required_score = cls._semantic_overlap_required(item_tokens)
-            covered = (
-                best_candidate is not None
-                and best_score >= required_score
-                and cls._semantic_anchor_tokens(item_tokens).issubset(best_tokens)
-            )
+            covered = best_candidate is not None
             coverage.append(
                 {
                     index_key: index,
@@ -3507,6 +3668,7 @@ class JobRunner:
         *,
         item_key: str,
         index_key: str,
+        allow_reuse: bool = False,
     ) -> list[dict[str, Any]]:
         remaining_tasks = list(tasks)
         coverage: list[dict[str, Any]] = []
@@ -3523,25 +3685,24 @@ class JobRunner:
                     }
                 )
                 continue
+            required_score = cls._semantic_overlap_required(item_tokens)
+            anchor_tokens = cls._semantic_anchor_tokens(item_tokens)
             best_task: PlannedTask | None = None
             best_score = 0
-            best_tokens: set[str] = set()
             for task in remaining_tasks:
                 task_tokens = cls._semantic_tokens(cls._task_semantic_text(task))
                 score = cls._semantic_overlap_score(
                     item_tokens,
                     task_tokens,
                 )
-                if score > best_score:
+                if (
+                    score >= required_score
+                    and anchor_tokens.issubset(task_tokens)
+                    and score > best_score
+                ):
                     best_score = score
                     best_task = task
-                    best_tokens = task_tokens
-            required_score = cls._semantic_overlap_required(item_tokens)
-            covered = (
-                best_task is not None
-                and best_score >= required_score
-                and cls._semantic_anchor_tokens(item_tokens).issubset(best_tokens)
-            )
+            covered = best_task is not None
             coverage.append(
                 {
                     index_key: index,
@@ -3550,7 +3711,7 @@ class JobRunner:
                     "covered": covered,
                 }
             )
-            if covered and best_task is not None:
+            if covered and best_task is not None and not allow_reuse:
                 remaining_tasks.remove(best_task)
         return coverage
 
@@ -3659,7 +3820,8 @@ class JobRunner:
             "teachers": "role",
             "vocab": "vocabulary",
         }
-        raw_tokens = re.findall(r"[a-z0-9_]+", text.lower())
+        expanded = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", " ", text)
+        raw_tokens = re.findall(r"[a-z0-9_]+", expanded.lower())
         tokens: set[str] = set()
         for token in raw_tokens:
             pieces = [token]
@@ -3671,7 +3833,11 @@ class JobRunner:
                 if len(piece) < 2 or piece.isdigit() or piece in stopwords:
                     continue
                 normalized = aliases.get(piece, piece)
-                if len(normalized) > 3 and normalized.endswith("s"):
+                if (
+                    len(normalized) > 3
+                    and normalized.endswith("s")
+                    and not normalized.endswith("ss")
+                ):
                     normalized = normalized[:-1]
                 tokens.add(normalized)
         return tokens
@@ -3917,9 +4083,10 @@ class JobRunner:
             if self._is_project_setup_task(task):
                 implementation = self._run_project_setup_scaffold(record, task)
             else:
+                implementation_role = "scaffold" if task.role == "scaffold" else "implementer"
                 implementation = self._run_structured_role(
                     record,
-                    "implementer",
+                    implementation_role,
                     ImplementationResult,
                     f"Implement the next autonomous stage task {task.id}: {task.title}",
                     task=task,
@@ -3931,7 +4098,7 @@ class JobRunner:
             if not self._implementation_allows_progress(record, task, implementation):
                 return implementation_results, test_writer_results, last_test_result, stage_results
             if not self._is_project_setup_task(task):
-                self._apply_patches(record, "implementer", implementation.patches)
+                self._apply_patches(record, implementation_role, implementation.patches)
             if self._should_pause_for_recovery(record):
                 return implementation_results, test_writer_results, last_test_result, stage_results
             ready_task_ids.add(task.id)
@@ -4579,9 +4746,10 @@ class JobRunner:
             if self._is_project_setup_task(task):
                 implementation = self._run_project_setup_scaffold(record, task)
             else:
+                implementation_role = "scaffold" if task.role == "scaffold" else "implementer"
                 implementation = self._run_structured_role(
                     record,
-                    "implementer",
+                    implementation_role,
                     ImplementationResult,
                     objective,
                     task=task,
@@ -4593,7 +4761,7 @@ class JobRunner:
             if not self._implementation_allows_progress(record, task, implementation):
                 return results
             if not self._is_project_setup_task(task):
-                self._apply_patches(record, "implementer", implementation.patches)
+                self._apply_patches(record, implementation_role, implementation.patches)
             if self._should_pause_for_recovery(record):
                 return results
         if results:

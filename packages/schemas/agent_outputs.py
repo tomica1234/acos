@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import shlex
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -116,8 +117,49 @@ class RuntimePlan(BaseModel):
             if key in allowed:
                 continue
             extra[key] = normalized.pop(key)
+        if "prepare_commands" in normalized:
+            normalized["prepare_commands"] = cls._normalize_prepare_commands(
+                normalized.get("prepare_commands")
+            )
+        if "start_command" in normalized:
+            normalized["start_command"] = cls._normalize_command(
+                normalized.get("start_command")
+            )
         normalized["extra"] = extra
         return normalized
+
+    @classmethod
+    def _normalize_prepare_commands(cls, value: Any) -> Any:
+        if value is None:
+            return []
+        if isinstance(value, str):
+            command = cls._normalize_command(value)
+            return [command] if command else []
+        if not isinstance(value, list):
+            return value
+        commands: list[list[str]] = []
+        for item in value:
+            command = cls._normalize_command(item)
+            if command:
+                commands.append(command)
+        return commands
+
+    @staticmethod
+    def _normalize_command(value: Any) -> Any:
+        if value is None:
+            return None
+        if isinstance(value, str):
+            command = value.strip()
+            if not command:
+                return None
+            try:
+                parts = shlex.split(command)
+            except ValueError:
+                parts = command.split()
+            return parts
+        if isinstance(value, list):
+            return [str(part) for part in value if str(part).strip()]
+        return value
 
 
 class PMReviewResult(BaseModel):

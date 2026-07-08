@@ -53,6 +53,26 @@ agents:
     escalation_policy: {}
     output_schema: TaskGraph
 
+  scaffold:
+    primary_model: ornith_35b_q4
+    fallback_models:
+      - mock_structured
+    temperature: 0.1
+    top_p: 0.8
+    max_output_tokens: 8192
+    context_budget_tokens: 49152
+    allow_tools: true
+    allowed_tools:
+      - repo_server.read_file
+      - repo_server.search_text
+      - repo_server.apply_patch
+      - git_server.diff
+    max_tool_steps: 48
+    require_json_schema: true
+    escalation_policy:
+      repeated_failures_gte: 2
+    output_schema: ImplementationResult
+
   implementer:
     primary_model: ornith_35b_q4
     fallback_models:

@@ -219,6 +219,50 @@ def test_project_scaffold_role_runs_deterministic_scaffold_before_test_writer(
     ]
 
 
+def test_generic_scaffold_role_can_create_dependency_manifest(
+    tmp_path: Path,
+) -> None:
+    runner, _environment, record = _runner(
+        tmp_path,
+        scenario={
+            "scaffold": ImplementationResult(
+                status=ImplementationStatus.IMPLEMENTED,
+                summary="Created root package manifest.",
+                changed_files=["package.json"],
+                patches=[
+                    FilePatch(
+                        path="package.json",
+                        operation="create",
+                        content='{"private": true, "scripts": {"dev": "vite"}}\n',
+                    )
+                ],
+            ).model_dump(),
+        },
+    )
+    task_graph = TaskGraph(
+        goal="Create node project scaffold",
+        tasks=[
+            PlannedTask(
+                id="node-manifest",
+                title="Create package manifest",
+                description="Create the root dependency manifest for the app.",
+                role="scaffold",
+                target_files=["package.json"],
+                required_artifacts=["package.json"],
+            ),
+        ],
+    )
+
+    results = runner._run_implementation_tasks(record, task_graph)
+
+    assert results[0].summary == "Created root package manifest."
+    assert (tmp_path / "package.json").exists()
+    assert "last_recoverable_error" not in record.runtime_state
+    assert "scaffold" in record.outputs
+    assert "scaffold_model_selection" in record.outputs
+    assert "implementer" not in record.outputs
+
+
 def test_update_missing_test_file_recovery_returns_to_test_writer_with_create_hint(
     tmp_path: Path,
 ) -> None:

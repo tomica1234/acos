@@ -90,6 +90,54 @@ def test_prd_runtime_unknown_hints_are_preserved_as_extra(tmp_path) -> None:
     assert metadata["runtime"]["http_probe_path"] == "/health"
 
 
+def test_prd_runtime_normalizes_string_commands() -> None:
+    prd = PRD.model_validate(
+        {
+            "title": "English Vocabulary App",
+            "problem_statement": "Build a vocabulary learning app.",
+            "runtime": {
+                "prepare_commands": [
+                    "npm install",
+                    ["python", "-m", "pytest"],
+                    "",
+                ],
+                "start_command": "npm run dev -- --host 127.0.0.1 --port {port}",
+            },
+        }
+    )
+
+    assert prd.runtime is not None
+    assert prd.runtime.prepare_commands == [
+        ["npm", "install"],
+        ["python", "-m", "pytest"],
+    ]
+    assert prd.runtime.start_command == [
+        "npm",
+        "run",
+        "dev",
+        "--",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "{port}",
+    ]
+
+
+def test_prd_runtime_normalizes_single_prepare_command_string() -> None:
+    prd = PRD.model_validate(
+        {
+            "title": "API",
+            "problem_statement": "Build an API.",
+            "runtime": {
+                "prepare_commands": "python -m pytest",
+            },
+        }
+    )
+
+    assert prd.runtime is not None
+    assert prd.runtime.prepare_commands == [["python", "-m", "pytest"]]
+
+
 def test_synthesize_job_metadata_filters_invalid_required_artifacts(tmp_path) -> None:
     workspace = tmp_path / "workspace"
     workspace.mkdir()

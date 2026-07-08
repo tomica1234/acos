@@ -20,6 +20,7 @@ Return a PRD JSON object with these top-level keys:
 - incremental_milestones: ordered milestones from core to polished result
 - acceptance_tests: observable checks/tests that prove the parts work; include at
   least one acceptance test for every small_parts item
+  and reuse the distinctive nouns/verbs from the small_parts item it verifies
 - success_criteria
 - open_questions
 - definition_of_done
@@ -28,6 +29,8 @@ Return a PRD JSON object with these top-level keys:
 - runtime: optional object with only these keys:
   prepare_commands, start_command, http_probe_path, http_checks,
   prepare_timeout_seconds, startup_timeout_seconds, extra
+- runtime.prepare_commands must be a list of argv arrays, e.g.
+  [["npm", "install"], ["npm", "test"]]; runtime.start_command must be one argv array
 - put runtime technology notes such as python/node versions under runtime.extra
 
 Prefer explicit, testable requirements over broad feature labels.

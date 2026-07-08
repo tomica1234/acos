@@ -2390,6 +2390,138 @@ def test_task_graph_validation_requires_test_writer_for_acceptance_tests() -> No
     } in validation["errors"]
 
 
+def test_task_graph_validation_allows_multiple_acceptance_tests_per_task() -> None:
+    prd = PRD(
+        title="English Vocab App",
+        problem_statement="Teachers need word set management.",
+        smallest_working_core=["Manage word sets"],
+        small_parts=["Implement backend API endpoints for WordSet CRUD"],
+        incremental_milestones=["WordSet CRUD works"],
+        acceptance_tests=[
+            "GET /api/word-sets returns the WordSet list",
+            "POST /api/word-sets creates a WordSet",
+            "DELETE /api/word-sets/:id removes a WordSet",
+        ],
+        definition_of_done=["All tests pass"],
+        required_artifacts=["src/server/index.ts", "tests/backend.test.ts"],
+    )
+    task_graph = TaskGraph(
+        goal="Build WordSet CRUD",
+        tasks=[
+            PlannedTask(
+                id="wordset-crud-api",
+                title="Implement WordSet CRUD API",
+                description="Implement GET, POST, and DELETE endpoints for WordSet CRUD.",
+                role="implementer",
+                acceptance_criteria=[
+                    "GET /api/word-sets returns the WordSet list",
+                    "POST /api/word-sets creates a WordSet",
+                    "DELETE /api/word-sets/:id removes a WordSet",
+                ],
+                target_files=["src/server/index.ts"],
+                required_artifacts=["src/server/index.ts"],
+            ),
+            PlannedTask(
+                id="backend-tests",
+                title="Test WordSet CRUD API",
+                description="Test GET, POST, and DELETE WordSet CRUD endpoints.",
+                role="test_writer",
+                depends_on=["wordset-crud-api"],
+                acceptance_criteria=["WordSet CRUD backend tests pass"],
+                target_files=["tests/backend.test.ts"],
+                required_artifacts=["tests/backend.test.ts"],
+            ),
+        ],
+    )
+
+    validation = JobRunner._build_task_graph_validation(
+        task_graph,
+        prd=prd,
+        require_acceptance_criteria=True,
+        require_task_artifacts=True,
+    )
+
+    assert validation["valid"] is True
+    assert validation["uncovered_acceptance_tests"] == []
+    assert [
+        item["task_id"] for item in validation["acceptance_test_coverage"]
+    ] == [
+        "wordset-crud-api",
+        "wordset-crud-api",
+        "wordset-crud-api",
+    ]
+
+
+def test_semantic_task_coverage_chooses_anchor_satisfying_candidate() -> None:
+    tasks = [
+        PlannedTask(
+            id="generic-wordset-get",
+            title="Implement backend GET WordSet endpoint",
+            description="Return WordSet data from the backend API endpoint.",
+            role="implementer",
+            acceptance_criteria=["GET /api/word-sets returns WordSet data."],
+            target_files=["src/server/index.ts"],
+            required_artifacts=["src/server/index.ts"],
+        ),
+        PlannedTask(
+            id="wordset-crud-api",
+            title="Implement WordSet CRUD API",
+            description="Support the WordSet CRUD behavior.",
+            role="implementer",
+            acceptance_criteria=["WordSet CRUD works for GET requests."],
+            target_files=["src/server/wordsets.ts"],
+            required_artifacts=["src/server/wordsets.ts"],
+        ),
+    ]
+
+    coverage = JobRunner._semantic_task_coverage(
+        [
+            "Backend API endpoints for WordSet CRUD are implemented; "
+            "GET /api/word-sets returns the list of word sets"
+        ],
+        tasks,
+        item_key="acceptance_test",
+        index_key="acceptance_test_index",
+        allow_reuse=True,
+    )
+
+    assert coverage == [
+        {
+            "acceptance_test_index": 1,
+            "acceptance_test": (
+                "Backend API endpoints for WordSet CRUD are implemented; "
+                "GET /api/word-sets returns the list of word sets"
+            ),
+            "task_id": "wordset-crud-api",
+            "covered": True,
+        }
+    ]
+
+
+def test_semantic_item_coverage_chooses_anchor_satisfying_candidate() -> None:
+    coverage = JobRunner._semantic_item_coverage(
+        ["Implement backend API endpoints for WordSet CRUD"],
+        [
+            "Backend API endpoint returns WordSet data",
+            "WordSet CRUD API works",
+        ],
+        item_key="small_part",
+        index_key="small_part_index",
+        candidate_key="acceptance_test",
+        candidate_index_key="acceptance_test_index",
+    )
+
+    assert coverage == [
+        {
+            "small_part_index": 1,
+            "small_part": "Implement backend API endpoints for WordSet CRUD",
+            "acceptance_test_index": 2,
+            "acceptance_test": "WordSet CRUD API works",
+            "covered": True,
+        }
+    ]
+
+
 def test_task_graph_validation_rejects_invalid_artifact_paths() -> None:
     task_graph = TaskGraph(
         goal="Build feature",
@@ -2465,6 +2597,46 @@ def test_task_graph_validation_requires_prd_artifacts_assigned_to_tasks() -> Non
     assert "unassigned_required_artifacts" in {
         item["type"] for item in validation["errors"]
     }
+
+
+def test_missing_prd_implementation_artifact_is_appended_to_matching_task() -> None:
+    tasks = [
+        PlannedTask(
+            id="backend-api",
+            title="Implement backend API",
+            description="Build backend server endpoints.",
+            role="implementer",
+            acceptance_criteria=["Backend API responds."],
+            target_files=["src/server/index.ts"],
+            required_artifacts=["src/server/index.ts"],
+        ),
+        PlannedTask(
+            id="frontend-ui",
+            title="Build frontend React UI",
+            description="Render the client UI.",
+            role="implementer",
+            acceptance_criteria=["Frontend renders."],
+            target_files=["src/client/App.tsx"],
+            required_artifacts=["src/client/App.tsx"],
+        ),
+    ]
+
+    updated_tasks, assignments = JobRunner._assign_missing_prd_implementation_artifacts(
+        tasks,
+        ["src/client/App.tsx", "src/client/main.tsx"],
+    )
+
+    assert assignments == [{"task_id": "frontend-ui", "path": "src/client/main.tsx"}]
+    by_id = {task.id: task for task in updated_tasks}
+    assert by_id["backend-api"].target_files == ["src/server/index.ts"]
+    assert by_id["frontend-ui"].target_files == [
+        "src/client/App.tsx",
+        "src/client/main.tsx",
+    ]
+    assert by_id["frontend-ui"].required_artifacts == [
+        "src/client/App.tsx",
+        "src/client/main.tsx",
+    ]
 
 
 def test_task_graph_validation_rejects_invalid_prd_required_artifacts() -> None:
@@ -6142,6 +6314,51 @@ def test_prd_quality_requires_required_artifacts() -> None:
     assert report["required_artifact_count"] == 0
     assert report["test_required_artifact_count"] == 0
     assert report["test_required_artifacts"] == []
+
+
+def test_prd_quality_repair_logs_name_uncovered_small_parts() -> None:
+    prd = PRD(
+        title="English Vocab App",
+        problem_statement="Students need vocabulary practice.",
+        acceptance_tests=["GET /api/health returns 200"],
+    )
+    report = {
+        "missing": ["acceptance_tests_cover_small_parts"],
+        "warnings": ["open_questions_present"],
+        "uncovered_acceptance_small_parts": [
+            {
+                "small_part_index": 2,
+                "small_part": "Define shared TypeScript types for WordSet and UserProgress",
+            },
+            {
+                "small_part_index": 4,
+                "small_part": "Implement backend API endpoints for WordSet CRUD",
+            },
+        ],
+    }
+
+    logs = JobRunner._prd_quality_repair_logs(prd, report)
+
+    assert logs[:3] == [
+        "The previous PRD was not specific enough for autonomous execution.",
+        "Missing fields: acceptance_tests_cover_small_parts",
+        "Warnings: open_questions_present",
+    ]
+    assert any(
+        "2: Define shared TypeScript types for WordSet and UserProgress" in item
+        for item in logs
+    )
+    assert any(
+        "4: Implement backend API endpoints for WordSet CRUD" in item
+        for item in logs
+    )
+    assert any("Current acceptance_tests: GET /api/health returns 200" == item for item in logs)
+
+
+def test_semantic_tokens_split_camel_case_domain_terms() -> None:
+    tokens = JobRunner._semantic_tokens("WordSet QuizQuestion UserProgress")
+
+    assert {"word", "set", "quiz", "question", "user", "progress"}.issubset(tokens)
 
 
 def test_prd_quality_accepts_semantically_covered_acceptance_tests() -> None:

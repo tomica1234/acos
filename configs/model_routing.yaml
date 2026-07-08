@@ -37,6 +37,7 @@ routing:
   capability_requirements:
     roles_requiring_tools:
       - implementer
+      - scaffold
       - test_writer
       - fixer
       - release_manager
@@ -45,6 +46,7 @@ routing:
       - pm
       - architect
       - planner
+      - scaffold
       - implementer
       - test_writer
       - reviewer

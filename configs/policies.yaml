@@ -39,6 +39,12 @@ tools:
       - repo_server.repo_tree
       - repo_server.search_text
 
+    scaffold:
+      - repo_server.read_file
+      - repo_server.search_text
+      - repo_server.apply_patch
+      - git_server.diff
+
     implementer:
       - repo_server.read_file
       - repo_server.search_text
