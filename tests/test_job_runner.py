@@ -3963,6 +3963,14 @@ def test_job_runner_blocks_invalid_task_graph_before_implementation(tmp_path: Pa
     assert_recoverable_error(record, "invalid_task_graph")
     assert record.outputs["task_graph_validation"]["valid"] is False
     assert record.outputs["task_graph_validation"]["errors"][0]["type"] == "unknown_dependencies"
+    constraints = record.runtime_state["recovery_plan"]["constraints"]
+    assert constraints["task_graph_validation_errors"] == ["unknown_dependencies"]
+    assert constraints["unknown_dependencies"] == [
+        {"task_id": "views", "dependency": "models"}
+    ]
+    assert record.spec.metadata["constraints"]["task_graph_validation_errors"] == [
+        "unknown_dependencies"
+    ]
     assert not (workspace / "feature.py").exists()
 
 

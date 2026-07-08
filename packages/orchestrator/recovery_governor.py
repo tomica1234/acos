@@ -401,6 +401,7 @@ class RecoveryGovernor:
                 },
             )
         if trigger in {"invalid_task_graph", "unmet_task_dependencies"}:
+            context_constraints = self._task_graph_context_constraints(runtime_state)
             return RecoveryPlan(
                 trigger=trigger,
                 strategy="REPLAN_TASK",
@@ -409,7 +410,10 @@ class RecoveryGovernor:
                 steps=["REPLAN_TASK", "SPLIT_TASK"],
                 reason=last_error,
                 checkpoint_policy="invalidate_planning",
-                constraints={"recovery_mode": "task_graph_repair"},
+                constraints={
+                    "recovery_mode": "task_graph_repair",
+                    **context_constraints,
+                },
             )
         if trigger == "prd_quality_gate_failed":
             context_constraints = self._prd_quality_context_constraints(runtime_state)
@@ -638,6 +642,45 @@ class RecoveryGovernor:
         uncovered = runtime_state.get("uncovered_acceptance_small_parts")
         if isinstance(uncovered, list) and uncovered:
             constraints["uncovered_acceptance_small_parts"] = uncovered
+        return constraints
+
+    @staticmethod
+    def _non_empty_list(value: Any) -> list[Any]:
+        if not isinstance(value, list):
+            return []
+        return [item for item in value if item]
+
+    @classmethod
+    def _task_graph_context_constraints(cls, runtime_state: dict[str, Any]) -> dict[str, Any]:
+        constraints: dict[str, Any] = {}
+        errors = cls._clean_string_list(
+            runtime_state.get("task_graph_validation_errors")
+        )
+        if errors:
+            constraints["task_graph_validation_errors"] = errors
+        for key in (
+            "uncovered_small_parts",
+            "uncovered_acceptance_tests",
+            "unassigned_required_artifacts",
+            "invalid_prd_required_artifacts",
+            "unowned_required_artifacts",
+            "role_mismatched_target_files",
+            "role_mismatched_required_artifacts",
+            "required_artifacts_missing_target_files",
+            "target_files_missing_required_artifacts",
+            "duplicate_task_ids",
+            "unknown_dependencies",
+            "dependency_cycle_task_ids",
+            "prd_test_required_artifacts",
+            "executable_tasks_missing_required_artifacts",
+            "implementation_tasks_missing_target_files",
+            "test_writer_missing_implementation_dependencies",
+            "executor_order_dependency_violations",
+            "invalid_task_artifacts",
+        ):
+            value = cls._non_empty_list(runtime_state.get(key))
+            if value:
+                constraints[key] = value
         return constraints
 
     @staticmethod

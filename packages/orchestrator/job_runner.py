@@ -144,6 +144,9 @@ class JobRunner:
         "role_mismatched_required_artifacts",
         "required_artifacts_missing_target_files",
         "target_files_missing_required_artifacts",
+        "duplicate_task_ids",
+        "unknown_dependencies",
+        "dependency_cycle_task_ids",
         "prd_test_required_artifacts",
         "executable_tasks_missing_required_artifacts",
         "implementation_tasks_missing_target_files",
@@ -3199,9 +3202,49 @@ class JobRunner:
                 self.store.update(record)
                 return task_graph
 
-        self._recover_record(record, error="invalid_task_graph")
+        self._recover_record(
+            record,
+            error="invalid_task_graph",
+            runtime_state=self._task_graph_validation_recovery_state(
+                record,
+                validation,
+            ),
+        )
         self.store.update(record)
         return None
+
+    @classmethod
+    def _task_graph_validation_recovery_state(
+        cls,
+        record: JobRecord,
+        validation: dict[str, Any],
+    ) -> dict[str, Any]:
+        runtime_state = dict(record.runtime_state)
+        for key in (
+            "task_graph_validation_errors",
+            "uncovered_small_parts",
+            "uncovered_acceptance_tests",
+            *cls.TASK_GRAPH_VALIDATION_DETAIL_KEYS,
+        ):
+            runtime_state.pop(key, None)
+        error_types = [
+            str(item.get("type"))
+            for item in validation.get("errors", [])
+            if isinstance(item, dict) and str(item.get("type", "")).strip()
+        ]
+        if error_types:
+            runtime_state["task_graph_validation_errors"] = list(
+                dict.fromkeys(error_types)
+            )
+        for key in (
+            "uncovered_small_parts",
+            "uncovered_acceptance_tests",
+            *cls.TASK_GRAPH_VALIDATION_DETAIL_KEYS,
+        ):
+            value = validation.get(key)
+            if isinstance(value, list) and value:
+                runtime_state[key] = value
+        return runtime_state
 
     def _record_task_graph_validation_attempt(
         self,
@@ -3257,7 +3300,14 @@ class JobRunner:
         if validation["valid"]:
             self.store.update(record)
             return True
-        self._recover_record(record, error="invalid_task_graph")
+        self._recover_record(
+            record,
+            error="invalid_task_graph",
+            runtime_state=self._task_graph_validation_recovery_state(
+                record,
+                validation,
+            ),
+        )
         self.store.update(record)
         return False
 
@@ -3712,6 +3762,9 @@ class JobRunner:
             "target_files_missing_required_artifacts": (
                 target_files_missing_required_artifacts
             ),
+            "duplicate_task_ids": duplicate_ids,
+            "unknown_dependencies": unknown_dependencies,
+            "dependency_cycle_task_ids": cycle,
             "prd_test_required_artifacts": prd_test_required_artifacts,
             "missing_test_writer_tasks": missing_test_writer_tasks,
             "project_setup_scaffold_covers_test_artifacts": (
