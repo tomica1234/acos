@@ -135,6 +135,7 @@ class JobRunner:
         "session",
         "upload",
     }
+    CRUD_OPERATION_TOKENS = {"create", "read", "update", "delete"}
 
     def __init__(
         self,
@@ -3759,7 +3760,7 @@ class JobRunner:
                 )
                 if (
                     score >= required_score
-                    and anchor_tokens.issubset(candidate_tokens)
+                    and cls._semantic_anchor_satisfied(anchor_tokens, candidate_tokens)
                     and score > best_score
                 ):
                     best_score = score
@@ -3816,7 +3817,7 @@ class JobRunner:
                 )
                 if (
                     score >= required_score
-                    and anchor_tokens.issubset(task_tokens)
+                    and cls._semantic_anchor_satisfied(anchor_tokens, task_tokens)
                     and score > best_score
                 ):
                     best_score = score
@@ -3847,6 +3848,23 @@ class JobRunner:
         return item_tokens & cls.SEMANTIC_ANCHOR_TOKENS
 
     @classmethod
+    def _semantic_anchor_satisfied(
+        cls,
+        anchor_tokens: set[str],
+        candidate_tokens: set[str],
+    ) -> bool:
+        required_tokens = set(anchor_tokens)
+        if "crud" in required_tokens:
+            required_tokens.remove("crud")
+            has_crud_coverage = (
+                "crud" in candidate_tokens
+                or cls.CRUD_OPERATION_TOKENS.issubset(candidate_tokens)
+            )
+            if not has_crud_coverage:
+                return False
+        return required_tokens.issubset(candidate_tokens)
+
+    @classmethod
     def _semantic_tokens(cls, text: str) -> set[str]:
         stopwords = {
             "a",
@@ -3866,6 +3884,7 @@ class JobRunner:
             "create",
             "created",
             "creates",
+            "creating",
             "do",
             "does",
             "feature",
@@ -3911,28 +3930,36 @@ class JobRunner:
             "signin": "auth",
             "signup": "auth",
             "registration": "register",
-            "read": "crud",
-            "reads": "crud",
-            "list": "crud",
-            "lists": "crud",
-            "listed": "crud",
-            "listing": "crud",
-            "update": "crud",
-            "updates": "crud",
-            "updated": "crud",
-            "updating": "crud",
-            "edit": "crud",
-            "edits": "crud",
-            "edited": "crud",
-            "editing": "crud",
-            "delete": "crud",
-            "deletes": "crud",
-            "deleted": "crud",
-            "deleting": "crud",
-            "remove": "crud",
-            "removes": "crud",
-            "removed": "crud",
-            "removing": "crud",
+            "add": "create",
+            "added": "create",
+            "adding": "create",
+            "adds": "create",
+            "create": "create",
+            "created": "create",
+            "creates": "create",
+            "creating": "create",
+            "read": "read",
+            "reads": "read",
+            "list": "read",
+            "lists": "read",
+            "listed": "read",
+            "listing": "read",
+            "update": "update",
+            "updates": "update",
+            "updated": "update",
+            "updating": "update",
+            "edit": "update",
+            "edits": "update",
+            "edited": "update",
+            "editing": "update",
+            "delete": "delete",
+            "deletes": "delete",
+            "deleted": "delete",
+            "deleting": "delete",
+            "remove": "delete",
+            "removes": "delete",
+            "removed": "delete",
+            "removing": "delete",
             "student": "user",
             "students": "user",
             "teacher": "role",
@@ -3942,6 +3969,7 @@ class JobRunner:
         expanded = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", " ", text)
         raw_tokens = re.findall(r"[a-z0-9_]+", expanded.lower())
         tokens: set[str] = set()
+        raw_pieces: set[str] = set()
         for token in raw_tokens:
             pieces = [token]
             if "_" in token:
@@ -3949,6 +3977,7 @@ class JobRunner:
             if "-" in token:
                 pieces.extend(part for part in token.split("-") if part)
             for piece in pieces:
+                raw_pieces.add(piece)
                 if len(piece) < 2 or piece.isdigit() or piece in stopwords:
                     continue
                 normalized = aliases.get(piece, piece)
@@ -3959,6 +3988,41 @@ class JobRunner:
                 ):
                     normalized = normalized[:-1]
                 tokens.add(normalized)
+        crud_operation_aliases = {
+            "create": {
+                "add",
+                "added",
+                "adding",
+                "adds",
+                "create",
+                "created",
+                "creates",
+                "creating",
+            },
+            "read": {"read", "reads", "list", "lists", "listed", "listing"},
+            "update": {
+                "update",
+                "updates",
+                "updated",
+                "updating",
+                "edit",
+                "edits",
+                "edited",
+                "editing",
+            },
+            "delete": {
+                "delete",
+                "deletes",
+                "deleted",
+                "deleting",
+                "remove",
+                "removes",
+                "removed",
+                "removing",
+            },
+        }
+        if all(raw_pieces & aliases for aliases in crud_operation_aliases.values()):
+            tokens.update(cls.CRUD_OPERATION_TOKENS)
         return tokens
 
     @staticmethod

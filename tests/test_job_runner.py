@@ -6478,6 +6478,64 @@ def test_prd_quality_accepts_semantically_covered_acceptance_tests() -> None:
     ]
 
 
+def test_prd_quality_does_not_treat_word_list_as_crud_acceptance() -> None:
+    prd = PRD(
+        title="English Vocab App",
+        problem_statement="Students need vocabulary practice.",
+        smallest_working_core=["Serve a vocabulary app shell"],
+        small_parts=["Backend word set CRUD API"],
+        incremental_milestones=["Word set API works"],
+        acceptance_tests=["React word list component renders vocabulary words"],
+        definition_of_done=["All tests pass"],
+        required_artifacts=[
+            "backend/main.py",
+            "frontend/src/App.tsx",
+            "tests/test_project_setup.py",
+        ],
+    )
+
+    report = JobRunner._build_prd_quality_report(prd)
+
+    assert report["passed"] is False
+    assert report["missing"] == ["acceptance_tests_semantically_cover_small_parts"]
+    assert report["acceptance_tests_semantically_cover_small_parts"] is False
+    assert report["uncovered_acceptance_small_parts"] == [
+        {
+            "small_part_index": 1,
+            "small_part": "Backend word set CRUD API",
+            "acceptance_test_index": None,
+            "acceptance_test": None,
+            "covered": False,
+        }
+    ]
+
+
+def test_prd_quality_accepts_crud_operations_without_crud_acronym() -> None:
+    prd = PRD(
+        title="English Vocab App",
+        problem_statement="Students need vocabulary practice.",
+        smallest_working_core=["Serve a vocabulary app shell"],
+        small_parts=["Backend word set CRUD API"],
+        incremental_milestones=["Word set API works"],
+        acceptance_tests=[
+            "Backend word set API supports create, read, update, and delete operations"
+        ],
+        definition_of_done=["All tests pass"],
+        required_artifacts=[
+            "backend/main.py",
+            "frontend/src/App.tsx",
+            "tests/test_project_setup.py",
+        ],
+    )
+
+    report = JobRunner._build_prd_quality_report(prd)
+
+    assert report["passed"] is True
+    assert report["missing"] == []
+    assert report["acceptance_tests_semantically_cover_small_parts"] is True
+    assert report["uncovered_acceptance_small_parts"] == []
+
+
 def test_prd_quality_requires_anchor_token_overlap() -> None:
     prd = PRD(
         title="Auth App",
