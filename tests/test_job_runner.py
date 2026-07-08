@@ -2243,6 +2243,75 @@ def test_task_graph_validation_allows_test_writer_dependency_on_scaffold() -> No
     assert validation["test_writer_missing_implementation_dependencies"] == []
 
 
+def test_task_graph_validation_rejects_executor_unsatisfiable_dependency_order() -> None:
+    task_graph = TaskGraph(
+        goal="Build feature incrementally",
+        tasks=[
+            PlannedTask(
+                id="core",
+                title="Build core",
+                description="Create the core feature.",
+                role="implementer",
+                acceptance_criteria=["Core exists"],
+                target_files=["feature.py"],
+                required_artifacts=["feature.py"],
+            ),
+            PlannedTask(
+                id="extra",
+                title="Build extra",
+                description="Create extra behavior after later tests pass.",
+                role="implementer",
+                depends_on=["later-tests"],
+                acceptance_criteria=["Extra exists"],
+                target_files=["extra.py"],
+                required_artifacts=["extra.py"],
+            ),
+            PlannedTask(
+                id="later",
+                title="Build later",
+                description="Create later behavior.",
+                role="implementer",
+                acceptance_criteria=["Later exists"],
+                target_files=["later.py"],
+                required_artifacts=["later.py"],
+            ),
+            PlannedTask(
+                id="later-tests",
+                title="Test later",
+                description="Test later behavior.",
+                role="test_writer",
+                depends_on=["later"],
+                acceptance_criteria=["Later has tests"],
+                target_files=["tests/test_later.py"],
+                required_artifacts=["tests/test_later.py"],
+            ),
+        ],
+    )
+
+    validation = JobRunner._build_task_graph_validation(
+        task_graph,
+        require_acceptance_criteria=True,
+        require_task_artifacts=True,
+    )
+
+    assert validation["valid"] is False
+    assert validation["executor_order_dependency_violations"] == [
+        {
+            "task_id": "extra",
+            "role": "implementer",
+            "executor_phase": "implementation",
+            "unmet_dependencies": ["later-tests"],
+            "dependency_roles": [
+                {"task_id": "later-tests", "role": "test_writer"}
+            ],
+        }
+    ]
+    assert {
+        "type": "executor_order_dependency_violations",
+        "items": validation["executor_order_dependency_violations"],
+    } in validation["errors"]
+
+
 def test_task_graph_validation_requires_test_writer_for_acceptance_tests() -> None:
     prd = PRD(
         title="Feature",
@@ -3519,6 +3588,128 @@ def test_job_runner_blocks_test_writer_without_implementation_dependency(
     ]
     assert not (workspace / "feature.py").exists()
     assert not (workspace / "tests" / "test_feature.py").exists()
+
+
+def test_job_runner_blocks_executor_unsatisfiable_dependency_order_before_implementation(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    registry = ModelRegistry.from_paths(
+        provider_path=config_dir() / "model_providers.yaml",
+        agents_path=config_dir() / "agents.yaml",
+        routing_path=config_dir() / "model_routing.yaml",
+    )
+    attach_mock_adapter(
+        registry,
+        {
+            "pm": PRD(title="Feature", problem_statement="Need feature").model_dump(),
+            "architect": ArchitecturePlan(summary="Simple architecture").model_dump(),
+            "planner": TaskGraph(
+                goal="Build feature incrementally",
+                tasks=[
+                    PlannedTask(
+                        id="core",
+                        title="Build core",
+                        description="Create the core feature.",
+                        role="implementer",
+                        acceptance_criteria=["Core exists"],
+                        target_files=["feature.py"],
+                        required_artifacts=["feature.py"],
+                    ),
+                    PlannedTask(
+                        id="extra",
+                        title="Build extra",
+                        description="Create extra behavior after later tests pass.",
+                        role="implementer",
+                        depends_on=["later-tests"],
+                        acceptance_criteria=["Extra exists"],
+                        target_files=["extra.py"],
+                        required_artifacts=["extra.py"],
+                    ),
+                    PlannedTask(
+                        id="later",
+                        title="Build later",
+                        description="Create later behavior.",
+                        role="implementer",
+                        acceptance_criteria=["Later exists"],
+                        target_files=["later.py"],
+                        required_artifacts=["later.py"],
+                    ),
+                    PlannedTask(
+                        id="later-tests",
+                        title="Test later",
+                        description="Test later behavior.",
+                        role="test_writer",
+                        depends_on=["later"],
+                        acceptance_criteria=["Later has tests"],
+                        target_files=["tests/test_later.py"],
+                        required_artifacts=["tests/test_later.py"],
+                    ),
+                ],
+            ).model_dump(),
+            "implementer": ImplementationResult(
+                status=ImplementationStatus.IMPLEMENTED,
+                summary="Should not run",
+                patches=[
+                    {
+                        "path": "feature.py",
+                        "content": "SHOULD_NOT_EXIST = True\n",
+                        "operation": "create",
+                    }
+                ],
+            ).model_dump(),
+            "test_writer": TestWriterOutput(
+                summary="Should not run",
+                patches=[
+                    {
+                        "path": "tests/test_later.py",
+                        "content": "def test_placeholder() -> None:\n    assert True\n",
+                        "operation": "create",
+                    }
+                ],
+            ).model_dump(),
+        },
+    )
+    policy = PolicyEngine.from_path(config_dir() / "policies.yaml")
+    environment = FakeMCPEnvironment(
+        workspace_root=workspace,
+        memory_db_path=workspace / ".memory.sqlite3",
+    )
+    runner = JobRunner(registry=registry, policy=policy, router=environment.build_router())
+    spec = JobSpec(
+        request_text="Create feature with tests",
+        repo_path=str(workspace),
+        target_branch="acos/executor-order-dependency",
+        metadata={
+            "constraints": {
+                "require_task_artifacts": True,
+                "skip_review": True,
+                "skip_release": True,
+                "task_graph_validation_refinement_attempts": 0,
+            }
+        },
+    )
+
+    record = runner.run_job(spec)
+
+    assert_recovery_plan(record, status=JobStatus.REPLANNING, strategy="REPLAN_TASK")
+    assert_recoverable_error(record, "invalid_task_graph")
+    validation = record.outputs["task_graph_validation"]
+    assert validation["valid"] is False
+    assert validation["executor_order_dependency_violations"] == [
+        {
+            "task_id": "extra",
+            "role": "implementer",
+            "executor_phase": "implementation",
+            "unmet_dependencies": ["later-tests"],
+            "dependency_roles": [
+                {"task_id": "later-tests", "role": "test_writer"}
+            ],
+        }
+    ]
+    assert not (workspace / "feature.py").exists()
+    assert not (workspace / "tests" / "test_later.py").exists()
 
 
 def test_job_runner_repairs_invalid_task_graph_before_implementation(tmp_path: Path) -> None:

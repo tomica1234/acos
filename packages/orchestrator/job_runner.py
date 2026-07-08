@@ -2749,6 +2749,7 @@ class JobRunner:
                     "repo source target_files on implementer/scaffold tasks, "
                     "test target_files on test_writer tasks, "
                     "every task required_artifact also listed in that same task's target_files, "
+                    "dependencies that are satisfiable in the autonomous executor order, "
                     "and PRD required_artifacts assigned to their owning role target_files, "
                     "and only autonomous-executable task roles."
                 ),
@@ -2990,6 +2991,12 @@ class JobRunner:
             for dependency in task.depends_on
             if dependency not in id_set
         ]
+        cycle = JobRunner._find_task_graph_cycle(task_graph)
+        executor_order_dependency_violations = (
+            JobRunner._executor_order_dependency_violations(task_graph)
+            if not cycle
+            else []
+        )
         implementation_task_id_set = set(implementation_task_ids)
         test_writer_missing_implementation_dependencies = [
             {
@@ -3029,7 +3036,6 @@ class JobRunner:
             and not test_writer_task_ids
             and not project_setup_scaffold_covers_test_artifacts
         )
-        cycle = JobRunner._find_task_graph_cycle(task_graph)
         errors: list[dict[str, Any]] = []
         if not task_graph.tasks:
             errors.append({"type": "empty_task_graph"})
@@ -3110,6 +3116,13 @@ class JobRunner:
             errors.append({"type": "duplicate_task_ids", "task_ids": duplicate_ids})
         if unknown_dependencies:
             errors.append({"type": "unknown_dependencies", "items": unknown_dependencies})
+        if executor_order_dependency_violations:
+            errors.append(
+                {
+                    "type": "executor_order_dependency_violations",
+                    "items": executor_order_dependency_violations,
+                }
+            )
         if cycle:
             errors.append({"type": "dependency_cycle", "task_ids": cycle})
         tasks_missing_acceptance_criteria = [
@@ -3282,6 +3295,9 @@ class JobRunner:
             "test_writer_missing_implementation_dependencies": (
                 test_writer_missing_implementation_dependencies
             ),
+            "executor_order_dependency_violations": (
+                executor_order_dependency_violations
+            ),
             "unsupported_task_role_count": len(unsupported_task_roles),
             "small_part_count": len(small_parts),
             "implementation_small_part_count": len(implementation_small_parts),
@@ -3293,6 +3309,100 @@ class JobRunner:
             "uncovered_acceptance_tests": uncovered_acceptance_tests,
             "errors": errors,
         }
+
+    @staticmethod
+    def _executor_order_dependency_violations(
+        task_graph: TaskGraph,
+    ) -> list[dict[str, Any]]:
+        task_by_id = {task.id: task for task in task_graph.tasks}
+        implementation_tasks = JobRunner._order_tasks_by_dependencies(
+            [
+                task
+                for task in task_graph.tasks
+                if task.role in JobRunner.IMPLEMENTATION_TASK_ROLES
+            ]
+        )
+        implementation_tasks = [
+            task
+            for _index, task in sorted(
+                enumerate(implementation_tasks),
+                key=lambda item: (
+                    0 if JobRunner._is_project_setup_task(item[1]) else 1,
+                    item[0],
+                ),
+            )
+        ]
+        pending_test_tasks = JobRunner._order_tasks_by_dependencies(
+            [
+                task
+                for task in task_graph.tasks
+                if task.role in JobRunner.TEST_TASK_ROLES
+            ]
+        )
+        completed_task_ids: set[str] = set()
+        violations: list[dict[str, Any]] = []
+
+        def known_unmet_dependencies(task: PlannedTask) -> list[str]:
+            return [
+                dependency
+                for dependency in task.depends_on
+                if dependency in task_by_id and dependency not in completed_task_ids
+            ]
+
+        def append_violation(task: PlannedTask, phase: str, unmet: list[str]) -> None:
+            violations.append(
+                {
+                    "task_id": task.id,
+                    "role": task.role,
+                    "executor_phase": phase,
+                    "unmet_dependencies": unmet,
+                    "dependency_roles": [
+                        {
+                            "task_id": dependency,
+                            "role": task_by_id[dependency].role,
+                        }
+                        for dependency in unmet
+                    ],
+                }
+            )
+
+        def complete_ready_tests() -> None:
+            while True:
+                ready_tasks: list[PlannedTask] = []
+                for task in list(pending_test_tasks):
+                    local_dependencies = [
+                        dependency
+                        for dependency in task.depends_on
+                        if any(
+                            dependency == pending_task.id
+                            for pending_task in pending_test_tasks
+                        )
+                        or dependency not in completed_task_ids
+                    ]
+                    if not local_dependencies or all(
+                        dependency in completed_task_ids
+                        for dependency in task.depends_on
+                    ):
+                        ready_tasks.append(task)
+                        pending_test_tasks.remove(task)
+                if not ready_tasks:
+                    return
+                completed_task_ids.update(task.id for task in ready_tasks)
+
+        for task in implementation_tasks:
+            unmet = known_unmet_dependencies(task)
+            if unmet:
+                append_violation(task, "implementation", unmet)
+                continue
+            completed_task_ids.add(task.id)
+            complete_ready_tests()
+
+        for task in pending_test_tasks:
+            unmet = known_unmet_dependencies(task)
+            if unmet:
+                append_violation(task, "test_writer", unmet)
+
+        return violations
 
     @staticmethod
     def _artifact_owner_roles(path: str) -> set[str]:
