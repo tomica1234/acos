@@ -23,6 +23,8 @@ from packages.schemas.models import (
     FixStatus,
     ImplementationStatus,
     JobStatus,
+    ModelCallRecord,
+    ModelCallStatus,
     ReviewDecision,
     Severity,
     TestWriterStatus as WriterStatus,
@@ -59,6 +61,75 @@ def assert_recoverable_error(
     assert isinstance(event, dict)
     assert event.get("error") == error
     return error
+
+
+def test_run_structured_role_persists_active_status_before_model_call(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    registry = ModelRegistry.from_paths(
+        provider_path=config_dir() / "model_providers.yaml",
+        agents_path=config_dir() / "agents.yaml",
+        routing_path=config_dir() / "model_routing.yaml",
+    )
+    policy = PolicyEngine.from_path(config_dir() / "policies.yaml")
+    store = InMemoryJobStore()
+    environment = FakeMCPEnvironment(
+        workspace_root=workspace,
+        memory_db_path=workspace / ".memory.sqlite3",
+    )
+    runner = JobRunner(
+        registry=registry,
+        policy=policy,
+        router=environment.build_router(),
+        store=store,
+    )
+    record = store.create(
+        JobSpec(
+            request_text="Build a feature.",
+            repo_path=str(workspace),
+            target_branch="acos/active-role-status",
+        )
+    )
+
+    def fake_run(**kwargs):
+        persisted = store.get(record.job_id)
+        assert persisted.status == JobStatus.ANALYZING
+        assert persisted.runtime_state["active_role"] == "pm"
+        assert persisted.runtime_state["active_objective"] == "Produce requirements"
+        assert isinstance(persisted.runtime_state["active_model"], str)
+        selection = runner.model_router.select_model("pm")
+        return (
+            PRD(title="Feature", problem_statement="Need feature"),
+            selection,
+            ModelCallRecord(
+                role="pm",
+                model_key=selection.model_key,
+                provider_key=selection.provider_key,
+                status=ModelCallStatus.SUCCESS,
+                input_hash="in",
+                output_hash="out",
+                prompt_tokens_estimate=1,
+                completion_tokens_estimate=1,
+                total_tokens_estimate=2,
+            ),
+        )
+
+    runner.agent_runner.run = fake_run
+
+    result = runner._run_structured_role(
+        record,
+        "pm",
+        PRD,
+        "Produce requirements",
+    )
+
+    assert result.title == "Feature"
+    persisted = store.get(record.job_id)
+    assert persisted.status == JobStatus.ANALYZING
+    assert "active_role" not in persisted.runtime_state
+    assert "active_model" not in persisted.runtime_state
 
 
 def test_job_runner_review_request_changes_then_fix(tmp_path: Path) -> None:

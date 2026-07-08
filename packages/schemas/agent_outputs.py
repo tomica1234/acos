@@ -94,6 +94,31 @@ class RuntimePlan(BaseModel):
     startup_timeout_seconds: int | None = None
     extra: dict[str, Any] = Field(default_factory=dict)
 
+    @model_validator(mode="before")
+    @classmethod
+    def collect_unknown_runtime_hints(cls, value: Any) -> Any:
+        if not isinstance(value, dict):
+            return value
+        allowed = {
+            "prepare_commands",
+            "start_command",
+            "http_probe_path",
+            "http_checks",
+            "prepare_timeout_seconds",
+            "startup_timeout_seconds",
+            "extra",
+        }
+        normalized = dict(value)
+        extra = normalized.get("extra")
+        if not isinstance(extra, dict):
+            extra = {}
+        for key in list(normalized):
+            if key in allowed:
+                continue
+            extra[key] = normalized.pop(key)
+        normalized["extra"] = extra
+        return normalized
+
 
 class PMReviewResult(BaseModel):
     """Product-manager review output for plans and delivered work."""

@@ -61,6 +61,35 @@ def test_synthesize_job_metadata_from_prd_uses_explicit_fastapi_contract(tmp_pat
     assert metadata["acceptance_checks"][0]["path"] == "/"
 
 
+def test_prd_runtime_unknown_hints_are_preserved_as_extra(tmp_path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    prd = PRD.model_validate(
+        {
+            "title": "English Vocabulary App",
+            "problem_statement": "Build a vocabulary learning app.",
+            "runtime": {
+                "python": {"version": "3.11", "backend": "FastAPI"},
+                "node": {"version": "22", "frontend": "Vite"},
+                "http_probe_path": "/health",
+            },
+        }
+    )
+
+    metadata = synthesize_job_metadata_from_prd(
+        prd,
+        {},
+        workspace_root=workspace,
+    )
+
+    assert prd.runtime is not None
+    assert prd.runtime.extra["python"] == {"version": "3.11", "backend": "FastAPI"}
+    assert prd.runtime.extra["node"] == {"version": "22", "frontend": "Vite"}
+    assert metadata["runtime"]["python"] == {"version": "3.11", "backend": "FastAPI"}
+    assert metadata["runtime"]["node"] == {"version": "22", "frontend": "Vite"}
+    assert metadata["runtime"]["http_probe_path"] == "/health"
+
+
 def test_synthesize_job_metadata_filters_invalid_required_artifacts(tmp_path) -> None:
     workspace = tmp_path / "workspace"
     workspace.mkdir()

@@ -570,6 +570,13 @@ class JobRunner:
         task = self._task_with_recovery_targets(record, role, task)
         objective = self._objective_with_recovery_operation_hint(record, role, objective)
         apply_transition(record, self._phase_for_role(role))
+        record.runtime_state["active_role"] = role
+        record.runtime_state["active_objective"] = objective
+        if task is not None:
+            record.runtime_state["active_task_id"] = task.id
+        else:
+            record.runtime_state.pop("active_task_id", None)
+        self.store.update(record)
         agent_cfg = self.registry.get_agent(role)
         relevant_files = self._gather_relevant_files(role, record=record, task=task)
         diff = (
@@ -589,6 +596,8 @@ class JobRunner:
             )
         )
         selected_model = self.registry.get_model(preselection.model_key)
+        record.runtime_state["active_model"] = preselection.model_key
+        self.store.update(record)
         effective_logs = [
             *self._recovery_guidance_logs(record, role),
             *self._pm_stall_guidance_logs(record, role),
@@ -637,6 +646,8 @@ class JobRunner:
         output = self._result_with_rewritten_missing_target_patches(record, role, output)
         record.outputs[role] = output.model_dump()
         record.outputs[f"{role}_model_selection"] = selection.model_dump()
+        for key in ("active_role", "active_objective", "active_task_id", "active_model"):
+            record.runtime_state.pop(key, None)
         self.store.update(record)
         return output
 
