@@ -1679,8 +1679,46 @@ def test_task_graph_validation_requires_task_artifacts_when_requested() -> None:
     assert validation["valid"] is False
     assert validation["require_task_artifacts"] is True
     assert validation["implementation_task_artifact_count"] == 0
+    assert validation["executable_task_artifact_count"] == 0
     assert validation["errors"] == [
         {"type": "missing_task_artifacts", "task_ids": ["core"]}
+    ]
+
+
+def test_task_graph_validation_requires_test_writer_artifacts_when_requested() -> None:
+    task_graph = TaskGraph(
+        goal="Build feature",
+        tasks=[
+            PlannedTask(
+                id="core",
+                title="Build core",
+                description="Build the smallest feature.",
+                role="implementer",
+                acceptance_criteria=["VALUE equals 1"],
+                target_files=["feature.py"],
+            ),
+            PlannedTask(
+                id="tests",
+                title="Test core",
+                description="Add focused regression tests.",
+                role="test_writer",
+                depends_on=["core"],
+                acceptance_criteria=["VALUE is covered by a regression test"],
+            ),
+        ],
+    )
+
+    validation = JobRunner._build_task_graph_validation(
+        task_graph,
+        require_acceptance_criteria=True,
+        require_task_artifacts=True,
+    )
+
+    assert validation["valid"] is False
+    assert validation["implementation_task_artifact_count"] == 1
+    assert validation["executable_task_artifact_count"] == 1
+    assert validation["errors"] == [
+        {"type": "missing_task_artifacts", "task_ids": ["tests"]}
     ]
 
 

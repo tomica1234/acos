@@ -63,6 +63,16 @@ class ContextPacket(BaseModel):
                     ["- acceptance_criteria:"]
                     + [f"  - {item}" for item in self.task.acceptance_criteria]
                 )
+            if self.task.target_files:
+                lines.extend(
+                    ["- target_files:"]
+                    + [f"  - {item}" for item in self.task.target_files]
+                )
+            if self.task.required_artifacts:
+                lines.extend(
+                    ["- required_artifacts:"]
+                    + [f"  - {item}" for item in self.task.required_artifacts]
+                )
         if self.relevant_files:
             lines.append("files:")
             for path, content in self.relevant_files.items():

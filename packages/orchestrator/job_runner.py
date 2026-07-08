@@ -2436,8 +2436,9 @@ class JobRunner:
                     "Return a valid graph with at least one implementer task, "
                     "known dependencies, no duplicate ids, no dependency cycles, "
                     "implementation task coverage for every PRD small_part, "
-                    "testable acceptance_criteria on every implementer task, "
-                    "target_files or required_artifacts on every implementation task, "
+                    "testable acceptance_criteria on every implementer/scaffold task, "
+                    "target_files or required_artifacts on every implementer, "
+                    "scaffold, and test_writer task, "
                     "and only autonomous-executable task roles."
                 ),
                 logs=[
@@ -2538,6 +2539,10 @@ class JobRunner:
         implementation_task_ids = [
             task.id for task in task_graph.tasks if task.role in JobRunner.IMPLEMENTATION_TASK_ROLES
         ]
+        executable_roles = JobRunner.IMPLEMENTATION_TASK_ROLES | JobRunner.TEST_TASK_ROLES
+        executable_task_ids = [
+            task.id for task in task_graph.tasks if task.role in executable_roles
+        ]
         small_parts = JobRunner._non_empty_items(prd.small_parts) if prd is not None else []
         acceptance_tests = (
             JobRunner._non_empty_items(prd.acceptance_tests) if prd is not None else []
@@ -2624,7 +2629,7 @@ class JobRunner:
         tasks_missing_artifacts = [
             task.id
             for task in task_graph.tasks
-            if task.role in JobRunner.IMPLEMENTATION_TASK_ROLES
+            if task.role in executable_roles
             and not JobRunner._non_empty_items(
                 [*task.target_files, *task.required_artifacts]
             )
@@ -2636,7 +2641,14 @@ class JobRunner:
                     "task_ids": tasks_missing_artifacts,
                 }
             )
-        executable_roles = JobRunner.IMPLEMENTATION_TASK_ROLES | JobRunner.TEST_TASK_ROLES
+        implementation_tasks_missing_artifacts = [
+            task.id
+            for task in task_graph.tasks
+            if task.role in JobRunner.IMPLEMENTATION_TASK_ROLES
+            and not JobRunner._non_empty_items(
+                [*task.target_files, *task.required_artifacts]
+            )
+        ]
         unsupported_task_roles = [
             {"task_id": task.id, "role": task.role}
             for task in task_graph.tasks
@@ -2654,6 +2666,7 @@ class JobRunner:
             "valid": not errors,
             "task_count": len(task_graph.tasks),
             "implementation_task_count": len(implementation_task_ids),
+            "executable_task_count": len(executable_task_ids),
             "implementation_task_acceptance_criteria_count": (
                 len(implementation_task_ids) - len(tasks_missing_acceptance_criteria)
             ),
@@ -2661,7 +2674,10 @@ class JobRunner:
             "require_executable_task_roles": require_executable_task_roles,
             "require_task_artifacts": require_task_artifacts,
             "implementation_task_artifact_count": (
-                len(implementation_task_ids) - len(tasks_missing_artifacts)
+                len(implementation_task_ids) - len(implementation_tasks_missing_artifacts)
+            ),
+            "executable_task_artifact_count": (
+                len(executable_task_ids) - len(tasks_missing_artifacts)
             ),
             "unsupported_task_role_count": len(unsupported_task_roles),
             "small_part_count": len(small_parts),

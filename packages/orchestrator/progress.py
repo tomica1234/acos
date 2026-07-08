@@ -1106,8 +1106,13 @@ def _autonomy_readiness(
 
     prd_quality_passed = _optional_bool(prd_quality, "passed")
     task_graph_valid = _optional_bool(task_graph_validation, "valid")
+    implementation_roles = {"implementer", "scaffold"}
+    executable_roles = {*implementation_roles, "test_writer"}
     implementation_tasks = [
-        task for task in planned_tasks if task.get("role") == "implementer"
+        task for task in planned_tasks if task.get("role") in implementation_roles
+    ]
+    executable_tasks = [
+        task for task in planned_tasks if task.get("role") in executable_roles
     ]
     missing_acceptance_task_ids = [
         task["id"]
@@ -1118,7 +1123,7 @@ def _autonomy_readiness(
     implementation_tasks_have_acceptance_criteria = (
         None if not implementation_tasks else not missing_acceptance_task_ids
     )
-    missing_artifact_task_ids = [
+    missing_implementation_artifact_task_ids = [
         task["id"]
         for task in implementation_tasks
         if isinstance(task.get("id"), str)
@@ -1128,7 +1133,21 @@ def _autonomy_readiness(
         )
     ]
     implementation_tasks_have_artifacts = (
-        None if not implementation_tasks else not missing_artifact_task_ids
+        None
+        if not implementation_tasks
+        else not missing_implementation_artifact_task_ids
+    )
+    missing_artifact_task_ids = [
+        task["id"]
+        for task in executable_tasks
+        if isinstance(task.get("id"), str)
+        and not (
+            _non_empty_strings(task.get("target_files"))
+            or _non_empty_strings(task.get("required_artifacts"))
+        )
+    ]
+    executable_tasks_have_artifacts = (
+        None if not executable_tasks else not missing_artifact_task_ids
     )
 
     blocking_items: list[dict[str, Any]] = []
@@ -1189,6 +1208,7 @@ def _autonomy_readiness(
                 implementation_tasks_have_acceptance_criteria
             ),
             "implementation_tasks_have_artifacts": implementation_tasks_have_artifacts,
+            "executable_tasks_have_artifacts": executable_tasks_have_artifacts,
             "require_prd_quality": require_prd_quality,
             "require_task_acceptance_criteria": require_acceptance_criteria,
             "require_task_artifacts": require_task_artifacts,

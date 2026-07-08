@@ -268,6 +268,8 @@ def test_context_packet_renders_task_acceptance_criteria() -> None:
         description="Create the smallest working core.",
         role="implementer",
         acceptance_criteria=["The core behavior can be exercised by one test"],
+        target_files=["src/core.py"],
+        required_artifacts=["src/core.py", "tests/test_core.py"],
     )
     packet = ContextPacket(
         job_id="job-1",
@@ -282,3 +284,7 @@ def test_context_packet_renders_task_acceptance_criteria() -> None:
 
     assert "acceptance_criteria" in rendered
     assert "The core behavior can be exercised by one test" in rendered
+    assert "target_files" in rendered
+    assert "src/core.py" in rendered
+    assert "required_artifacts" in rendered
+    assert "tests/test_core.py" in rendered
