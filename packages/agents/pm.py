@@ -24,6 +24,7 @@ Return a PRD JSON object with these top-level keys:
 - open_questions
 - definition_of_done
 - required_artifacts: repo-relative files that must exist when done
+  (include at least one concrete test file path when acceptance_tests are present)
 - runtime: optional object with only these keys:
   prepare_commands, start_command, http_probe_path, http_checks,
   prepare_timeout_seconds, startup_timeout_seconds, extra

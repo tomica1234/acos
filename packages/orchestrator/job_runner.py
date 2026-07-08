@@ -1951,6 +1951,11 @@ class JobRunner:
             missing.append("required_artifacts")
         if invalid_required_artifacts:
             missing.append("required_artifacts_valid_paths")
+        test_required_artifacts = sorted(
+            path for path in required_artifacts if JobRunner._looks_like_test_path(path)
+        )
+        if acceptance_tests and required_artifacts and not test_required_artifacts:
+            missing.append("required_test_artifacts")
         if prd.open_questions:
             warnings.append("open_questions_present")
         missing_acceptance_test_count = max(0, len(small_parts) - len(acceptance_tests))
@@ -1969,6 +1974,8 @@ class JobRunner:
             "uncovered_acceptance_small_parts": uncovered_acceptance_small_parts,
             "definition_of_done_count": len(JobRunner._non_empty_items(prd.definition_of_done)),
             "required_artifact_count": len(required_artifacts),
+            "test_required_artifact_count": len(test_required_artifacts),
+            "test_required_artifacts": test_required_artifacts,
             "invalid_required_artifacts": invalid_required_artifacts,
         }
 

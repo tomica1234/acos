@@ -20,6 +20,7 @@ def test_pm_prompt_describes_runtime_and_required_artifacts_schema() -> None:
     prompt = pm.SYSTEM_PROMPT
 
     assert "required_artifacts" in prompt
+    assert "test file path" in prompt
     assert "runtime: optional object" in prompt
     assert "prepare_commands" in prompt
     assert "http_probe_path" in prompt
