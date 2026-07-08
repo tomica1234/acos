@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from typing import Any
 
 from packages.orchestrator.quality_gates import (
@@ -36,6 +37,7 @@ def summarize_job_progress(record: JobRecord) -> dict[str, Any]:
     failure_analysis = _failure_analysis(record, failed_stage, recovery_history)
     failure_diagnosis = _failure_diagnosis(record)
     model_metrics = _model_metrics(record)
+    active_model_call = _active_model_call(record)
     recovery_plan = record.runtime_state.get("recovery_plan")
     if not isinstance(recovery_plan, dict):
         recovery_plan = None
@@ -81,6 +83,7 @@ def summarize_job_progress(record: JobRecord) -> dict[str, Any]:
         "model_metrics": model_metrics,
         "execution_limits": execution_limits,
         "failure_analysis": failure_analysis,
+        "active_model_call": active_model_call,
         "recovery_plan": recovery_plan,
         "current_recovery_event": current_recovery_event,
         "last_recoverable_error": last_recoverable_error,
@@ -91,6 +94,48 @@ def summarize_job_progress(record: JobRecord) -> dict[str, Any]:
     if failure_diagnosis is not None:
         payload["failure_diagnosis"] = failure_diagnosis
     return payload
+
+
+def _active_model_call(record: JobRecord) -> dict[str, Any] | None:
+    role = record.runtime_state.get("active_role")
+    if not isinstance(role, str) or not role:
+        return None
+    started_at = _datetime_metric(record.runtime_state.get("active_started_at"))
+    elapsed_seconds: float | None = None
+    if started_at is not None:
+        elapsed_seconds = max(
+            (datetime.now(timezone.utc) - started_at).total_seconds(),
+            0.0,
+        )
+    timeout_seconds = _float_metric(record.runtime_state.get("active_model_timeout_seconds"))
+    timeout_ratio: float | None = None
+    if (
+        elapsed_seconds is not None
+        and timeout_seconds is not None
+        and timeout_seconds > 0
+    ):
+        timeout_ratio = elapsed_seconds / timeout_seconds
+    return {
+        "role": role,
+        "objective": record.runtime_state.get("active_objective"),
+        "task_id": record.runtime_state.get("active_task_id"),
+        "model": record.runtime_state.get("active_model"),
+        "started_at": started_at.isoformat() if started_at is not None else None,
+        "elapsed_seconds": (
+            round(elapsed_seconds, 1) if elapsed_seconds is not None else None
+        ),
+        "timeout_seconds": timeout_seconds,
+        "timeout_ratio": (
+            round(timeout_ratio, 4) if timeout_ratio is not None else None
+        ),
+        "long_running": (
+            elapsed_seconds is not None
+            and (
+                elapsed_seconds >= 300
+                or (timeout_ratio is not None and timeout_ratio >= 0.5)
+            )
+        ),
+    }
 
 
 def _model_metrics(record: JobRecord) -> dict[str, Any]:
@@ -211,6 +256,18 @@ def _float_metric(value: Any) -> float | None:
         except ValueError:
             return None
     return None
+
+
+def _datetime_metric(value: Any) -> datetime | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
 
 
 def _add_model_metric_bucket(

@@ -1,3 +1,5 @@
+from datetime import datetime, timedelta, timezone
+
 from packages.orchestrator.progress import summarize_job_progress
 from packages.schemas.audit import AuditEvent
 from packages.schemas.jobs import JobRecord, JobSpec
@@ -112,6 +114,35 @@ def test_summarize_job_progress_reports_pending_and_failed_stage(tmp_path) -> No
     assert payload["change_summary"]["changed_files"] == ["feature.py", "tests/test_feature.py"]
     assert payload["change_summary"]["patch_count"] == 3
     assert payload["change_summary"]["stages"][1]["task_id"] == "extra"
+
+
+def test_summarize_job_progress_reports_active_model_call(tmp_path) -> None:
+    started_at = datetime.now(timezone.utc) - timedelta(seconds=420)
+    spec = JobSpec(
+        job_id="active-model-progress",
+        request_text="Build it",
+        repo_path=str(tmp_path),
+    )
+    record = JobRecord(job_id=spec.job_id, spec=spec, status=JobStatus.ANALYZING)
+    record.runtime_state.update(
+        {
+            "active_role": "pm",
+            "active_objective": "Produce requirements",
+            "active_model": "ornith_35b_q4",
+            "active_started_at": started_at.isoformat(),
+            "active_model_timeout_seconds": 600.0,
+        }
+    )
+
+    payload = summarize_job_progress(record)
+
+    assert payload["active_model_call"]["role"] == "pm"
+    assert payload["active_model_call"]["objective"] == "Produce requirements"
+    assert payload["active_model_call"]["model"] == "ornith_35b_q4"
+    assert payload["active_model_call"]["timeout_seconds"] == 600.0
+    assert payload["active_model_call"]["elapsed_seconds"] >= 420
+    assert payload["active_model_call"]["timeout_ratio"] >= 0.7
+    assert payload["active_model_call"]["long_running"] is True
 
 
 def test_summarize_job_progress_reports_diagnosis_guided_recovery(tmp_path) -> None:

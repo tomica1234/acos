@@ -572,6 +572,9 @@ class JobRunner:
         apply_transition(record, self._phase_for_role(role))
         record.runtime_state["active_role"] = role
         record.runtime_state["active_objective"] = objective
+        record.runtime_state["active_started_at"] = datetime.now(
+            timezone.utc
+        ).isoformat()
         if task is not None:
             record.runtime_state["active_task_id"] = task.id
         else:
@@ -664,6 +667,7 @@ class JobRunner:
             "active_task_id",
             "active_model",
             "active_model_timeout_seconds",
+            "active_started_at",
         ):
             record.runtime_state.pop(key, None)
         self.store.update(record)
