@@ -1280,6 +1280,7 @@ def test_job_runner_plan_job_stops_after_validated_task_graph(tmp_path: Path) ->
                     "double(4) returns 8",
                 ],
                 definition_of_done=["All generated tests pass"],
+                required_artifacts=["feature.py", "tests/test_feature.py"],
             ).model_dump(),
             "architect": ArchitecturePlan(summary="Simple architecture").model_dump(),
             "planner": TaskGraph(
@@ -1373,6 +1374,7 @@ def test_job_runner_resume_after_plan_job_uses_existing_planning_outputs(
             incremental_milestones=["Module exists"],
             acceptance_tests=["VALUE equals 1"],
             definition_of_done=["All tests pass"],
+            required_artifacts=["feature.py"],
         ).model_dump()
 
     def architect_response(metadata):
@@ -1450,6 +1452,12 @@ def test_job_runner_resume_after_plan_job_uses_existing_planning_outputs(
     planned = runner.plan_job(spec)
     assert planned.status == JobStatus.PLANNING
     assert planned.outputs["planning_only"]["complete"] is True
+    planned_task = planned.outputs["task_graph"]["tasks"][0]
+    assert planned_task["target_files"] == ["feature.py"]
+    assert planned_task["required_artifacts"] == ["feature.py"]
+    assert planned.outputs["task_graph_acceptance_enrichment"][
+        "artifact_updated_task_ids"
+    ] == ["core"]
     planned_job_id = planned.job_id
 
     resumed = runner.resume_job(planned_job_id)
@@ -1964,6 +1972,83 @@ def test_task_graph_validation_requires_test_writer_artifacts_when_requested() -
         {"type": "missing_task_artifacts", "task_ids": ["tests"]},
         {"type": "missing_test_writer_target_files", "task_ids": ["tests"]},
     ]
+
+
+def test_task_graph_validation_requires_test_writer_implementation_dependency() -> None:
+    task_graph = TaskGraph(
+        goal="Build feature",
+        tasks=[
+            PlannedTask(
+                id="core",
+                title="Build core",
+                description="Build the smallest feature.",
+                role="implementer",
+                acceptance_criteria=["VALUE equals 1"],
+                target_files=["feature.py"],
+            ),
+            PlannedTask(
+                id="tests",
+                title="Test core",
+                description="Add focused regression tests.",
+                role="test_writer",
+                acceptance_criteria=["VALUE is covered by a regression test"],
+                target_files=["tests/test_feature.py"],
+            ),
+        ],
+    )
+
+    validation = JobRunner._build_task_graph_validation(
+        task_graph,
+        require_acceptance_criteria=True,
+        require_task_artifacts=True,
+    )
+
+    assert validation["valid"] is False
+    assert validation["test_writer_missing_implementation_dependencies"] == [
+        {
+            "task_id": "tests",
+            "depends_on": [],
+            "required_dependency_roles": ["implementer", "scaffold"],
+        }
+    ]
+    assert {
+        "type": "test_writer_missing_implementation_dependency",
+        "items": validation["test_writer_missing_implementation_dependencies"],
+    } in validation["errors"]
+
+
+def test_task_graph_validation_allows_test_writer_dependency_on_scaffold() -> None:
+    task_graph = TaskGraph(
+        goal="Build scaffold",
+        tasks=[
+            PlannedTask(
+                id="project-scaffold",
+                title="Project scaffold",
+                description="Create the deterministic app scaffold.",
+                role="scaffold",
+                acceptance_criteria=["Scaffold exists"],
+                target_files=["backend/main.py"],
+            ),
+            PlannedTask(
+                id="project-scaffold-tests",
+                title="Test scaffold",
+                description="Add focused scaffold tests.",
+                role="test_writer",
+                depends_on=["project-scaffold"],
+                acceptance_criteria=["Scaffold is covered by a smoke test"],
+                target_files=["tests/test_project_scaffold.py"],
+            ),
+        ],
+    )
+
+    validation = JobRunner._build_task_graph_validation(
+        task_graph,
+        require_acceptance_criteria=True,
+        require_task_artifacts=True,
+    )
+
+    assert validation["valid"] is True
+    assert validation["test_writer_missing_implementation_dependencies"] == []
 
 
 def test_task_graph_validation_rejects_invalid_artifact_paths() -> None:
@@ -3040,6 +3125,108 @@ def test_job_runner_blocks_invalid_task_graph_before_implementation(tmp_path: Pa
     assert record.outputs["task_graph_validation"]["valid"] is False
     assert record.outputs["task_graph_validation"]["errors"][0]["type"] == "unknown_dependencies"
     assert not (workspace / "feature.py").exists()
+
+
+def test_job_runner_blocks_test_writer_without_implementation_dependency(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    registry = ModelRegistry.from_paths(
+        provider_path=config_dir() / "model_providers.yaml",
+        agents_path=config_dir() / "agents.yaml",
+        routing_path=config_dir() / "model_routing.yaml",
+    )
+    attach_mock_adapter(
+        registry,
+        {
+            "pm": PRD(
+                title="Feature",
+                problem_statement="Need feature",
+                small_parts=["Create feature module"],
+                acceptance_tests=["VALUE equals 1"],
+                required_artifacts=["feature.py", "tests/test_feature.py"],
+            ).model_dump(),
+            "architect": ArchitecturePlan(summary="Simple architecture").model_dump(),
+            "planner": TaskGraph(
+                goal="Build feature with ambiguous test ordering",
+                tasks=[
+                    PlannedTask(
+                        id="core",
+                        title="Build core",
+                        description="Create feature module.",
+                        role="implementer",
+                        acceptance_criteria=["VALUE equals 1"],
+                        target_files=["feature.py"],
+                    ),
+                    PlannedTask(
+                        id="tests",
+                        title="Test core",
+                        description="Add tests for VALUE.",
+                        role="test_writer",
+                        acceptance_criteria=["VALUE is tested"],
+                        target_files=["tests/test_feature.py"],
+                    ),
+                ],
+            ).model_dump(),
+            "implementer": ImplementationResult(
+                status=ImplementationStatus.IMPLEMENTED,
+                summary="Should not run",
+                patches=[
+                    {
+                        "path": "feature.py",
+                        "content": "SHOULD_NOT_EXIST = True\n",
+                        "operation": "create",
+                    }
+                ],
+            ).model_dump(),
+            "test_writer": TestWriterOutput(
+                summary="Should not run",
+                patches=[
+                    {
+                        "path": "tests/test_feature.py",
+                        "content": "def test_placeholder() -> None:\n    assert True\n",
+                        "operation": "create",
+                    }
+                ],
+            ).model_dump(),
+        },
+    )
+    policy = PolicyEngine.from_path(config_dir() / "policies.yaml")
+    environment = FakeMCPEnvironment(
+        workspace_root=workspace,
+        memory_db_path=workspace / ".memory.sqlite3",
+    )
+    runner = JobRunner(registry=registry, policy=policy, router=environment.build_router())
+    spec = JobSpec(
+        request_text="Create feature with tests",
+        repo_path=str(workspace),
+        target_branch="acos/test-writer-dependency",
+        metadata={
+            "constraints": {
+                "require_task_artifacts": True,
+                "skip_review": True,
+                "skip_release": True,
+                "task_graph_validation_refinement_attempts": 0,
+            }
+        },
+    )
+
+    record = runner.run_job(spec)
+
+    assert_recovery_plan(record, status=JobStatus.REPLANNING, strategy="REPLAN_TASK")
+    assert_recoverable_error(record, "invalid_task_graph")
+    validation = record.outputs["task_graph_validation"]
+    assert validation["valid"] is False
+    assert validation["test_writer_missing_implementation_dependencies"] == [
+        {
+            "task_id": "tests",
+            "depends_on": [],
+            "required_dependency_roles": ["implementer", "scaffold"],
+        }
+    ]
+    assert not (workspace / "feature.py").exists()
+    assert not (workspace / "tests" / "test_feature.py").exists()
 
 
 def test_job_runner_repairs_invalid_task_graph_before_implementation(tmp_path: Path) -> None:
@@ -5047,6 +5234,7 @@ def test_job_runner_records_prd_quality_report_for_sparse_prd(tmp_path: Path) ->
         "incremental_milestones",
         "acceptance_tests",
         "definition_of_done",
+        "required_artifacts",
     ]
 
 
@@ -5089,7 +5277,7 @@ def test_job_runner_blocks_when_strict_prd_quality_required(tmp_path: Path) -> N
         record,
         "prd_quality_gate_failed:"
         "smallest_working_core,small_parts,incremental_milestones,"
-        "acceptance_tests,definition_of_done",
+        "acceptance_tests,definition_of_done,required_artifacts",
     )
     assert record.outputs["prd_quality"]["passed"] is False
     assert "architect" not in record.outputs
@@ -5124,6 +5312,7 @@ def test_job_runner_refines_sparse_prd_before_implementation_when_required(
                         "test_value asserts VALUE equals 1",
                     ],
                     definition_of_done=["All tests pass"],
+                    required_artifacts=["feature.py", "tests/test_feature.py"],
                 ).model_dump(),
             ],
             "architect": ArchitecturePlan(summary="Simple architecture").model_dump(),
@@ -5222,6 +5411,7 @@ def test_job_runner_blocks_prd_quality_when_acceptance_tests_do_not_cover_small_
                 ],
                 acceptance_tests=["VALUE equals 1"],
                 definition_of_done=["All tests pass"],
+                required_artifacts=["feature.py", "tests/test_feature.py"],
             ).model_dump(),
             "architect": ArchitecturePlan(summary="Should not run").model_dump(),
         },
@@ -5290,7 +5480,7 @@ def test_job_runner_blocks_prd_quality_when_acceptance_tests_do_not_cover_small_
             }
         ],
         "definition_of_done_count": 1,
-        "required_artifact_count": 0,
+        "required_artifact_count": 2,
         "invalid_required_artifacts": [],
     }
     assert "architect" not in record.outputs
@@ -5316,6 +5506,24 @@ def test_prd_quality_rejects_invalid_required_artifact_paths() -> None:
     assert report["invalid_required_artifacts"] == ["../outside.py", "C:\\outside.py"]
 
 
+def test_prd_quality_requires_required_artifacts() -> None:
+    prd = PRD(
+        title="Feature",
+        problem_statement="Need feature",
+        smallest_working_core=["Expose a feature module"],
+        small_parts=["Create feature module"],
+        incremental_milestones=["Module exists"],
+        acceptance_tests=["Feature module exists"],
+        definition_of_done=["All tests pass"],
+    )
+
+    report = JobRunner._build_prd_quality_report(prd)
+
+    assert report["passed"] is False
+    assert report["missing"] == ["required_artifacts"]
+    assert report["required_artifact_count"] == 0
+
+
 def test_prd_quality_accepts_semantically_covered_acceptance_tests() -> None:
     prd = PRD(
         title="English Vocab App",
@@ -5334,6 +5542,11 @@ def test_prd_quality_accepts_semantically_covered_acceptance_tests() -> None:
             "Teacher can perform CRUD for word sets",
         ],
         definition_of_done=["All tests pass"],
+        required_artifacts=[
+            "backend/main.py",
+            "frontend/src/App.tsx",
+            "tests/test_auth_and_words.py",
+        ],
     )
 
     report = JobRunner._build_prd_quality_report(prd)
@@ -5369,6 +5582,7 @@ def test_prd_quality_requires_anchor_token_overlap() -> None:
         incremental_milestones=["Users can sign in"],
         acceptance_tests=["User profile roles page renders"],
         definition_of_done=["All tests pass"],
+        required_artifacts=["backend/main.py", "tests/test_auth.py"],
     )
 
     report = JobRunner._build_prd_quality_report(prd)
@@ -5417,6 +5631,11 @@ def test_job_runner_blocks_prd_quality_when_acceptance_tests_semantically_mismat
                     "Database initializes successfully",
                 ],
                 definition_of_done=["All tests pass"],
+                required_artifacts=[
+                    "backend/main.py",
+                    "frontend/src/App.tsx",
+                    "tests/test_english_vocab.py",
+                ],
             ).model_dump(),
             "architect": ArchitecturePlan(summary="Should not run").model_dump(),
         },
@@ -5496,6 +5715,7 @@ def test_job_runner_resumes_blocked_prd_quality_repair(tmp_path: Path) -> None:
             "test_value asserts VALUE equals 1",
         ],
         definition_of_done=["All tests pass"],
+        required_artifacts=["feature.py", "tests/test_feature.py"],
     ).model_dump()
     attach_mock_adapter(
         registry,
@@ -5652,6 +5872,7 @@ def test_job_runner_clears_planning_repair_constraints_after_prd_passes(
         incremental_milestones=["Module exists"],
         acceptance_tests=["VALUE equals 1"],
         definition_of_done=["Tests pass"],
+        required_artifacts=["feature.py", "tests/test_feature.py"],
     )
 
     result = runner._refine_prd_quality_for_autonomy(record, prd)

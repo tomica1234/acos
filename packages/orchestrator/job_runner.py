@@ -1945,7 +1945,10 @@ class JobRunner:
             missing.append("acceptance_tests_semantically_cover_small_parts")
         if not JobRunner._non_empty_items(prd.definition_of_done):
             missing.append("definition_of_done")
+        required_artifacts = valid_artifact_paths(prd.required_artifacts)
         invalid_required_artifacts = invalid_artifact_paths(prd.required_artifacts)
+        if not required_artifacts and not invalid_required_artifacts:
+            missing.append("required_artifacts")
         if invalid_required_artifacts:
             missing.append("required_artifacts_valid_paths")
         if prd.open_questions:
@@ -1965,7 +1968,7 @@ class JobRunner:
             "acceptance_test_small_part_coverage": acceptance_test_small_part_coverage,
             "uncovered_acceptance_small_parts": uncovered_acceptance_small_parts,
             "definition_of_done_count": len(JobRunner._non_empty_items(prd.definition_of_done)),
-            "required_artifact_count": len(valid_artifact_paths(prd.required_artifacts)),
+            "required_artifact_count": len(required_artifacts),
             "invalid_required_artifacts": invalid_required_artifacts,
         }
 
@@ -2128,7 +2131,19 @@ class JobRunner:
     ) -> TaskGraph:
         acceptance_tests = self._non_empty_items(prd.acceptance_tests)
         definition_of_done = self._non_empty_items(prd.definition_of_done)
-        if not acceptance_tests and not definition_of_done:
+        source_required_artifacts = self._valid_unique_artifact_paths(
+            prd.required_artifacts
+        )
+        source_implementation_artifacts = [
+            path
+            for path in source_required_artifacts
+            if not self._looks_like_test_path(path)
+        ]
+        if (
+            not acceptance_tests
+            and not definition_of_done
+            and not source_implementation_artifacts
+        ):
             record.outputs["task_graph_acceptance_enrichment"] = {
                 "applied": False,
                 "reason": "no_prd_acceptance_sources",
@@ -2137,27 +2152,38 @@ class JobRunner:
             return task_graph
 
         updated_task_ids: list[str] = []
+        artifact_updated_task_ids: list[str] = []
         implementation_index = 0
         tasks: list[PlannedTask] = []
         for task in task_graph.tasks:
             if task.role not in self.IMPLEMENTATION_TASK_ROLES:
                 tasks.append(task)
                 continue
+            updates: dict[str, Any] = {}
             if self._non_empty_items(task.acceptance_criteria):
-                tasks.append(task)
                 implementation_index += 1
-                continue
-            criteria = self._criteria_for_task_from_prd(
-                task,
-                acceptance_tests,
-                definition_of_done,
-                implementation_index,
-            )
-            tasks.append(task.model_copy(update={"acceptance_criteria": criteria}))
-            updated_task_ids.append(task.id)
-            implementation_index += 1
+            elif acceptance_tests or definition_of_done:
+                criteria = self._criteria_for_task_from_prd(
+                    task,
+                    acceptance_tests,
+                    definition_of_done,
+                    implementation_index,
+                )
+                updates["acceptance_criteria"] = criteria
+                updated_task_ids.append(task.id)
+                implementation_index += 1
+            else:
+                implementation_index += 1
+            if source_implementation_artifacts:
+                if not valid_artifact_paths(task.target_files):
+                    updates["target_files"] = list(source_implementation_artifacts)
+                if not valid_artifact_paths(task.required_artifacts):
+                    updates["required_artifacts"] = list(source_implementation_artifacts)
+                if "target_files" in updates or "required_artifacts" in updates:
+                    artifact_updated_task_ids.append(task.id)
+            tasks.append(task.model_copy(update=updates) if updates else task)
 
-        if not updated_task_ids:
+        if not updated_task_ids and not artifact_updated_task_ids:
             record.outputs["task_graph_acceptance_enrichment"] = {
                 "applied": False,
                 "reason": "all_implementation_tasks_already_have_criteria",
@@ -2165,11 +2191,15 @@ class JobRunner:
             }
             return task_graph
 
-        record.outputs["task_graph_acceptance_enrichment"] = {
+        enrichment = {
             "applied": True,
             "reason": "filled_missing_task_acceptance_criteria_from_prd",
             "updated_task_ids": updated_task_ids,
         }
+        if artifact_updated_task_ids:
+            enrichment["artifact_updated_task_ids"] = artifact_updated_task_ids
+            enrichment["inherited_required_artifacts"] = source_implementation_artifacts
+        record.outputs["task_graph_acceptance_enrichment"] = enrichment
         return TaskGraph(
             goal=task_graph.goal,
             tasks=tasks,
@@ -2650,6 +2680,7 @@ class JobRunner:
                     "implementation task coverage for every PRD small_part, "
                     "testable acceptance_criteria on every implementer/scaffold task, "
                     "target_files on every test_writer task, "
+                    "depends_on from every test_writer task to the implementer/scaffold task it verifies, "
                     "repo source target_files on implementer/scaffold tasks, "
                     "test target_files on test_writer tasks, "
                     "and PRD required_artifacts assigned to their owning role target_files, "
@@ -2863,6 +2894,21 @@ class JobRunner:
             for dependency in task.depends_on
             if dependency not in id_set
         ]
+        implementation_task_id_set = set(implementation_task_ids)
+        test_writer_missing_implementation_dependencies = [
+            {
+                "task_id": task.id,
+                "depends_on": list(task.depends_on),
+                "required_dependency_roles": sorted(JobRunner.IMPLEMENTATION_TASK_ROLES),
+            }
+            for task in task_graph.tasks
+            if task.role in JobRunner.TEST_TASK_ROLES
+            and implementation_task_ids
+            and not any(
+                dependency in implementation_task_id_set
+                for dependency in task.depends_on
+            )
+        ]
         cycle = JobRunner._find_task_graph_cycle(task_graph)
         errors: list[dict[str, Any]] = []
         if not task_graph.tasks:
@@ -2973,6 +3019,13 @@ class JobRunner:
                     "task_ids": test_writer_tasks_missing_target_files,
                 }
             )
+        if require_task_artifacts and test_writer_missing_implementation_dependencies:
+            errors.append(
+                {
+                    "type": "test_writer_missing_implementation_dependency",
+                    "items": test_writer_missing_implementation_dependencies,
+                }
+            )
         implementation_tasks_missing_artifacts = [
             task.id
             for task in task_graph.tasks
@@ -3039,6 +3092,9 @@ class JobRunner:
             "invalid_prd_required_artifacts": invalid_prd_required_artifacts,
             "unowned_required_artifacts": unowned_required_artifacts,
             "role_mismatched_target_files": role_mismatched_target_files,
+            "test_writer_missing_implementation_dependencies": (
+                test_writer_missing_implementation_dependencies
+            ),
             "unsupported_task_role_count": len(unsupported_task_roles),
             "small_part_count": len(small_parts),
             "implementation_small_part_count": len(implementation_small_parts),

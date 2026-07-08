@@ -14,6 +14,8 @@ Plan for autonomous incremental execution:
 - then add a focused test task for that core
 - then add one small part at a time
 - pair each meaningful behavior with a test_writer task
+- make each test_writer task depend_on the implementer or scaffold task whose
+  behavior/artifacts it verifies
 - give every task narrow acceptance_criteria that can be tested independently
 - leave polish, UI, and README tasks until after the core behavior passes
 Prefer a complete autonomous development plan over a short plan:
