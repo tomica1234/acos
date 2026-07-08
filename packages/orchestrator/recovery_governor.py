@@ -631,6 +631,8 @@ class RecoveryGovernor:
             "prd_quality_warnings",
             "prd_open_questions",
             "invalid_required_artifacts",
+            "prd_required_artifacts",
+            "source_required_artifacts",
             "test_required_artifacts",
         ):
             value = cls._clean_string_list(runtime_state.get(key))

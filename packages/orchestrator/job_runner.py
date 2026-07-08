@@ -1214,6 +1214,8 @@ class JobRunner:
             "prd_open_questions",
             "uncovered_acceptance_small_parts",
             "invalid_required_artifacts",
+            "prd_required_artifacts",
+            "source_required_artifacts",
             "test_required_artifacts",
             "task_graph_validation_errors",
             *TASK_GRAPH_VALIDATION_CONTEXT_KEYS_SOURCE,
@@ -2151,6 +2153,8 @@ class JobRunner:
             "prd_open_questions",
             "uncovered_acceptance_small_parts",
             "invalid_required_artifacts",
+            "prd_required_artifacts",
+            "source_required_artifacts",
             "test_required_artifacts",
         ):
             runtime_state.pop(key, None)
@@ -2163,6 +2167,12 @@ class JobRunner:
         open_questions = JobRunner._non_empty_items(prd.open_questions)
         invalid_required_artifacts = JobRunner._non_empty_items(
             [str(item) for item in report.get("invalid_required_artifacts", [])]
+        )
+        prd_required_artifacts = JobRunner._non_empty_items(
+            [str(item) for item in report.get("required_artifacts", [])]
+        )
+        source_required_artifacts = JobRunner._non_empty_items(
+            [str(item) for item in report.get("source_required_artifacts", [])]
         )
         test_required_artifacts = JobRunner._non_empty_items(
             [str(item) for item in report.get("test_required_artifacts", [])]
@@ -2178,6 +2188,10 @@ class JobRunner:
             runtime_state["uncovered_acceptance_small_parts"] = uncovered
         if invalid_required_artifacts:
             runtime_state["invalid_required_artifacts"] = invalid_required_artifacts
+        if prd_required_artifacts:
+            runtime_state["prd_required_artifacts"] = prd_required_artifacts
+        if source_required_artifacts:
+            runtime_state["source_required_artifacts"] = source_required_artifacts
         if test_required_artifacts:
             runtime_state["test_required_artifacts"] = test_required_artifacts
         return runtime_state
@@ -2258,6 +2272,19 @@ class JobRunner:
                 "Current acceptance_tests: "
                 + " | ".join(self_item for self_item in prd.acceptance_tests)
             )
+        required_artifacts = JobRunner._valid_unique_artifact_paths(prd.required_artifacts)
+        if required_artifacts:
+            logs.append("Current required_artifacts: " + " | ".join(required_artifacts))
+        missing = set(report.get("missing") or [])
+        if "required_source_artifacts" in missing:
+            logs.append(
+                "Add at least one non-test required_artifact for the implementation or app surface; "
+                "tests alone are not enough for autonomous implementation."
+            )
+        if "required_test_artifacts" in missing:
+            logs.append(
+                "Add at least one test required_artifact such as tests/test_*.py or frontend test/*.test.tsx."
+            )
         open_questions = JobRunner._non_empty_items(prd.open_questions)
         if open_questions:
             logs.append("Open questions blocking autonomy: " + " | ".join(open_questions))
@@ -2333,9 +2360,16 @@ class JobRunner:
             missing.append("required_artifacts")
         if invalid_required_artifacts:
             missing.append("required_artifacts_valid_paths")
+        source_required_artifacts = sorted(
+            path
+            for path in required_artifacts
+            if not JobRunner._looks_like_test_path(path)
+        )
         test_required_artifacts = sorted(
             path for path in required_artifacts if JobRunner._looks_like_test_path(path)
         )
+        if acceptance_tests and required_artifacts and not source_required_artifacts:
+            missing.append("required_source_artifacts")
         if acceptance_tests and required_artifacts and not test_required_artifacts:
             missing.append("required_test_artifacts")
         if JobRunner._non_empty_items(prd.open_questions):
@@ -2357,6 +2391,9 @@ class JobRunner:
             "uncovered_acceptance_small_parts": uncovered_acceptance_small_parts,
             "definition_of_done_count": len(JobRunner._non_empty_items(prd.definition_of_done)),
             "required_artifact_count": len(required_artifacts),
+            "required_artifacts": sorted(required_artifacts),
+            "source_required_artifact_count": len(source_required_artifacts),
+            "source_required_artifacts": source_required_artifacts,
             "test_required_artifact_count": len(test_required_artifacts),
             "test_required_artifacts": test_required_artifacts,
             "invalid_required_artifacts": invalid_required_artifacts,

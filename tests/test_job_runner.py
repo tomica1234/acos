@@ -6790,6 +6790,78 @@ def test_job_runner_blocks_prd_quality_when_open_questions_remain(
     assert "architect" not in record.outputs
 
 
+def test_job_runner_blocks_prd_quality_when_source_required_artifact_missing(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    registry = ModelRegistry.from_paths(
+        provider_path=config_dir() / "model_providers.yaml",
+        agents_path=config_dir() / "agents.yaml",
+        routing_path=config_dir() / "model_routing.yaml",
+    )
+    attach_mock_adapter(
+        registry,
+        {
+            "pm": PRD(
+                title="Feature",
+                problem_statement="Need feature",
+                smallest_working_core=["Expose a feature module"],
+                small_parts=["Create feature module"],
+                incremental_milestones=["Module exists"],
+                acceptance_tests=["Feature module exists"],
+                definition_of_done=["All tests pass"],
+                required_artifacts=["tests/test_feature.py"],
+            ).model_dump(),
+            "architect": ArchitecturePlan(summary="Should not run").model_dump(),
+        },
+    )
+    policy = PolicyEngine.from_path(config_dir() / "policies.yaml")
+    environment = FakeMCPEnvironment(
+        workspace_root=workspace,
+        memory_db_path=workspace / ".memory.sqlite3",
+    )
+    runner = JobRunner(registry=registry, policy=policy, router=environment.build_router())
+    spec = JobSpec(
+        request_text="Create a feature with tests",
+        repo_path=str(workspace),
+        target_branch="acos/strict-prd-source-artifact",
+        metadata={
+            "constraints": {
+                "require_prd_quality": True,
+                "prd_quality_refinement_attempts": 0,
+            }
+        },
+    )
+
+    record = runner.run_job(spec)
+
+    assert_recovery_plan(
+        record,
+        status=JobStatus.ANALYZING,
+        strategy="REVISE_PRD_AND_ARCHITECTURE",
+    )
+    assert_recoverable_error(
+        record,
+        "prd_quality_gate_failed:required_source_artifacts",
+    )
+    constraints = record.runtime_state["recovery_plan"]["constraints"]
+    assert constraints["prd_quality_missing"] == ["required_source_artifacts"]
+    assert constraints["prd_required_artifacts"] == ["tests/test_feature.py"]
+    assert constraints["test_required_artifacts"] == ["tests/test_feature.py"]
+    assert "source_required_artifacts" not in constraints
+    assert record.spec.metadata["constraints"]["prd_quality_missing"] == [
+        "required_source_artifacts"
+    ]
+    assert record.outputs["prd_quality"]["passed"] is False
+    assert record.outputs["prd_quality"]["missing"] == ["required_source_artifacts"]
+    assert record.outputs["prd_quality"]["source_required_artifacts"] == []
+    assert record.outputs["prd_quality"]["test_required_artifacts"] == [
+        "tests/test_feature.py"
+    ]
+    assert "architect" not in record.outputs
+
+
 def test_job_runner_refines_sparse_prd_before_implementation_when_required(
     tmp_path: Path,
 ) -> None:
@@ -6988,6 +7060,9 @@ def test_job_runner_blocks_prd_quality_when_acceptance_tests_do_not_cover_small_
         ],
         "definition_of_done_count": 1,
         "required_artifact_count": 2,
+        "required_artifacts": ["feature.py", "tests/test_feature.py"],
+        "source_required_artifact_count": 1,
+        "source_required_artifacts": ["feature.py"],
         "test_required_artifact_count": 1,
         "test_required_artifacts": ["tests/test_feature.py"],
         "invalid_required_artifacts": [],
@@ -7012,8 +7087,35 @@ def test_prd_quality_requires_test_artifact_when_acceptance_tests_exist() -> Non
     assert report["passed"] is False
     assert report["missing"] == ["required_test_artifacts"]
     assert report["required_artifact_count"] == 1
+    assert report["required_artifacts"] == ["feature.py"]
+    assert report["source_required_artifact_count"] == 1
+    assert report["source_required_artifacts"] == ["feature.py"]
     assert report["test_required_artifact_count"] == 0
     assert report["test_required_artifacts"] == []
+
+
+def test_prd_quality_requires_source_artifact_when_acceptance_tests_exist() -> None:
+    prd = PRD(
+        title="Feature",
+        problem_statement="Need feature",
+        smallest_working_core=["Expose a feature module"],
+        small_parts=["Create feature module"],
+        incremental_milestones=["Module exists"],
+        acceptance_tests=["Feature module exists"],
+        definition_of_done=["All tests pass"],
+        required_artifacts=["tests/test_feature.py"],
+    )
+
+    report = JobRunner._build_prd_quality_report(prd)
+
+    assert report["passed"] is False
+    assert report["missing"] == ["required_source_artifacts"]
+    assert report["required_artifact_count"] == 1
+    assert report["required_artifacts"] == ["tests/test_feature.py"]
+    assert report["source_required_artifact_count"] == 0
+    assert report["source_required_artifacts"] == []
+    assert report["test_required_artifact_count"] == 1
+    assert report["test_required_artifacts"] == ["tests/test_feature.py"]
 
 
 def test_prd_quality_rejects_invalid_required_artifact_paths() -> None:
@@ -7036,6 +7138,9 @@ def test_prd_quality_rejects_invalid_required_artifact_paths() -> None:
         "required_test_artifacts",
     ]
     assert report["required_artifact_count"] == 1
+    assert report["required_artifacts"] == ["feature.py"]
+    assert report["source_required_artifact_count"] == 1
+    assert report["source_required_artifacts"] == ["feature.py"]
     assert report["test_required_artifact_count"] == 0
     assert report["test_required_artifacts"] == []
     assert report["invalid_required_artifacts"] == ["../outside.py", "C:\\outside.py"]
@@ -7057,6 +7162,9 @@ def test_prd_quality_requires_required_artifacts() -> None:
     assert report["passed"] is False
     assert report["missing"] == ["required_artifacts"]
     assert report["required_artifact_count"] == 0
+    assert report["required_artifacts"] == []
+    assert report["source_required_artifact_count"] == 0
+    assert report["source_required_artifacts"] == []
     assert report["test_required_artifact_count"] == 0
     assert report["test_required_artifacts"] == []
 
@@ -7604,6 +7712,8 @@ def test_job_runner_clears_planning_repair_constraints_after_prd_passes(
                     {"small_part_index": 1, "small_part": "Create module"}
                 ],
                 "invalid_required_artifacts": ["../outside.py"],
+                "prd_required_artifacts": ["tests/test_feature.py"],
+                "source_required_artifacts": ["feature.py"],
                 "test_required_artifacts": ["tests/test_feature.py"],
                 "recovery_mode": "prd_quality_revision",
                 "recovery_strategy": "REVISE_PRD_AND_ARCHITECTURE",
@@ -7638,6 +7748,8 @@ def test_job_runner_clears_planning_repair_constraints_after_prd_passes(
         "prd_open_questions",
         "uncovered_acceptance_small_parts",
         "invalid_required_artifacts",
+        "prd_required_artifacts",
+        "source_required_artifacts",
         "test_required_artifacts",
         "recovery_mode",
         "recovery_strategy",
