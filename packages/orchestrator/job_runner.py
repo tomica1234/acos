@@ -116,6 +116,22 @@ class JobRunner:
         "backend/frontend/shared",
         "backend frontend shared",
     )
+    SEMANTIC_ANCHOR_TOKENS = {
+        "auth",
+        "billing",
+        "crud",
+        "download",
+        "email",
+        "oauth",
+        "payment",
+        "permission",
+        "practice",
+        "progress",
+        "quiz",
+        "search",
+        "session",
+        "upload",
+    }
 
     def __init__(
         self,
@@ -2664,17 +2680,24 @@ class JobRunner:
 
             best_candidate: tuple[int, str] | None = None
             best_score = 0
+            best_tokens: set[str] = set()
             for candidate in remaining_candidates:
+                candidate_tokens = cls._semantic_tokens(candidate[1])
                 score = cls._semantic_overlap_score(
                     item_tokens,
-                    cls._semantic_tokens(candidate[1]),
+                    candidate_tokens,
                 )
                 if score > best_score:
                     best_score = score
                     best_candidate = candidate
+                    best_tokens = candidate_tokens
 
             required_score = cls._semantic_overlap_required(item_tokens)
-            covered = best_candidate is not None and best_score >= required_score
+            covered = (
+                best_candidate is not None
+                and best_score >= required_score
+                and cls._semantic_anchor_tokens(item_tokens).issubset(best_tokens)
+            )
             coverage.append(
                 {
                     index_key: index,
@@ -2714,16 +2737,23 @@ class JobRunner:
                 continue
             best_task: PlannedTask | None = None
             best_score = 0
+            best_tokens: set[str] = set()
             for task in remaining_tasks:
+                task_tokens = cls._semantic_tokens(cls._task_semantic_text(task))
                 score = cls._semantic_overlap_score(
                     item_tokens,
-                    cls._semantic_tokens(cls._task_semantic_text(task)),
+                    task_tokens,
                 )
                 if score > best_score:
                     best_score = score
                     best_task = task
+                    best_tokens = task_tokens
             required_score = cls._semantic_overlap_required(item_tokens)
-            covered = best_task is not None and best_score >= required_score
+            covered = (
+                best_task is not None
+                and best_score >= required_score
+                and cls._semantic_anchor_tokens(item_tokens).issubset(best_tokens)
+            )
             coverage.append(
                 {
                     index_key: index,
@@ -2743,6 +2773,10 @@ class JobRunner:
     @staticmethod
     def _semantic_overlap_required(item_tokens: set[str]) -> int:
         return 1 if len(item_tokens) <= 1 else 2
+
+    @classmethod
+    def _semantic_anchor_tokens(cls, item_tokens: set[str]) -> set[str]:
+        return item_tokens & cls.SEMANTIC_ANCHOR_TOKENS
 
     @classmethod
     def _semantic_tokens(cls, text: str) -> set[str]:
@@ -2809,6 +2843,28 @@ class JobRunner:
             "signin": "auth",
             "signup": "auth",
             "registration": "register",
+            "read": "crud",
+            "reads": "crud",
+            "list": "crud",
+            "lists": "crud",
+            "listed": "crud",
+            "listing": "crud",
+            "update": "crud",
+            "updates": "crud",
+            "updated": "crud",
+            "updating": "crud",
+            "edit": "crud",
+            "edits": "crud",
+            "edited": "crud",
+            "editing": "crud",
+            "delete": "crud",
+            "deletes": "crud",
+            "deleted": "crud",
+            "deleting": "crud",
+            "remove": "crud",
+            "removes": "crud",
+            "removed": "crud",
+            "removing": "crud",
             "student": "user",
             "students": "user",
             "teacher": "role",

@@ -2909,6 +2909,50 @@ def test_task_graph_validation_rejects_semantic_small_part_mismatch() -> None:
     ]
 
 
+def test_task_graph_validation_requires_anchor_token_overlap() -> None:
+    prd = PRD(
+        title="Auth App",
+        problem_statement="Users need secure account access.",
+        smallest_working_core=["Serve an authenticated app shell"],
+        small_parts=["User authentication and roles"],
+        incremental_milestones=["Users can sign in"],
+        acceptance_tests=["Student can register and login"],
+        definition_of_done=["All tests pass"],
+    )
+    task_graph = TaskGraph(
+        goal="Build auth app",
+        tasks=[
+            PlannedTask(
+                id="profile-roles",
+                title="User profile roles page",
+                description="Render a user profile page with role labels.",
+                role="implementer",
+                acceptance_criteria=["User profile roles page renders"],
+            )
+        ],
+    )
+
+    validation = JobRunner._build_task_graph_validation(
+        task_graph,
+        prd=prd,
+        require_acceptance_criteria=True,
+        require_executable_task_roles=True,
+    )
+
+    assert validation["valid"] is False
+    error_types = {item["type"] for item in validation["errors"]}
+    assert "semantic_small_part_mismatch" in error_types
+    assert "semantic_acceptance_test_mismatch" in error_types
+    assert validation["uncovered_small_parts"] == [
+        {
+            "small_part_index": 1,
+            "small_part": "User authentication and roles",
+            "task_id": None,
+            "covered": False,
+        }
+    ]
+
+
 def test_job_runner_blocks_empty_task_graph_before_implementation(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
     workspace.mkdir()
@@ -4622,7 +4666,7 @@ def test_prd_quality_accepts_semantically_covered_acceptance_tests() -> None:
         ],
         acceptance_tests=[
             "Student can register and login",
-            "Teacher can create a word set",
+            "Teacher can perform CRUD for word sets",
         ],
         definition_of_done=["All tests pass"],
     )
@@ -4645,9 +4689,36 @@ def test_prd_quality_accepts_semantically_covered_acceptance_tests() -> None:
             "small_part_index": 2,
             "small_part": "Word set CRUD operations",
             "acceptance_test_index": 2,
-            "acceptance_test": "Teacher can create a word set",
+            "acceptance_test": "Teacher can perform CRUD for word sets",
             "covered": True,
         },
+    ]
+
+
+def test_prd_quality_requires_anchor_token_overlap() -> None:
+    prd = PRD(
+        title="Auth App",
+        problem_statement="Users need secure account access.",
+        smallest_working_core=["Serve an authenticated app shell"],
+        small_parts=["User authentication and roles"],
+        incremental_milestones=["Users can sign in"],
+        acceptance_tests=["User profile roles page renders"],
+        definition_of_done=["All tests pass"],
+    )
+
+    report = JobRunner._build_prd_quality_report(prd)
+
+    assert report["passed"] is False
+    assert report["missing"] == ["acceptance_tests_semantically_cover_small_parts"]
+    assert report["acceptance_tests_semantically_cover_small_parts"] is False
+    assert report["uncovered_acceptance_small_parts"] == [
+        {
+            "small_part_index": 1,
+            "small_part": "User authentication and roles",
+            "acceptance_test_index": None,
+            "acceptance_test": None,
+            "covered": False,
+        }
     ]
 
 
