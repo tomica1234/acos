@@ -605,6 +605,10 @@ class JobRunner:
             "model_timeout_seconds",
             0.0,
         )
+        model_timeout_seconds = self._effective_model_timeout_seconds(
+            record,
+            model_timeout_seconds,
+        )
         record.runtime_state["active_model"] = preselection.model_key
         if model_timeout_seconds > 0:
             record.runtime_state["active_model_timeout_seconds"] = model_timeout_seconds
@@ -5528,6 +5532,28 @@ class JobRunner:
             return float(value)
         except (TypeError, ValueError):
             return default
+
+    def _effective_model_timeout_seconds(
+        self,
+        record: JobRecord,
+        base_timeout_seconds: float,
+    ) -> float:
+        deadline_epoch = self._constraint_float(
+            record,
+            "model_timeout_deadline_epoch",
+            0.0,
+        )
+        if deadline_epoch <= 0:
+            return base_timeout_seconds
+        remaining_seconds = deadline_epoch - datetime.now(timezone.utc).timestamp()
+        if remaining_seconds <= 0:
+            raise AdapterError(
+                "model runtime deadline exceeded before the next model call",
+                code="timeout",
+            )
+        if base_timeout_seconds <= 0:
+            return remaining_seconds
+        return min(base_timeout_seconds, remaining_seconds)
 
     def _autonomous_stage_limit_reached(
         self,

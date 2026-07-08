@@ -15,6 +15,7 @@ from apps.cli import (
     main,
     probe_provider,
     supervised_model_timeout_seconds,
+    supervised_model_timeout_deadline_epoch,
 )
 from packages.orchestrator.job_runner import build_default_runner
 from packages.orchestrator.job_store import FileJobStore
@@ -1160,6 +1161,7 @@ def test_run_supervised_can_start_from_direct_request(
         return DummyRunner(), None
 
     monkeypatch.setattr("apps.cli.build_default_runner", fake_build_default_runner)
+    monkeypatch.setattr("apps.cli.time", lambda: 1000.0)
 
     exit_code = main(
         [
@@ -1204,6 +1206,7 @@ def test_run_supervised_can_start_from_direct_request(
         "stage_review": True,
         "test_timeout_seconds": 1200,
         "model_timeout_seconds": 45.0,
+        "model_timeout_deadline_epoch": 1045.0,
     }
     assert captured["store"] is not None
     payload = json.loads(capsys.readouterr().out)
@@ -1239,6 +1242,11 @@ def test_supervised_model_timeout_caps_long_runtime_budget() -> None:
     assert supervised_model_timeout_seconds(900.0, elapsed_seconds=900.0) == 0.0
 
 
+def test_supervised_model_timeout_deadline_epoch_uses_runtime_budget() -> None:
+    assert supervised_model_timeout_deadline_epoch(None, started_epoch=1000.0) is None
+    assert supervised_model_timeout_deadline_epoch(45.0, started_epoch=1000.0) == 1045.0
+
+
 def test_run_supervised_caps_initial_model_timeout_for_long_runtime_budget(
     tmp_path: Path,
     monkeypatch,
@@ -1256,6 +1264,7 @@ def test_run_supervised_caps_initial_model_timeout_for_long_runtime_budget(
         return DummyRunner(), None
 
     monkeypatch.setattr("apps.cli.build_default_runner", fake_build_default_runner)
+    monkeypatch.setattr("apps.cli.time", lambda: 2000.0)
 
     exit_code = main(
         [
@@ -1277,7 +1286,64 @@ def test_run_supervised_caps_initial_model_timeout_for_long_runtime_budget(
     assert captured["constraints"]["model_timeout_seconds"] == (
         SUPERVISED_MODEL_CALL_TIMEOUT_CAP_SECONDS
     )
+    assert captured["constraints"]["model_timeout_deadline_epoch"] == 2900.0
     json.loads(capsys.readouterr().out)
+
+
+def test_run_supervised_plan_first_sets_runtime_deadline(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    workspace = tmp_path / "plan-first-workspace"
+    captured: dict[str, object] = {}
+
+    class DummyRunner:
+        def plan_job(self, spec: JobSpec) -> JobRecord:
+            captured["constraints"] = dict(spec.metadata["constraints"])
+            record = captured["store"].create(spec)
+            record.status = JobStatus.DONE
+            record.outputs["planning_only"] = {
+                "complete": True,
+                "ready_for_implementation": True,
+            }
+            captured["store"].update(record)
+            return record
+
+        def run_job(self, spec: JobSpec) -> JobRecord:
+            raise AssertionError("run-supervised --plan-first should not call run_job")
+
+    def fake_build_default_runner(config_dir: str | Path, workspace_root: str | Path, store=None):
+        captured["store"] = store
+        return DummyRunner(), None
+
+    monkeypatch.setattr("apps.cli.build_default_runner", fake_build_default_runner)
+    monkeypatch.setattr("apps.cli.time", lambda: 4000.0)
+
+    exit_code = main(
+        [
+            "run-supervised",
+            "--config-dir",
+            str(config_dir()),
+            "--request",
+            "Build a vocabulary app.",
+            "--repo-path",
+            str(workspace),
+            "--job-id",
+            "plan-first-runtime-deadline-job",
+            "--plan-first",
+            "--max-runtime-seconds",
+            "900",
+        ]
+    )
+
+    assert exit_code == 0
+    assert captured["constraints"]["model_timeout_seconds"] == (
+        SUPERVISED_MODEL_CALL_TIMEOUT_CAP_SECONDS
+    )
+    assert captured["constraints"]["model_timeout_deadline_epoch"] == 4900.0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["planning_result"]["planning_complete"] is True
 
 
 def test_run_supervised_preflight_stops_before_runner_when_provider_unhealthy(
@@ -4588,6 +4654,7 @@ def test_supervise_job_caps_model_timeout_for_long_runtime_budget(
         return DummyRunner(), None
 
     monkeypatch.setattr("apps.cli.build_default_runner", fake_build_default_runner)
+    monkeypatch.setattr("apps.cli.time", lambda: 3000.0)
 
     exit_code = main(
         [
@@ -4611,6 +4678,69 @@ def test_supervise_job_caps_model_timeout_for_long_runtime_budget(
     assert captured["constraints"]["model_timeout_seconds"] == (
         SUPERVISED_MODEL_CALL_TIMEOUT_CAP_SECONDS
     )
+    assert captured["constraints"]["model_timeout_deadline_epoch"] == 3900.0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["terminal_reason"] == "done"
+
+
+def test_supervise_job_without_runtime_clears_stale_model_timeout_deadline(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    jobs_dir = tmp_path / "jobs"
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    spec = JobSpec(
+        job_id="supervise-stale-deadline-job",
+        request_text="Build something useful.",
+        repo_path=str(workspace),
+        metadata={
+            "constraints": {
+                "max_autonomous_stages": 1,
+                "model_timeout_deadline_epoch": 1.0,
+            }
+        },
+    )
+    store = FileJobStore(jobs_dir)
+    record = store.create(spec)
+    record.status = JobStatus.BLOCKED
+    record.last_error = "autonomous_stage_limit_reached"
+    store.update(record)
+    captured: dict[str, object] = {}
+
+    class DummyRunner:
+        def resume_job(self, job_id: str) -> JobRecord:
+            resumed = captured["store"].get(job_id)
+            captured["constraints"] = dict(resumed.spec.metadata["constraints"])
+            resumed.status = JobStatus.DONE
+            captured["store"].update(resumed)
+            return resumed
+
+    def fake_build_default_runner(config_dir: str | Path, workspace_root: str | Path, store=None):
+        captured["store"] = store
+        return DummyRunner(), None
+
+    monkeypatch.setattr("apps.cli.build_default_runner", fake_build_default_runner)
+
+    exit_code = main(
+        [
+            "supervise-job",
+            "--config-dir",
+            str(config_dir()),
+            "--jobs-dir",
+            str(jobs_dir),
+            "--job-id",
+            "supervise-stale-deadline-job",
+            "--max-cycles",
+            "1",
+            "--steps-per-cycle",
+            "1",
+        ]
+    )
+
+    assert exit_code == 0
+    assert "model_timeout_deadline_epoch" not in captured["constraints"]
     payload = json.loads(capsys.readouterr().out)
     assert payload["terminal_reason"] == "done"
 

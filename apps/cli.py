@@ -7,7 +7,7 @@ import json
 import os
 import plistlib
 from pathlib import Path
-from time import monotonic
+from time import monotonic, time
 from typing import Any, Sequence
 from urllib.error import URLError
 from urllib.request import Request, urlopen
@@ -626,6 +626,7 @@ def apply_constraint_overrides(
     stage_review: bool = False,
     test_timeout_seconds: int | None = None,
     model_timeout_seconds: float | None = None,
+    model_timeout_deadline_epoch: float | None = None,
 ) -> None:
     if (
         max_autonomous_stages is None
@@ -634,6 +635,7 @@ def apply_constraint_overrides(
         and not stage_review
         and test_timeout_seconds is None
         and model_timeout_seconds is None
+        and model_timeout_deadline_epoch is None
     ):
         return
     spec = getattr(spec_or_record, "spec", spec_or_record)
@@ -661,6 +663,11 @@ def apply_constraint_overrides(
         constraints["test_timeout_seconds"] = test_timeout_seconds
     if model_timeout_seconds is not None and model_timeout_seconds > 0:
         constraints["model_timeout_seconds"] = float(model_timeout_seconds)
+    if model_timeout_deadline_epoch is not None:
+        if model_timeout_deadline_epoch > 0:
+            constraints["model_timeout_deadline_epoch"] = float(model_timeout_deadline_epoch)
+        else:
+            constraints.pop("model_timeout_deadline_epoch", None)
 
 
 def supervised_model_timeout_seconds(
@@ -673,6 +680,18 @@ def supervised_model_timeout_seconds(
     if remaining_seconds <= 0:
         return 0.0
     return min(remaining_seconds, SUPERVISED_MODEL_CALL_TIMEOUT_CAP_SECONDS)
+
+
+def supervised_model_timeout_deadline_epoch(
+    max_runtime_seconds: float | None,
+    *,
+    started_epoch: float | None = None,
+) -> float | None:
+    if max_runtime_seconds is None:
+        return None
+    return float(started_epoch if started_epoch is not None else time()) + float(
+        max_runtime_seconds
+    )
 
 
 def apply_recovery_overrides(record: JobRecord, summary: dict[str, object]) -> dict[str, object] | None:
@@ -922,6 +941,7 @@ def apply_resume_overrides(
     stage_review: bool = False,
     test_timeout_seconds: int | None = None,
     model_timeout_seconds: float | None = None,
+    model_timeout_deadline_epoch: float | None = 0.0,
 ) -> None:
     if max_autonomous_stages is None and bump_stage_limit:
         max_autonomous_stages = suggested_next_stage_limit(record)
@@ -933,6 +953,7 @@ def apply_resume_overrides(
         stage_review=stage_review,
         test_timeout_seconds=test_timeout_seconds,
         model_timeout_seconds=model_timeout_seconds,
+        model_timeout_deadline_epoch=model_timeout_deadline_epoch,
     )
     if max_autonomous_stages is None:
         return
@@ -965,6 +986,7 @@ def continue_persisted_job(
     stage_review: bool = False,
     test_timeout_seconds: int | None = None,
     model_timeout_seconds: float | None = None,
+    model_timeout_deadline_epoch: float | None = 0.0,
     allow_repeated_failure_recovery: bool = False,
     autonomous_recovery: bool = False,
 ) -> tuple[JobRecord, int, dict[str, object] | None, list[dict[str, Any]]]:
@@ -1029,9 +1051,12 @@ def continue_persisted_job(
             stage_review=stage_review,
             test_timeout_seconds=test_timeout_seconds,
             model_timeout_seconds=model_timeout_seconds,
+            model_timeout_deadline_epoch=model_timeout_deadline_epoch,
         )
         if model_timeout_seconds is not None and model_timeout_seconds > 0:
             event["model_timeout_seconds"] = float(model_timeout_seconds)
+        if model_timeout_deadline_epoch is not None and model_timeout_deadline_epoch > 0:
+            event["model_timeout_deadline_epoch"] = float(model_timeout_deadline_epoch)
         event["max_autonomous_stages"] = (
             record.spec.metadata.get("constraints", {}).get("max_autonomous_stages")
             if isinstance(record.spec.metadata.get("constraints"), dict)
@@ -1259,6 +1284,13 @@ def supervise_persisted_job(
     total_steps_run = 0
     stalled_cycle_count = 0
     start_time = monotonic()
+    start_epoch = time()
+    model_timeout_deadline_epoch = supervised_model_timeout_deadline_epoch(
+        max_runtime_seconds,
+        started_epoch=start_epoch,
+    )
+    if model_timeout_deadline_epoch is None:
+        model_timeout_deadline_epoch = 0.0
     elapsed_seconds = 0.0
     previous_progress_marker: tuple[Any, ...] | None = None
     stopped_for_stall = False
@@ -1307,6 +1339,7 @@ def supervise_persisted_job(
             stage_review=stage_review,
             test_timeout_seconds=test_timeout_seconds,
             model_timeout_seconds=model_timeout_seconds,
+            model_timeout_deadline_epoch=model_timeout_deadline_epoch,
             allow_repeated_failure_recovery=(
                 allow_repeated_failure_recovery
                 or pm_stall_recovery
@@ -2803,6 +2836,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             stage_review=args.stage_review,
             test_timeout_seconds=args.test_timeout_seconds,
             model_timeout_seconds=supervised_model_timeout_seconds(
+                args.max_runtime_seconds
+            ),
+            model_timeout_deadline_epoch=supervised_model_timeout_deadline_epoch(
                 args.max_runtime_seconds
             ),
         )
