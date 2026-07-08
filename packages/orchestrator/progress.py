@@ -4,6 +4,10 @@ from __future__ import annotations
 
 from typing import Any
 
+from packages.orchestrator.quality_gates import (
+    invalid_artifact_paths,
+    valid_artifact_paths,
+)
 from packages.schemas.jobs import JobRecord
 
 
@@ -1127,10 +1131,7 @@ def _autonomy_readiness(
         task["id"]
         for task in implementation_tasks
         if isinstance(task.get("id"), str)
-        and not (
-            _non_empty_strings(task.get("target_files"))
-            or _non_empty_strings(task.get("required_artifacts"))
-        )
+        and not _valid_artifact_paths(_task_artifact_paths(task))
     ]
     implementation_tasks_have_artifacts = (
         None
@@ -1141,14 +1142,20 @@ def _autonomy_readiness(
         task["id"]
         for task in executable_tasks
         if isinstance(task.get("id"), str)
-        and not (
-            _non_empty_strings(task.get("target_files"))
-            or _non_empty_strings(task.get("required_artifacts"))
-        )
+        and not _valid_artifact_paths(_task_artifact_paths(task))
     ]
     executable_tasks_have_artifacts = (
         None if not executable_tasks else not missing_artifact_task_ids
     )
+    invalid_task_artifacts = []
+    for task in executable_tasks:
+        if not isinstance(task.get("id"), str):
+            continue
+        invalid_paths = _invalid_artifact_paths(_task_artifact_paths(task))
+        if invalid_paths:
+            invalid_task_artifacts.append(
+                {"task_id": task["id"], "paths": invalid_paths}
+            )
 
     blocking_items: list[dict[str, Any]] = []
     warnings: list[dict[str, Any]] = []
@@ -1195,6 +1202,13 @@ def _autonomy_readiness(
                 "task_ids": missing_artifact_task_ids,
             }
         )
+    if require_task_artifacts and invalid_task_artifacts:
+        blocking_items.append(
+            {
+                "type": "invalid_task_artifacts",
+                "items": invalid_task_artifacts,
+            }
+        )
 
     return {
         "ready": not blocking_items,
@@ -1209,6 +1223,7 @@ def _autonomy_readiness(
             ),
             "implementation_tasks_have_artifacts": implementation_tasks_have_artifacts,
             "executable_tasks_have_artifacts": executable_tasks_have_artifacts,
+            "invalid_task_artifact_count": len(invalid_task_artifacts),
             "require_prd_quality": require_prd_quality,
             "require_task_acceptance_criteria": require_acceptance_criteria,
             "require_task_artifacts": require_task_artifacts,
@@ -1231,6 +1246,21 @@ def _non_empty_strings(value: object) -> list[str]:
     if not isinstance(value, list):
         return []
     return [item.strip() for item in value if isinstance(item, str) and item.strip()]
+
+
+def _task_artifact_paths(task: dict[str, Any]) -> list[str]:
+    return [
+        *_non_empty_strings(task.get("target_files")),
+        *_non_empty_strings(task.get("required_artifacts")),
+    ]
+
+
+def _valid_artifact_paths(paths: list[str]) -> list[str]:
+    return list(valid_artifact_paths(paths))
+
+
+def _invalid_artifact_paths(paths: list[str]) -> list[str]:
+    return invalid_artifact_paths(paths)
 
 
 def _execution_limits(record: JobRecord) -> dict[str, Any]:

@@ -28,6 +28,8 @@ from packages.orchestrator.quality_gates import (
     QualityGateError,
     ensure_fixer_safe,
     ensure_reviews_pass,
+    invalid_artifact_paths,
+    valid_artifact_paths,
 )
 from packages.orchestrator.recovery_executor import RecoveryExecutor
 from packages.orchestrator.recovery_governor import (
@@ -1916,6 +1918,23 @@ class JobRunner:
         tasks: list[PlannedTask] = []
         previous_id: str | None = None
         acceptance_tests = [item.strip() for item in prd.acceptance_tests if item.strip()]
+        source_target_files = self._unique_paths(
+            [
+                path
+                for task in implementation_tasks
+                for path in task.target_files
+            ]
+        )
+        source_required_artifacts = self._unique_paths(
+            [
+                *[
+                    path
+                    for task in implementation_tasks
+                    for path in task.required_artifacts
+                ],
+                *prd.required_artifacts,
+            ]
+        )
         for index, part in enumerate(small_parts, start=1):
             task_id = f"part-{index:02d}"
             criteria = (
@@ -1934,6 +1953,8 @@ class JobRunner:
                 complexity=TaskComplexity.MEDIUM,
                 depends_on=[previous_id] if previous_id is not None else [],
                 acceptance_criteria=criteria,
+                target_files=source_target_files,
+                required_artifacts=source_required_artifacts or source_target_files,
             )
             tasks.append(task)
             previous_id = task_id
@@ -1953,6 +1974,8 @@ class JobRunner:
             "reason": "coarse_planner_graph_with_pm_small_parts",
             "original_task_count": len(task_graph.tasks),
             "refined_task_count": len(refined.tasks),
+            "inherited_target_files": source_target_files,
+            "inherited_required_artifacts": source_required_artifacts,
         }
         self.store.update(record)
         return refined
@@ -2516,7 +2539,21 @@ class JobRunner:
         record: JobRecord,
         task_graph: TaskGraph,
     ) -> bool:
-        validation = self._build_task_graph_validation(task_graph)
+        validation = self._build_task_graph_validation(
+            task_graph,
+            require_acceptance_criteria=self._constraint_flag(
+                record,
+                "require_task_acceptance_criteria",
+            ),
+            require_executable_task_roles=self._constraint_flag(
+                record,
+                "require_completion_integrity",
+            ),
+            require_task_artifacts=self._constraint_flag(
+                record,
+                "require_task_artifacts",
+            ),
+        )
         record.outputs["task_graph_validation"] = validation
         if validation["valid"]:
             self.store.update(record)
@@ -2630,7 +2667,7 @@ class JobRunner:
             task.id
             for task in task_graph.tasks
             if task.role in executable_roles
-            and not JobRunner._non_empty_items(
+            and not valid_artifact_paths(
                 [*task.target_files, *task.required_artifacts]
             )
         ]
@@ -2645,10 +2682,28 @@ class JobRunner:
             task.id
             for task in task_graph.tasks
             if task.role in JobRunner.IMPLEMENTATION_TASK_ROLES
-            and not JobRunner._non_empty_items(
+            and not valid_artifact_paths(
                 [*task.target_files, *task.required_artifacts]
             )
         ]
+        invalid_task_artifacts = []
+        for task in task_graph.tasks:
+            if task.role not in executable_roles:
+                continue
+            invalid_paths = invalid_artifact_paths(
+                [*task.target_files, *task.required_artifacts]
+            )
+            if invalid_paths:
+                invalid_task_artifacts.append(
+                    {"task_id": task.id, "paths": invalid_paths}
+                )
+        if require_task_artifacts and invalid_task_artifacts:
+            errors.append(
+                {
+                    "type": "invalid_task_artifacts",
+                    "items": invalid_task_artifacts,
+                }
+            )
         unsupported_task_roles = [
             {"task_id": task.id, "role": task.role}
             for task in task_graph.tasks
@@ -2679,6 +2734,8 @@ class JobRunner:
             "executable_task_artifact_count": (
                 len(executable_task_ids) - len(tasks_missing_artifacts)
             ),
+            "invalid_task_artifact_count": len(invalid_task_artifacts),
+            "invalid_task_artifacts": invalid_task_artifacts,
             "unsupported_task_role_count": len(unsupported_task_roles),
             "small_part_count": len(small_parts),
             "small_part_coverage": small_part_coverage,

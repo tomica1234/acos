@@ -145,9 +145,13 @@ def _normalize_artifact_paths(paths: Iterable[str]) -> tuple[set[str], list[str]
     normalized_paths: set[str] = set()
     invalid_paths: list[str] = []
     for raw_path in paths:
-        normalized = PurePosixPath(str(raw_path).replace("\\", "/").strip())
+        value = str(raw_path).replace("\\", "/").strip()
+        normalized = PurePosixPath(value)
         if (
-            normalized.is_absolute()
+            not value
+            or value.endswith("/")
+            or (len(value) >= 3 and value[1:3] == ":/" and value[0].isalpha())
+            or normalized.is_absolute()
             or not normalized.parts
             or any(part in {"", ".", ".."} for part in normalized.parts)
         ):
@@ -155,3 +159,13 @@ def _normalize_artifact_paths(paths: Iterable[str]) -> tuple[set[str], list[str]
             continue
         normalized_paths.add(normalized.as_posix())
     return normalized_paths, invalid_paths
+
+
+def valid_artifact_paths(paths: Iterable[str]) -> set[str]:
+    normalized, _invalid = _normalize_artifact_paths(paths)
+    return normalized
+
+
+def invalid_artifact_paths(paths: Iterable[str]) -> list[str]:
+    _normalized, invalid = _normalize_artifact_paths(paths)
+    return invalid

@@ -469,6 +469,7 @@ def test_summarize_job_progress_reports_ready_for_large_autonomy(tmp_path) -> No
             "implementation_tasks_have_acceptance_criteria": True,
             "implementation_tasks_have_artifacts": True,
             "executable_tasks_have_artifacts": True,
+            "invalid_task_artifact_count": 0,
             "require_prd_quality": True,
             "require_task_acceptance_criteria": True,
             "require_task_artifacts": True,
@@ -611,6 +612,69 @@ def test_summarize_job_progress_blocks_autonomy_without_test_writer_artifacts(
     assert payload["autonomy_readiness"]["checks"][
         "implementation_tasks_have_artifacts"
     ] is True
+    assert payload["autonomy_readiness"]["checks"][
+        "executable_tasks_have_artifacts"
+    ] is False
+
+
+def test_summarize_job_progress_blocks_autonomy_with_invalid_task_artifacts(
+    tmp_path,
+) -> None:
+    task_graph = TaskGraph(
+        goal="Build incrementally",
+        tasks=[
+            PlannedTask(
+                id="core",
+                title="Core",
+                description="Build core",
+                role="implementer",
+                acceptance_criteria=["VALUE equals 1"],
+                target_files=["../feature.py", "C:\\feature.py"],
+            ),
+        ],
+    )
+    spec = JobSpec(
+        job_id="autonomy-invalid-artifacts-job",
+        request_text="Build it carefully",
+        repo_path=str(tmp_path),
+        metadata={"constraints": {"require_task_artifacts": True}},
+    )
+    record = JobRecord(job_id=spec.job_id, spec=spec, status=JobStatus.TESTING)
+    record.outputs["task_graph"] = task_graph.model_dump()
+    record.outputs["task_graph_validation"] = {
+        "valid": False,
+        "task_count": 1,
+        "implementation_task_count": 1,
+        "implementation_task_artifact_count": 0,
+        "executable_task_artifact_count": 0,
+        "errors": [
+            {
+                "type": "invalid_task_artifacts",
+                "items": [
+                    {
+                        "task_id": "core",
+                        "paths": ["../feature.py", "C:\\feature.py"],
+                    }
+                ],
+            }
+        ],
+    }
+
+    payload = summarize_job_progress(record)
+
+    assert payload["autonomy_readiness"]["ready"] is False
+    assert {
+        "type": "invalid_task_artifacts",
+        "items": [
+            {
+                "task_id": "core",
+                "paths": ["../feature.py", "C:\\feature.py"],
+            }
+        ],
+    } in payload["autonomy_readiness"]["blocking_items"]
+    assert payload["autonomy_readiness"]["checks"][
+        "invalid_task_artifact_count"
+    ] == 1
     assert payload["autonomy_readiness"]["checks"][
         "executable_tasks_have_artifacts"
     ] is False

@@ -1012,6 +1012,144 @@ def test_job_runner_refines_coarse_task_graph_from_pm_small_parts(tmp_path: Path
     ]
 
 
+def test_job_runner_refinement_preserves_task_artifact_contracts(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    registry = ModelRegistry.from_paths(
+        provider_path=config_dir() / "model_providers.yaml",
+        agents_path=config_dir() / "agents.yaml",
+        routing_path=config_dir() / "model_routing.yaml",
+    )
+    attach_mock_adapter(
+        registry,
+        {
+            "pm": PRD(
+                title="Feature",
+                problem_statement="Need feature",
+                small_parts=["Create add_one helper", "Create double helper"],
+                acceptance_tests=[
+                    "add_one(2) returns 3",
+                    "double(4) returns 8",
+                ],
+                required_artifacts=["feature.py", "tests/test_feature.py"],
+            ).model_dump(),
+            "architect": ArchitecturePlan(summary="Simple architecture").model_dump(),
+            "planner": TaskGraph(
+                goal="Build all helpers",
+                tasks=[
+                    PlannedTask(
+                        id="build-everything",
+                        title="Build all helpers",
+                        description="Implement all helpers in one pass.",
+                        role="implementer",
+                        complexity="high",
+                        target_files=["feature.py"],
+                        required_artifacts=["feature.py", "tests/test_feature.py"],
+                    )
+                ],
+            ).model_dump(),
+            "implementer": [
+                ImplementationResult(
+                    status=ImplementationStatus.IMPLEMENTED,
+                    summary="Created add_one helper",
+                    patches=[
+                        {
+                            "path": "feature.py",
+                            "content": "def add_one(value: int) -> int:\n    return value + 1\n",
+                            "operation": "create",
+                        }
+                    ],
+                ).model_dump(),
+                ImplementationResult(
+                    status=ImplementationStatus.IMPLEMENTED,
+                    summary="Created double helper",
+                    patches=[
+                        {
+                            "path": "feature.py",
+                            "content": (
+                                "def add_one(value: int) -> int:\n"
+                                "    return value + 1\n\n\n"
+                                "def double(value: int) -> int:\n"
+                                "    return value * 2\n"
+                            ),
+                            "operation": "update",
+                        }
+                    ],
+                ).model_dump(),
+            ],
+            "test_writer": [
+                TestWriterOutput(
+                    summary="Add add_one tests",
+                    patches=[
+                        {
+                            "path": "tests/test_feature.py",
+                            "content": (
+                                "from feature import add_one\n\n\n"
+                                "def test_add_one() -> None:\n"
+                                "    assert add_one(2) == 3\n"
+                            ),
+                            "operation": "create",
+                        }
+                    ],
+                ).model_dump(),
+                TestWriterOutput(
+                    summary="Add double tests",
+                    patches=[
+                        {
+                            "path": "tests/test_feature.py",
+                            "content": (
+                                "from feature import add_one, double\n\n\n"
+                                "def test_add_one() -> None:\n"
+                                "    assert add_one(2) == 3\n\n\n"
+                                "def test_double() -> None:\n"
+                                "    assert double(4) == 8\n"
+                            ),
+                            "operation": "update",
+                        }
+                    ],
+                ).model_dump(),
+            ],
+        },
+    )
+    policy = PolicyEngine.from_path(config_dir() / "policies.yaml")
+    environment = FakeMCPEnvironment(
+        workspace_root=workspace,
+        memory_db_path=workspace / ".memory.sqlite3",
+    )
+    runner = JobRunner(registry=registry, policy=policy, router=environment.build_router())
+    spec = JobSpec(
+        request_text="Create feature with tests",
+        repo_path=str(workspace),
+        target_branch="acos/refined-artifact-contract",
+        metadata={
+            "constraints": {
+                "require_task_acceptance_criteria": True,
+                "require_task_artifacts": True,
+                "task_graph_validation_refinement_attempts": 0,
+                "skip_review": True,
+                "skip_release": True,
+            }
+        },
+    )
+
+    record = runner.run_job(spec)
+
+    assert record.status == JobStatus.DONE
+    assert record.outputs["task_graph_validation"]["valid"] is True
+    assert record.outputs["task_graph_validation"]["executable_task_artifact_count"] == 2
+    assert record.outputs["task_graph_refinement"]["inherited_target_files"] == [
+        "feature.py"
+    ]
+    assert record.outputs["task_graph_refinement"][
+        "inherited_required_artifacts"
+    ] == ["feature.py", "tests/test_feature.py"]
+    for task in record.outputs["task_graph"]["tasks"]:
+        assert task["target_files"] == ["feature.py"]
+        assert task["required_artifacts"] == ["feature.py", "tests/test_feature.py"]
+
+
 def test_job_runner_plan_job_stops_after_validated_task_graph(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
     workspace.mkdir()
@@ -1720,6 +1858,41 @@ def test_task_graph_validation_requires_test_writer_artifacts_when_requested() -
     assert validation["errors"] == [
         {"type": "missing_task_artifacts", "task_ids": ["tests"]}
     ]
+
+
+def test_task_graph_validation_rejects_invalid_artifact_paths() -> None:
+    task_graph = TaskGraph(
+        goal="Build feature",
+        tasks=[
+            PlannedTask(
+                id="core",
+                title="Build core",
+                description="Build the smallest feature.",
+                role="implementer",
+                acceptance_criteria=["VALUE equals 1"],
+                target_files=["../outside.py", "C:\\outside.py"],
+                required_artifacts=["feature.py/"],
+            ),
+        ],
+    )
+
+    validation = JobRunner._build_task_graph_validation(
+        task_graph,
+        require_acceptance_criteria=True,
+        require_task_artifacts=True,
+    )
+
+    assert validation["valid"] is False
+    assert validation["invalid_task_artifact_count"] == 1
+    assert validation["invalid_task_artifacts"] == [
+        {
+            "task_id": "core",
+            "paths": ["../outside.py", "C:\\outside.py", "feature.py/"],
+        }
+    ]
+    error_types = {item["type"] for item in validation["errors"]}
+    assert "missing_task_artifacts" in error_types
+    assert "invalid_task_artifacts" in error_types
 
 
 def test_job_runner_stops_when_implementation_reports_blocked(
