@@ -155,6 +155,38 @@ def test_test_patch_quality_allows_assertion_replacement_diff() -> None:
     ensure_test_patch_quality([patch], role="fixer")
 
 
+def test_test_patch_quality_rejects_vacuous_python_literal_assertions() -> None:
+    patch = FilePatch(
+        path="tests/test_project_setup.py",
+        operation="create",
+        content=(
+            "def test_project_setup_placeholder() -> None:\n"
+            "    assert 1 == 1\n"
+        ),
+    )
+
+    with pytest.raises(QualityGateError, match="test_writer attempted to weaken tests"):
+        ensure_test_patch_quality([patch], role="test_writer")
+
+
+def test_test_patch_quality_rejects_vacuous_assertion_replacement_diff() -> None:
+    patch = FilePatch(
+        path="tests/test_feature.py",
+        operation="update",
+        unified_diff=(
+            "--- tests/test_feature.py\n"
+            "+++ tests/test_feature.py\n"
+            "@@ -1,3 +1,3 @@\n"
+            " def test_feature() -> None:\n"
+            "-    assert result.status_code == 200\n"
+            "+    assert 'project' in 'project setup'\n"
+        ),
+    )
+
+    with pytest.raises(QualityGateError, match="fixer attempted to weaken tests"):
+        ensure_test_patch_quality([patch], role="fixer")
+
+
 def test_test_patch_quality_rejects_python_pass_tests() -> None:
     patch = FilePatch(
         path="tests/test_feature.py",

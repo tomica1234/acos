@@ -223,6 +223,8 @@ def _test_patch_is_suspicious(patch: FilePatch) -> bool:
     )
     if any(snippet in compact for snippet in vacuous_assertions):
         return True
+    if _python_payload_has_vacuous_assertion(payload):
+        return True
     if _python_test_has_empty_body(payload):
         return True
     if _javascript_test_has_empty_body(compact):
@@ -283,6 +285,80 @@ def _line_has_test_assertion(line: str) -> bool:
             r"\.\s*assert[A-Za-z_]*\s*\(",
         )
     )
+
+
+def _python_payload_has_vacuous_assertion(payload: str) -> bool:
+    try:
+        tree = ast.parse(payload)
+    except SyntaxError:
+        return any(
+            _python_assert_line_is_vacuous(line)
+            for line in payload.splitlines()
+        )
+    return any(
+        isinstance(node, ast.Assert) and _python_assert_expr_is_vacuous(node.test)
+        for node in ast.walk(tree)
+    )
+
+
+def _python_assert_line_is_vacuous(line: str) -> bool:
+    stripped = line.strip()
+    if not stripped.startswith("assert "):
+        return False
+    try:
+        tree = ast.parse(stripped)
+    except SyntaxError:
+        return False
+    statements = tree.body
+    if len(statements) != 1 or not isinstance(statements[0], ast.Assert):
+        return False
+    return _python_assert_expr_is_vacuous(statements[0].test)
+
+
+def _python_assert_expr_is_vacuous(expression: ast.expr) -> bool:
+    if isinstance(expression, ast.Constant):
+        return bool(expression.value) is True
+    if not isinstance(expression, ast.Compare) or len(expression.ops) != 1:
+        return False
+    left = _literal_value(expression.left)
+    right = _literal_value(expression.comparators[0])
+    if left is _MISSING_LITERAL or right is _MISSING_LITERAL:
+        return False
+    op = expression.ops[0]
+    if isinstance(op, ast.Eq):
+        return left == right
+    if isinstance(op, ast.NotEq):
+        return left != right
+    if isinstance(op, ast.Is):
+        return left == right
+    if isinstance(op, ast.IsNot):
+        return left != right
+    try:
+        if isinstance(op, ast.In):
+            return left in right
+        if isinstance(op, ast.NotIn):
+            return left not in right
+        if isinstance(op, ast.Lt):
+            return left < right
+        if isinstance(op, ast.LtE):
+            return left <= right
+        if isinstance(op, ast.Gt):
+            return left > right
+        if isinstance(op, ast.GtE):
+            return left >= right
+    except TypeError:
+        return False
+    return False
+
+
+_MISSING_LITERAL = object()
+
+
+def _literal_value(expression: ast.expr) -> object:
+    try:
+        return ast.literal_eval(expression)
+    except (ValueError, TypeError):
+        return _MISSING_LITERAL
 
 
 def _looks_like_active_test_location(path: str) -> bool:

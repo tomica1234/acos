@@ -583,7 +583,12 @@ def test_update_missing_test_file_recovery_returns_to_test_writer_with_create_hi
     patch = FilePatch(
         path="backend/tests/test_project_setup.py",
         operation="update",
-        content="def test_project_setup() -> None:\n    assert 'project' in 'project setup'\n",
+        content=(
+            "def test_project_setup(tmp_path) -> None:\n"
+            "    marker = tmp_path / 'project.txt'\n"
+            "    marker.write_text('ready', encoding='utf-8')\n"
+            "    assert marker.read_text(encoding='utf-8') == 'ready'\n"
+        ),
     )
 
     runner._apply_patches(record, "test_writer", [patch])
@@ -606,7 +611,12 @@ def test_update_directory_target_recovery_returns_create_hint(
     patch = FilePatch(
         path="backend/tests/test_project_setup.py",
         operation="update",
-        content="def test_project_setup() -> None:\n    assert 'project' in 'project setup'\n",
+        content=(
+            "def test_project_setup(tmp_path) -> None:\n"
+            "    marker = tmp_path / 'project.txt'\n"
+            "    marker.write_text('ready', encoding='utf-8')\n"
+            "    assert marker.read_text(encoding='utf-8') == 'ready'\n"
+        ),
     )
 
     runner._apply_patches(record, "test_writer", [patch])
@@ -1397,7 +1407,12 @@ def test_failed_stage_enters_recovery_without_marking_task_complete(
                     FilePatch(
                         path=test_path,
                         operation="create",
-                        content="def test_smoke() -> None:\n    assert 1 == 1\n",
+                        content=(
+                            "def test_smoke(tmp_path) -> None:\n"
+                            "    marker = tmp_path / 'feature.txt'\n"
+                            "    marker.write_text('ready', encoding='utf-8')\n"
+                            "    assert marker.read_text(encoding='utf-8') == 'ready'\n"
+                        ),
                     )
                 ],
             ).model_dump(),
