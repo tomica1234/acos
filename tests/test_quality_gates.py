@@ -316,6 +316,34 @@ def test_test_patch_quality_rejects_vacuous_python_literal_assertions() -> None:
         ensure_test_patch_quality([patch], role="test_writer")
 
 
+def test_test_patch_quality_rejects_vacuous_python_chained_comparison() -> None:
+    patch = FilePatch(
+        path="tests/test_project_setup.py",
+        operation="create",
+        content=(
+            "def test_project_setup_placeholder() -> None:\n"
+            "    assert 1 < 2 < 3\n"
+        ),
+    )
+
+    with pytest.raises(QualityGateError, match="test_writer attempted to weaken tests"):
+        ensure_test_patch_quality([patch], role="test_writer")
+
+
+def test_test_patch_quality_allows_python_variable_chained_comparison() -> None:
+    patch = FilePatch(
+        path="tests/test_project_setup.py",
+        operation="create",
+        content=(
+            "def test_project_setup_order() -> None:\n"
+            "    first, second, third = compute_project_order()\n"
+            "    assert first < second < third\n"
+        ),
+    )
+
+    ensure_test_patch_quality([patch], role="test_writer")
+
+
 def test_test_patch_quality_rejects_vacuous_assertion_replacement_diff() -> None:
     patch = FilePatch(
         path="tests/test_feature.py",

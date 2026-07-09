@@ -323,13 +323,33 @@ def _python_assert_line_is_vacuous(line: str) -> bool:
 def _python_assert_expr_is_vacuous(expression: ast.expr) -> bool:
     if isinstance(expression, ast.Constant):
         return bool(expression.value) is True
-    if not isinstance(expression, ast.Compare) or len(expression.ops) != 1:
+    if not isinstance(expression, ast.Compare):
         return False
-    left = _literal_value(expression.left)
-    right = _literal_value(expression.comparators[0])
-    if left is _MISSING_LITERAL or right is _MISSING_LITERAL:
+    values = [_literal_value(expression.left)]
+    values.extend(_literal_value(comparator) for comparator in expression.comparators)
+    if any(value is _MISSING_LITERAL for value in values):
         return False
-    op = expression.ops[0]
+    return _python_literal_compare_chain_is_true(values, expression.ops)
+
+
+def _python_literal_compare_chain_is_true(
+    values: list[object],
+    operators: list[ast.cmpop],
+) -> bool:
+    try:
+        return all(
+            _python_literal_comparison_is_true(left, operator, right)
+            for left, operator, right in zip(values, operators, values[1:])
+        )
+    except TypeError:
+        return False
+
+
+def _python_literal_comparison_is_true(
+    left: object,
+    op: ast.cmpop,
+    right: object,
+) -> bool:
     if isinstance(op, ast.Eq):
         return left == right
     if isinstance(op, ast.NotEq):
@@ -338,21 +358,18 @@ def _python_assert_expr_is_vacuous(expression: ast.expr) -> bool:
         return left == right
     if isinstance(op, ast.IsNot):
         return left != right
-    try:
-        if isinstance(op, ast.In):
-            return left in right
-        if isinstance(op, ast.NotIn):
-            return left not in right
-        if isinstance(op, ast.Lt):
-            return left < right
-        if isinstance(op, ast.LtE):
-            return left <= right
-        if isinstance(op, ast.Gt):
-            return left > right
-        if isinstance(op, ast.GtE):
-            return left >= right
-    except TypeError:
-        return False
+    if isinstance(op, ast.In):
+        return left in right
+    if isinstance(op, ast.NotIn):
+        return left not in right
+    if isinstance(op, ast.Lt):
+        return left < right
+    if isinstance(op, ast.LtE):
+        return left <= right
+    if isinstance(op, ast.Gt):
+        return left > right
+    if isinstance(op, ast.GtE):
+        return left >= right
     return False
 
 
