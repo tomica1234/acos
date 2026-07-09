@@ -419,9 +419,10 @@ class RecoveryExecutor:
         missing_target_file = constraints.get("missing_target_file")
         if isinstance(missing_target_file, str) and missing_target_file.strip():
             paths.append(missing_target_file.strip())
-        runtime_missing = record.runtime_state.get("missing_artifacts")
-        if isinstance(runtime_missing, list):
-            paths.extend(str(item) for item in runtime_missing if str(item).strip())
+        if not paths:
+            runtime_missing = record.runtime_state.get("missing_artifacts")
+            if isinstance(runtime_missing, list):
+                paths.extend(str(item) for item in runtime_missing if str(item).strip())
         seen: set[str] = set()
         unique: list[str] = []
         for path in paths:

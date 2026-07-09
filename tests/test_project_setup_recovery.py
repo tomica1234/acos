@@ -734,6 +734,48 @@ def test_recreate_target_files_recovery_waits_until_artifacts_exist(
     assert record.status == JobStatus.WRITING_TESTS
 
 
+def test_recreate_target_files_ignores_stale_runtime_missing_when_plan_has_target(
+    tmp_path: Path,
+) -> None:
+    test_path = "frontend/test/project_scaffold.test.tsx"
+    spec = JobSpec(
+        request_text="Build it",
+        repo_path=str(tmp_path),
+        workspace_root=str(tmp_path),
+        target_branch="acos/recovery-ignore-stale-missing",
+    )
+    record = JobRecord(job_id=spec.job_id, spec=spec, status=JobStatus.RECOVERING)
+    record.runtime_state["missing_artifacts"] = ["stale.py"]
+    record.runtime_state["recovery_plan"] = {
+        "id": "plan-ignore-stale-missing",
+        "trigger": "target_files_missing",
+        "strategy": "RETURN_TO_TEST_WRITER",
+        "next_status": JobStatus.WRITING_TESTS.value,
+        "next_actor": "test_writer",
+        "steps": ["RETURN_TO_TEST_WRITER", "RECREATE_TARGET_FILES"],
+        "current_step_index": 0,
+        "status": "pending",
+        "constraints": {
+            "missing_target_file": test_path,
+            "patch_operation_hint": "create",
+            "required_artifacts": [test_path],
+            "target_files": [test_path],
+        },
+    }
+
+    RecoveryExecutor().execute_until_ready(record)
+
+    plan = record.runtime_state["recovery_plan"]
+    assert plan["status"] == "running"
+    assert plan["next_actor"] == "test_writer"
+    assert plan["next_status"] == JobStatus.WRITING_TESTS.value
+    assert plan["constraints"]["return_to_role"] == "test_writer"
+    assert plan["constraints"]["missing_artifacts"] == [test_path]
+    assert "stale.py" not in plan["constraints"]["missing_artifacts"]
+    assert record.status == JobStatus.WRITING_TESTS
+    assert not (tmp_path / "stale.py").exists()
+
+
 def test_recreate_target_files_routes_project_setup_bundle_to_scaffold(
     tmp_path: Path,
 ) -> None:
