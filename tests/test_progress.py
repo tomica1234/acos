@@ -1,5 +1,6 @@
 from datetime import datetime, timedelta, timezone
 
+from packages.orchestrator.job_constraints import STRICT_JOB_CONSTRAINTS
 from packages.orchestrator.progress import summarize_job_progress
 from packages.schemas.audit import AuditEvent
 from packages.schemas.jobs import JobRecord, JobSpec
@@ -1112,13 +1113,9 @@ def test_summarize_job_progress_detects_recurring_failure_after_recovery(tmp_pat
         "split_or_clarify_task"
     )
     assert payload["failure_analysis"]["recommended_recovery"]["constraints"] == {
-        "require_prd_quality": True,
-        "require_task_acceptance_criteria": True,
-        "require_task_artifacts": True,
-        "require_completion_integrity": True,
+        **STRICT_JOB_CONSTRAINTS,
         "recovery_mode": "recurring_failure",
         "recovery_strategy": "split_or_clarify_task",
-        "stage_review": True,
     }
     assert payload["resume"]["action"] == "split_or_clarify_task"
     assert payload["resume"]["can_auto_continue"] is True
@@ -1132,13 +1129,9 @@ def test_summarize_job_progress_recommends_recovery_by_failure_type(tmp_path) ->
             "core",
             "replan_current_task",
             {
-                "require_prd_quality": True,
-                "require_task_acceptance_criteria": True,
-                "require_task_artifacts": True,
-                "require_completion_integrity": True,
+                **STRICT_JOB_CONSTRAINTS,
                 "recovery_mode": "implementation_failure",
                 "recovery_strategy": "replan_current_task",
-                "stage_review": True,
             },
         ),
         (

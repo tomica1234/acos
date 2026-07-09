@@ -18,6 +18,7 @@ from apps.cli import (
     supervised_model_timeout_seconds,
     supervised_model_timeout_deadline_epoch,
 )
+from packages.orchestrator.job_constraints import STRICT_JOB_CONSTRAINTS
 from packages.orchestrator.job_runner import build_default_runner
 from packages.orchestrator.job_store import FileJobStore
 from packages.schemas.jobs import JobRecord, JobSpec
@@ -839,13 +840,7 @@ def test_large_autonomous_overrides_disabled_quality_gates() -> None:
         repo_path=".",
         metadata={
             "constraints": {
-                "require_prd_quality": False,
-                "require_task_acceptance_criteria": False,
-                "require_task_artifacts": False,
-                "require_completion_integrity": False,
-                "require_test_evidence": False,
-                "require_stage_test_patches": False,
-                "stage_review": False,
+                key: False for key in STRICT_JOB_CONSTRAINTS
             }
         },
     )
@@ -853,13 +848,9 @@ def test_large_autonomous_overrides_disabled_quality_gates() -> None:
     apply_constraint_overrides(spec, large_autonomous=True)
 
     constraints = spec.metadata["constraints"]
-    assert constraints["require_prd_quality"] is True
-    assert constraints["require_task_acceptance_criteria"] is True
-    assert constraints["require_task_artifacts"] is True
-    assert constraints["require_completion_integrity"] is True
-    assert constraints["require_test_evidence"] is True
-    assert constraints["require_stage_test_patches"] is True
-    assert constraints["stage_review"] is True
+    for key, value in STRICT_JOB_CONSTRAINTS.items():
+        assert constraints[key] is value
+    assert constraints["test_timeout_seconds"] == 1200
 
 
 def test_run_autonomous_starts_large_job_and_continues(

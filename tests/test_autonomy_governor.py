@@ -1,6 +1,7 @@
 from pathlib import Path
 
 from packages.orchestrator.autonomy_governor import AutonomyGovernor, apply_recovery_plan
+from packages.orchestrator.job_constraints import STRICT_JOB_CONSTRAINTS
 from packages.orchestrator.progress import summarize_job_progress
 from packages.schemas.jobs import JobRecord, JobSpec
 from packages.schemas.models import JobStatus
@@ -94,19 +95,9 @@ def test_governor_enables_strict_gates_for_prd_quality_recovery(
 
     assert decision.strategy == "planning_repair_strategy_change"
     assert decision.next_actor == "pm"
-    assert decision.constraints.items() >= {
-        "require_prd_quality": True,
-        "require_task_acceptance_criteria": True,
-        "require_task_artifacts": True,
-        "require_completion_integrity": True,
-    }.items()
+    assert decision.constraints.items() >= STRICT_JOB_CONSTRAINTS.items()
     assert plan["next_actor"] == "pm"
-    assert record.spec.metadata["constraints"].items() >= {
-        "require_prd_quality": True,
-        "require_task_acceptance_criteria": True,
-        "require_task_artifacts": True,
-        "require_completion_integrity": True,
-    }.items()
+    assert record.spec.metadata["constraints"].items() >= STRICT_JOB_CONSTRAINTS.items()
 
 
 def test_governor_enables_strict_gates_for_task_graph_recovery(
@@ -127,12 +118,7 @@ def test_governor_enables_strict_gates_for_task_graph_recovery(
 
     assert decision.strategy == "task_graph_replanning"
     assert decision.next_actor == "planner"
-    assert decision.constraints.items() >= {
-        "require_prd_quality": True,
-        "require_task_acceptance_criteria": True,
-        "require_task_artifacts": True,
-        "require_completion_integrity": True,
-    }.items()
+    assert decision.constraints.items() >= STRICT_JOB_CONSTRAINTS.items()
 
 
 def test_policy_hard_stop_is_the_only_human_inspection_path(tmp_path: Path) -> None:

@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any
 
+from packages.orchestrator.job_constraints import STRICT_JOB_CONSTRAINTS
 from packages.orchestrator.quality_gates import (
     invalid_artifact_paths,
     valid_artifact_paths,
@@ -854,12 +855,7 @@ def _recommended_recovery(
     failed_task_id: str | None,
     failed_stage: Any,
 ) -> dict[str, Any] | None:
-    strict_planning_constraints = {
-        "require_prd_quality": True,
-        "require_task_acceptance_criteria": True,
-        "require_task_artifacts": True,
-        "require_completion_integrity": True,
-    }
+    strict_planning_constraints = dict(STRICT_JOB_CONSTRAINTS)
     recovery_by_classification: dict[str, dict[str, Any]] = {
         "recurring_stage_failure": {
             "strategy": "split_or_clarify_task",

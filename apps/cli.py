@@ -647,18 +647,9 @@ def apply_constraint_overrides(
         constraints = {}
         spec.metadata["constraints"] = constraints
     if large_autonomous:
+        apply_strict_job_constraints(spec_or_record)
+        constraints = spec.metadata["constraints"]
         constraints.setdefault("max_autonomous_stages", 1)
-        for gate in (
-            "require_prd_quality",
-            "require_task_acceptance_criteria",
-            "require_task_artifacts",
-            "require_completion_integrity",
-            "require_test_evidence",
-            "require_stage_test_patches",
-            "stage_review",
-        ):
-            constraints[gate] = True
-        constraints.setdefault("test_timeout_seconds", 1200)
     if max_autonomous_stages is not None:
         constraints["max_autonomous_stages"] = max_autonomous_stages
     if require_prd_quality:

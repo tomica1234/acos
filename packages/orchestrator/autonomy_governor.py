@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from packages.orchestrator.job_constraints import STRICT_JOB_CONSTRAINTS
 from packages.schemas.jobs import JobRecord
 
 
@@ -46,12 +47,7 @@ class RecoveryDecision:
 class AutonomyGovernor:
     """Choose recovery strategy without returning to a human by default."""
 
-    STRICT_PLANNING_CONSTRAINTS = {
-        "require_prd_quality": True,
-        "require_task_acceptance_criteria": True,
-        "require_task_artifacts": True,
-        "require_completion_integrity": True,
-    }
+    STRICT_PLANNING_CONSTRAINTS = dict(STRICT_JOB_CONSTRAINTS)
 
     def decide(self, record: JobRecord, summary: dict[str, Any]) -> RecoveryDecision:
         last_error = str(record.last_error or summary.get("last_error") or "")
