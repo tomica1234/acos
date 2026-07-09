@@ -43,7 +43,7 @@ def ensure_test_patch_quality(
     for patch in patches:
         if workspace_root is not None:
             patch = _patch_with_workspace_diff(patch, workspace_root=workspace_root)
-        if _looks_like_test_path(patch.path) and _test_patch_is_suspicious(patch):
+        if _patch_touches_test_path(patch) and _test_patch_is_suspicious(patch):
             raise QualityGateError(f"{role} attempted to weaken tests")
 
 
@@ -214,8 +214,16 @@ def _looks_like_test_path(path: str) -> bool:
     )
 
 
+def _patch_touches_test_path(patch: FilePatch) -> bool:
+    return _looks_like_test_path(patch.path) or bool(
+        patch.new_path and _looks_like_test_path(patch.new_path)
+    )
+
+
 def _test_patch_is_suspicious(patch: FilePatch) -> bool:
     if _test_patch_removes_test_coverage(patch):
+        return True
+    if _test_patch_renames_non_test_into_test_location(patch):
         return True
     if _test_patch_removes_assertions_without_replacement(patch):
         return True
@@ -272,6 +280,14 @@ def _test_patch_removes_test_coverage(patch: FilePatch) -> bool:
         patch.new_path and _looks_like_active_test_location(patch.new_path)
     )
     return source_is_test and not target_is_test
+
+
+def _test_patch_renames_non_test_into_test_location(patch: FilePatch) -> bool:
+    if patch.operation != "rename" or not patch.new_path:
+        return False
+    source_is_test = _looks_like_test_path(patch.path)
+    target_is_test = _looks_like_active_test_location(patch.new_path)
+    return target_is_test and not source_is_test
 
 
 def _patch_with_workspace_diff(

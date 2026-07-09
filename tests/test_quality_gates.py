@@ -863,6 +863,28 @@ def test_test_patch_quality_allows_test_rename_inside_test_tree() -> None:
     ensure_test_patch_quality([patch], role="test_writer")
 
 
+def test_test_patch_quality_rejects_renaming_non_test_file_into_test_tree() -> None:
+    patch = FilePatch(
+        path="docs/feature_notes.py",
+        operation="rename",
+        new_path="tests/test_feature_notes.py",
+    )
+
+    with pytest.raises(QualityGateError, match="test_writer attempted to weaken tests"):
+        ensure_test_patch_quality([patch], role="test_writer")
+
+
+def test_test_patch_quality_rejects_renaming_non_test_file_into_frontend_test_tree() -> None:
+    patch = FilePatch(
+        path="frontend/src/feature_notes.ts",
+        operation="rename",
+        new_path="frontend/test/project_scaffold.test.tsx",
+    )
+
+    with pytest.raises(QualityGateError, match="test_writer attempted to weaken tests"):
+        ensure_test_patch_quality([patch], role="test_writer")
+
+
 def test_test_patch_quality_allows_non_test_files_with_skip_text() -> None:
     patch = FilePatch(
         path="frontend/src/App.tsx",
