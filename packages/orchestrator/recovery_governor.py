@@ -617,7 +617,12 @@ class RecoveryGovernor:
                 constraints[key] = value.strip()
             elif isinstance(value, (int, float, bool)):
                 constraints[key] = value
-        for key in ("missing_artifacts", "invalid_artifacts", "non_file_artifacts"):
+        for key in (
+            "missing_artifacts",
+            "invalid_artifacts",
+            "non_file_artifacts",
+            "missing_task_ids",
+        ):
             value = cls._clean_string_list(runtime_state.get(key))
             if value:
                 constraints[key] = value

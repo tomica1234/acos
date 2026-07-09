@@ -352,6 +352,28 @@ def test_recovery_governor_preserves_artifact_stage_context() -> None:
     assert constraints["invalid_artifacts"] == ["../outside.py"]
 
 
+def test_recovery_governor_preserves_completion_missing_task_context() -> None:
+    record = _record("completion_integrity_failed:missing_tasks:core-tests")
+
+    RecoveryGovernor().recover(
+        record,
+        error="completion_integrity_failed:missing_tasks:core-tests",
+        runtime_state={
+            "completion_integrity_failure_reasons": [
+                "missing_tasks:core-tests|prd-tests"
+            ],
+            "missing_task_ids": ["core-tests", "prd-tests"],
+        },
+    )
+
+    plan = record.runtime_state["recovery_plan"]
+    constraints = plan["constraints"]
+    assert plan["strategy"] == "REPLAN_TASK_WITH_REQUIRED_ARTIFACTS"
+    assert record.status == JobStatus.REPLANNING
+    assert constraints["recovery_mode"] == "required_artifacts_replan"
+    assert constraints["missing_task_ids"] == ["core-tests", "prd-tests"]
+
+
 def test_recovery_governor_drops_stale_patch_context_for_artifact_replan() -> None:
     record = _record("required_artifacts_missing:stage:core")
 

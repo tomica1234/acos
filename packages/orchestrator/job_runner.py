@@ -1294,6 +1294,7 @@ class JobRunner:
             return
         for key in (
             *JobRunner.RECOVERY_METADATA_CONSTRAINT_KEYS,
+            "missing_task_ids",
             "patch_operation_hint",
             "missing_target_file",
         ):
@@ -1340,6 +1341,7 @@ class JobRunner:
             "uncovered_test_artifact_domain_small_parts",
             "non_observable_acceptance_tests",
             "invalid_required_artifacts",
+            "missing_task_ids",
             "prd_required_artifacts",
             "required_incremental_milestone_count",
             "required_small_part_count",
@@ -7665,6 +7667,7 @@ class JobRunner:
     ) -> dict[str, Any]:
         runtime_state = dict(record.runtime_state)
         parsed: dict[str, list[str]] = {
+            "missing_task_ids": [],
             "required_artifacts": [],
             "target_files": [],
             "missing_artifacts": [],
@@ -7686,6 +7689,11 @@ class JobRunner:
                 continue
             prefix, artifact = reason.split(":", 1)
             artifact = artifact.strip()
+            if prefix == "missing_tasks":
+                parsed["missing_task_ids"].extend(
+                    item.strip() for item in artifact.split("|") if item.strip()
+                )
+                continue
             if not artifact or prefix not in prefix_map:
                 continue
             owner_key, evidence_key = prefix_map[prefix]

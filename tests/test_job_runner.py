@@ -85,6 +85,7 @@ def test_clear_active_recovery_state_removes_stale_done_markers(tmp_path: Path) 
                 "recovery_failed_stage": 2,
                 "recovery_attempt": 3,
                 "patch_operation_hint": "create",
+                "missing_task_ids": ["core-tests"],
                 "missing_target_file": "frontend/test/project_scaffold.test.tsx",
                 "max_autonomous_stages": 12,
             }
@@ -4996,6 +4997,28 @@ def test_completion_integrity_report_records_failed_test_reason(
     assert report["failure_reasons"] == ["test_failed"]
     assert report["test_success"] is False
     assert runtime_state["completion_integrity_failure_reasons"] == ["test_failed"]
+
+
+def test_completion_integrity_recovery_state_preserves_missing_task_ids(
+    tmp_path: Path,
+) -> None:
+    store = InMemoryJobStore()
+    spec = JobSpec(
+        request_text="Create feature with tests",
+        repo_path=str(tmp_path),
+        target_branch="acos/completion-integrity-missing-task-context",
+    )
+    record = store.create(spec)
+
+    runtime_state = JobRunner._completion_integrity_recovery_state(
+        record,
+        ["missing_tasks:core-tests|docs"],
+    )
+
+    assert runtime_state["missing_task_ids"] == ["core-tests", "docs"]
+    assert runtime_state["completion_integrity_failure_reasons"] == [
+        "missing_tasks:core-tests|docs"
+    ]
 
 
 def test_job_runner_blocks_completion_without_test_evidence(
@@ -9978,6 +10001,7 @@ def test_job_runner_clears_planning_repair_constraints_after_prd_passes(
                     }
                 ],
                 "invalid_required_artifacts": ["../outside.py"],
+                "missing_task_ids": ["core-tests"],
                 "prd_required_artifacts": ["tests/test_feature.py"],
                 "required_incremental_milestone_count": 2,
                 "required_small_part_count": 2,
@@ -10026,6 +10050,7 @@ def test_job_runner_clears_planning_repair_constraints_after_prd_passes(
         "uncovered_implementation_artifact_small_parts",
         "non_observable_acceptance_tests",
         "invalid_required_artifacts",
+        "missing_task_ids",
         "prd_required_artifacts",
         "required_incremental_milestone_count",
         "required_small_part_count",

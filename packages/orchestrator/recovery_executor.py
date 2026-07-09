@@ -42,6 +42,7 @@ class RecoveryExecutor:
         "force_project_setup_scaffold",
         "invalid_artifacts",
         "missing_artifacts",
+        "missing_task_ids",
         "missing_target_file",
         "non_file_artifacts",
         "patch_operation_hint",
