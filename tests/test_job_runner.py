@@ -7129,6 +7129,8 @@ def test_job_runner_blocks_prd_quality_when_acceptance_tests_do_not_cover_small_
         "required_artifacts": ["feature.py", "tests/test_feature.py"],
         "source_required_artifact_count": 1,
         "source_required_artifacts": ["feature.py"],
+        "implementation_required_artifact_count": 1,
+        "implementation_required_artifacts": ["feature.py"],
         "test_required_artifact_count": 1,
         "test_required_artifacts": ["tests/test_feature.py"],
         "invalid_required_artifacts": [],
@@ -7156,6 +7158,8 @@ def test_prd_quality_requires_test_artifact_when_acceptance_tests_exist() -> Non
     assert report["required_artifacts"] == ["feature.py"]
     assert report["source_required_artifact_count"] == 1
     assert report["source_required_artifacts"] == ["feature.py"]
+    assert report["implementation_required_artifact_count"] == 1
+    assert report["implementation_required_artifacts"] == ["feature.py"]
     assert report["test_required_artifact_count"] == 0
     assert report["test_required_artifacts"] == []
 
@@ -7180,8 +7184,52 @@ def test_prd_quality_requires_source_artifact_when_acceptance_tests_exist() -> N
     assert report["required_artifacts"] == ["tests/test_feature.py"]
     assert report["source_required_artifact_count"] == 0
     assert report["source_required_artifacts"] == []
+    assert report["implementation_required_artifact_count"] == 0
+    assert report["implementation_required_artifacts"] == []
     assert report["test_required_artifact_count"] == 1
     assert report["test_required_artifacts"] == ["tests/test_feature.py"]
+
+
+def test_prd_quality_requires_implementation_source_for_app_work() -> None:
+    prd = PRD(
+        title="Feature",
+        problem_statement="Need feature",
+        smallest_working_core=["Expose a feature module"],
+        small_parts=["Create backend feature module"],
+        incremental_milestones=["Module exists"],
+        acceptance_tests=["Create backend feature module"],
+        definition_of_done=["All tests pass"],
+        required_artifacts=["README.md", "package.json", "tests/test_feature.py"],
+    )
+
+    report = JobRunner._build_prd_quality_report(prd)
+
+    assert report["passed"] is False
+    assert report["missing"] == ["required_implementation_artifacts"]
+    assert report["source_required_artifacts"] == ["README.md", "package.json"]
+    assert report["implementation_required_artifacts"] == []
+    assert report["test_required_artifacts"] == ["tests/test_feature.py"]
+
+
+def test_prd_quality_allows_docs_artifact_for_docs_only_work() -> None:
+    prd = PRD(
+        title="Docs",
+        problem_statement="Users need setup instructions.",
+        smallest_working_core=["Document setup steps"],
+        small_parts=["Write README setup guide"],
+        incremental_milestones=["README guide exists"],
+        acceptance_tests=["README setup guide contains install and run steps"],
+        definition_of_done=["Docs tests pass"],
+        required_artifacts=["README.md", "tests/test_readme.py"],
+    )
+
+    report = JobRunner._build_prd_quality_report(prd)
+
+    assert report["passed"] is True
+    assert report["missing"] == []
+    assert report["source_required_artifacts"] == ["README.md"]
+    assert report["implementation_required_artifacts"] == []
+    assert report["test_required_artifacts"] == ["tests/test_readme.py"]
 
 
 def test_prd_quality_rejects_invalid_required_artifact_paths() -> None:
@@ -7207,6 +7255,8 @@ def test_prd_quality_rejects_invalid_required_artifact_paths() -> None:
     assert report["required_artifacts"] == ["feature.py"]
     assert report["source_required_artifact_count"] == 1
     assert report["source_required_artifacts"] == ["feature.py"]
+    assert report["implementation_required_artifact_count"] == 1
+    assert report["implementation_required_artifacts"] == ["feature.py"]
     assert report["test_required_artifact_count"] == 0
     assert report["test_required_artifacts"] == []
     assert report["invalid_required_artifacts"] == ["../outside.py", "C:\\outside.py"]
@@ -7780,6 +7830,7 @@ def test_job_runner_clears_planning_repair_constraints_after_prd_passes(
                 "invalid_required_artifacts": ["../outside.py"],
                 "prd_required_artifacts": ["tests/test_feature.py"],
                 "source_required_artifacts": ["feature.py"],
+                "implementation_required_artifacts": ["feature.py"],
                 "test_required_artifacts": ["tests/test_feature.py"],
                 "recovery_mode": "prd_quality_revision",
                 "recovery_strategy": "REVISE_PRD_AND_ARCHITECTURE",
@@ -7816,6 +7867,7 @@ def test_job_runner_clears_planning_repair_constraints_after_prd_passes(
         "invalid_required_artifacts",
         "prd_required_artifacts",
         "source_required_artifacts",
+        "implementation_required_artifacts",
         "test_required_artifacts",
         "recovery_mode",
         "recovery_strategy",

@@ -1216,6 +1216,7 @@ class JobRunner:
             "invalid_required_artifacts",
             "prd_required_artifacts",
             "source_required_artifacts",
+            "implementation_required_artifacts",
             "test_required_artifacts",
             "task_graph_validation_errors",
             *TASK_GRAPH_VALIDATION_CONTEXT_KEYS_SOURCE,
@@ -1803,6 +1804,83 @@ class JobRunner:
             }
         )
 
+    @staticmethod
+    def _looks_like_implementation_work_item(text: str) -> bool:
+        tokens = set(re.findall(r"[a-z0-9_]+", text.lower()))
+        if not tokens:
+            return False
+        documentation_tokens = {
+            "doc",
+            "docs",
+            "documentation",
+            "guide",
+            "manual",
+            "readme",
+        }
+        implementation_tokens = {
+            "api",
+            "app",
+            "backend",
+            "client",
+            "component",
+            "crud",
+            "endpoint",
+            "feature",
+            "frontend",
+            "implement",
+            "module",
+            "page",
+            "react",
+            "route",
+            "server",
+            "service",
+            "ui",
+            "view",
+        } | JobRunner.SEMANTIC_ANCHOR_TOKENS | JobRunner.CRUD_OPERATION_TOKENS
+        return bool(tokens & implementation_tokens) and not (
+            tokens <= documentation_tokens
+        )
+
+    @staticmethod
+    def _looks_like_implementation_source_path(path: str) -> bool:
+        normalized = path.replace("\\", "/").lower()
+        name = normalized.rsplit("/", 1)[-1]
+        if name in {
+            ".env",
+            ".env.example",
+            ".gitignore",
+            "dockerfile",
+            "package.json",
+            "package-lock.json",
+            "pnpm-lock.yaml",
+            "readme.md",
+            "requirements.txt",
+            "vite.config.js",
+            "vite.config.ts",
+            "yarn.lock",
+        }:
+            return False
+        if normalized.startswith(("docs/", "doc/")):
+            return False
+        source_extensions = {
+            ".css",
+            ".go",
+            ".html",
+            ".java",
+            ".js",
+            ".jsx",
+            ".kt",
+            ".php",
+            ".py",
+            ".rb",
+            ".rs",
+            ".scss",
+            ".swift",
+            ".ts",
+            ".tsx",
+        }
+        return any(normalized.endswith(suffix) for suffix in source_extensions)
+
     def _record_missing_target_repeat(self, record: JobRecord, path: str) -> int:
         repeats = record.runtime_state.setdefault("missing_target_file_repeats", {})
         if not isinstance(repeats, dict):
@@ -2155,6 +2233,7 @@ class JobRunner:
             "invalid_required_artifacts",
             "prd_required_artifacts",
             "source_required_artifacts",
+            "implementation_required_artifacts",
             "test_required_artifacts",
         ):
             runtime_state.pop(key, None)
@@ -2174,6 +2253,9 @@ class JobRunner:
         source_required_artifacts = JobRunner._non_empty_items(
             [str(item) for item in report.get("source_required_artifacts", [])]
         )
+        implementation_required_artifacts = JobRunner._non_empty_items(
+            [str(item) for item in report.get("implementation_required_artifacts", [])]
+        )
         test_required_artifacts = JobRunner._non_empty_items(
             [str(item) for item in report.get("test_required_artifacts", [])]
         )
@@ -2192,6 +2274,10 @@ class JobRunner:
             runtime_state["prd_required_artifacts"] = prd_required_artifacts
         if source_required_artifacts:
             runtime_state["source_required_artifacts"] = source_required_artifacts
+        if implementation_required_artifacts:
+            runtime_state["implementation_required_artifacts"] = (
+                implementation_required_artifacts
+            )
         if test_required_artifacts:
             runtime_state["test_required_artifacts"] = test_required_artifacts
         return runtime_state
@@ -2281,6 +2367,12 @@ class JobRunner:
                 "Add at least one non-test required_artifact for the implementation or app surface; "
                 "tests alone are not enough for autonomous implementation."
             )
+        if "required_implementation_artifacts" in missing:
+            logs.append(
+                "Add at least one implementation source required_artifact such as backend/main.py, "
+                "frontend/src/App.tsx, src/server.ts, or app.py; README, .env, and package manifests "
+                "alone are not enough for app implementation."
+            )
         if "required_test_artifacts" in missing:
             logs.append(
                 "Add at least one test required_artifact such as tests/test_*.py or frontend test/*.test.tsx."
@@ -2365,11 +2457,28 @@ class JobRunner:
             for path in required_artifacts
             if not JobRunner._looks_like_test_path(path)
         )
+        implementation_required_artifacts = sorted(
+            path
+            for path in source_required_artifacts
+            if JobRunner._looks_like_implementation_source_path(path)
+        )
         test_required_artifacts = sorted(
             path for path in required_artifacts if JobRunner._looks_like_test_path(path)
         )
         if acceptance_tests and required_artifacts and not source_required_artifacts:
             missing.append("required_source_artifacts")
+        implementation_small_parts = [
+            part
+            for part in small_parts
+            if JobRunner._looks_like_implementation_work_item(part)
+        ]
+        if (
+            acceptance_tests
+            and source_required_artifacts
+            and implementation_small_parts
+            and not implementation_required_artifacts
+        ):
+            missing.append("required_implementation_artifacts")
         if acceptance_tests and required_artifacts and not test_required_artifacts:
             missing.append("required_test_artifacts")
         if JobRunner._non_empty_items(prd.open_questions):
@@ -2394,6 +2503,10 @@ class JobRunner:
             "required_artifacts": sorted(required_artifacts),
             "source_required_artifact_count": len(source_required_artifacts),
             "source_required_artifacts": source_required_artifacts,
+            "implementation_required_artifact_count": len(
+                implementation_required_artifacts
+            ),
+            "implementation_required_artifacts": implementation_required_artifacts,
             "test_required_artifact_count": len(test_required_artifacts),
             "test_required_artifacts": test_required_artifacts,
             "invalid_required_artifacts": invalid_required_artifacts,

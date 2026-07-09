@@ -158,6 +158,37 @@ def test_recovery_governor_preserves_all_task_graph_validation_details() -> None
         assert constraints[key] == [{"detail_key": key}]
 
 
+def test_recovery_governor_preserves_prd_quality_artifact_context() -> None:
+    constraints = RecoveryGovernor._prd_quality_context_constraints(
+        {
+            "prd_quality_missing": ["required_implementation_artifacts"],
+            "prd_quality_warnings": ["open_questions_present"],
+            "prd_open_questions": ["Which UI?"],
+            "invalid_required_artifacts": ["../outside.py"],
+            "prd_required_artifacts": [
+                "README.md",
+                "frontend/src/App.tsx",
+                "tests/test_app.py",
+            ],
+            "source_required_artifacts": ["README.md", "frontend/src/App.tsx"],
+            "implementation_required_artifacts": ["frontend/src/App.tsx"],
+            "test_required_artifacts": ["tests/test_app.py"],
+        }
+    )
+
+    assert constraints["prd_quality_missing"] == [
+        "required_implementation_artifacts"
+    ]
+    assert constraints["implementation_required_artifacts"] == [
+        "frontend/src/App.tsx"
+    ]
+    assert constraints["source_required_artifacts"] == [
+        "README.md",
+        "frontend/src/App.tsx",
+    ]
+    assert constraints["test_required_artifacts"] == ["tests/test_app.py"]
+
+
 def test_recovery_governor_maps_agent_max_steps_to_strategy_change() -> None:
     record = _record(
         "Agent fixer exceeded max_steps=24 without a valid structured response; "
