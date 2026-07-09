@@ -2162,11 +2162,11 @@ class JobRunner:
                     record.runtime_state.pop("pending_approval_patch_role", None)
                     record.pending_approval_id = None
                     raise
-                record.runtime_state.pop("pending_approval_patch", None)
-                record.runtime_state.pop("pending_approval_patch_role", None)
                 result = self.router.call("repo_server.apply_patch", **pending_patch)
                 if not result.ok:
                     raise RuntimeError(result.error or "approved patch application failed")
+            record.runtime_state.pop("pending_approval_patch", None)
+            record.runtime_state.pop("pending_approval_patch_role", None)
             record.pending_approval_id = None
             if record.status != JobStatus.RESUMING:
                 record.status = JobStatus.RESUMING
@@ -2175,6 +2175,7 @@ class JobRunner:
         if approval.status == ApprovalStatus.REJECTED:
             record.last_error = approval.resolution_reason or "approval rejected"
             record.pending_approval_id = None
+            record.runtime_state.pop("pending_approval_patch", None)
             record.runtime_state.pop("pending_approval_patch_role", None)
             if record.status != JobStatus.BLOCKED:
                 record.status = JobStatus.BLOCKED

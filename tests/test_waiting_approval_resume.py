@@ -20,6 +20,8 @@ def test_waiting_approval_resume_flow(tmp_path) -> None:
     resumed = harness.runner.resume_job(record.job_id)
 
     assert resumed.status == JobStatus.DONE
+    assert "pending_approval_patch" not in resumed.runtime_state
+    assert "pending_approval_patch_role" not in resumed.runtime_state
 
 
 def test_waiting_approval_reject_flow(tmp_path) -> None:
@@ -35,6 +37,8 @@ def test_waiting_approval_reject_flow(tmp_path) -> None:
     blocked = harness.runner.resume_job(record.job_id)
 
     assert blocked.status == JobStatus.BLOCKED
+    assert "pending_approval_patch" not in blocked.runtime_state
+    assert "pending_approval_patch_role" not in blocked.runtime_state
 
 
 def test_approved_patch_is_revalidated_before_resume_apply(tmp_path) -> None:
