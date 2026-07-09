@@ -117,6 +117,72 @@ def test_summarize_job_progress_reports_pending_and_failed_stage(tmp_path) -> No
     assert payload["change_summary"]["stages"][1]["task_id"] == "extra"
 
 
+def test_summarize_job_progress_reports_recovery_created_files(tmp_path) -> None:
+    spec = JobSpec(
+        job_id="recovery-created-progress",
+        request_text="Recover missing files",
+        repo_path=str(tmp_path),
+        metadata={
+            "constraints": {
+                "deterministically_created_files": ["tests/test_app.py"],
+            }
+        },
+    )
+    record = JobRecord(job_id=spec.job_id, spec=spec, status=JobStatus.WRITING_TESTS)
+    record.runtime_state["recovery_plan"] = {
+        "status": "completed",
+        "constraints": {
+            "deterministically_created_files": ["tests/test_app.py"],
+        },
+    }
+
+    payload = summarize_job_progress(record)
+
+    assert payload["change_summary"] == {
+        "changed_files": ["tests/test_app.py"],
+        "patch_count": 0,
+        "stages": [],
+        "recovery_created_files": ["tests/test_app.py"],
+    }
+
+
+def test_summarize_job_progress_merges_deterministic_test_scaffolds(
+    tmp_path,
+) -> None:
+    spec = JobSpec(
+        job_id="deterministic-scaffold-progress",
+        request_text="Recover missing test",
+        repo_path=str(tmp_path),
+    )
+    record = JobRecord(job_id=spec.job_id, spec=spec, status=JobStatus.WRITING_TESTS)
+    record.outputs["deterministic_test_scaffolds"] = [
+        {
+            "path": "frontend/test/project_scaffold.test.tsx",
+            "reason": "repeated_missing_target_file",
+        }
+    ]
+    record.outputs["autonomous_stages"] = [
+        {
+            "stage": 1,
+            "change_summary": {
+                "changed_files": ["backend/main.py"],
+                "patch_count": 1,
+            },
+        }
+    ]
+
+    payload = summarize_job_progress(record)
+
+    assert payload["change_summary"]["changed_files"] == [
+        "frontend/test/project_scaffold.test.tsx",
+        "backend/main.py",
+    ]
+    assert payload["change_summary"]["recovery_created_files"] == [
+        "frontend/test/project_scaffold.test.tsx"
+    ]
+    assert payload["change_summary"]["patch_count"] == 1
+
+
 def test_done_progress_does_not_surface_stale_recovery_state(tmp_path) -> None:
     task_graph = TaskGraph(
         goal="Recover and finish",

@@ -434,11 +434,17 @@ def _last_failed_stage(record: JobRecord) -> dict[str, Any] | None:
 
 def _change_summary(record: JobRecord) -> dict[str, Any]:
     stage_summaries: list[dict[str, Any]] = []
-    changed_files: list[str] = []
+    recovery_created_files = _recovery_created_files(record)
+    changed_files: list[str] = list(recovery_created_files)
     patch_count = 0
     stages = record.outputs.get("autonomous_stages", [])
     if not isinstance(stages, list):
-        return {"changed_files": [], "patch_count": 0, "stages": []}
+        return {
+            "changed_files": changed_files,
+            "patch_count": 0,
+            "stages": [],
+            "recovery_created_files": recovery_created_files,
+        }
     for stage in stages:
         if not isinstance(stage, dict):
             continue
@@ -464,7 +470,32 @@ def _change_summary(record: JobRecord) -> dict[str, Any]:
         "changed_files": changed_files,
         "patch_count": patch_count,
         "stages": stage_summaries,
+        "recovery_created_files": recovery_created_files,
     }
+
+
+def _recovery_created_files(record: JobRecord) -> list[str]:
+    paths: list[str] = []
+    recovery_plan = record.runtime_state.get("recovery_plan")
+    if isinstance(recovery_plan, dict):
+        constraints = recovery_plan.get("constraints")
+        if isinstance(constraints, dict):
+            paths.extend(_string_list(constraints.get("deterministically_created_files")))
+    metadata_constraints = record.spec.metadata.get("constraints")
+    if isinstance(metadata_constraints, dict):
+        paths.extend(
+            _string_list(metadata_constraints.get("deterministically_created_files"))
+        )
+    deterministic_test_scaffolds = record.outputs.get("deterministic_test_scaffolds")
+    if isinstance(deterministic_test_scaffolds, list):
+        for item in deterministic_test_scaffolds:
+            if isinstance(item, dict):
+                path = item.get("path")
+                if isinstance(path, str):
+                    paths.append(path)
+            elif isinstance(item, str):
+                paths.append(item)
+    return _unique_paths(paths)
 
 
 def _stage_statuses(record: JobRecord) -> list[dict[str, Any]]:
@@ -1465,6 +1496,12 @@ def _list_output(record: JobRecord, key: str) -> list[dict[str, Any]]:
     if not isinstance(value, list):
         return []
     return [item for item in value if isinstance(item, dict)]
+
+
+def _string_list(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [item for item in value if isinstance(item, str) and item.strip()]
 
 
 def _unique_paths(paths: list[str]) -> list[str]:
