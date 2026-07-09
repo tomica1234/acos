@@ -203,6 +203,8 @@ def _looks_like_test_path(path: str) -> bool:
 
 
 def _test_patch_is_suspicious(patch: FilePatch) -> bool:
+    if _test_patch_removes_test_coverage(patch):
+        return True
     payload = _test_patch_payload(patch)
     if not payload:
         return False
@@ -232,6 +234,31 @@ def _test_patch_is_suspicious(patch: FilePatch) -> bool:
         r"\.\s*(?:skip|only)\s*\(",
     )
     return any(re.search(pattern, payload) for pattern in suspicious_patterns)
+
+
+def _test_patch_removes_test_coverage(patch: FilePatch) -> bool:
+    operation = patch.operation
+    if operation == "delete":
+        return _looks_like_test_path(patch.path)
+    if operation != "rename":
+        return False
+    source_is_test = _looks_like_test_path(patch.path)
+    target_is_test = bool(
+        patch.new_path and _looks_like_active_test_location(patch.new_path)
+    )
+    return source_is_test and not target_is_test
+
+
+def _looks_like_active_test_location(path: str) -> bool:
+    normalized = str(path).replace("\\", "/").lower().lstrip("./")
+    name = normalized.rsplit("/", 1)[-1]
+    if "/tests/" in f"/{normalized}" or "/test/" in f"/{normalized}":
+        return True
+    if "/" not in normalized and name.startswith("test_") and name.endswith(".py"):
+        return True
+    if normalized.startswith(("docs/", "doc/")):
+        return False
+    return ".test." in name or ".spec." in name
 
 
 def _python_test_has_empty_body(payload: str) -> bool:

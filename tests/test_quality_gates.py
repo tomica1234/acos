@@ -103,6 +103,37 @@ def test_test_patch_quality_rejects_python_pass_tests() -> None:
         ensure_test_patch_quality([patch], role="test_writer")
 
 
+def test_test_patch_quality_rejects_test_file_deletes() -> None:
+    patch = FilePatch(
+        path="tests/test_feature.py",
+        operation="delete",
+    )
+
+    with pytest.raises(QualityGateError, match="fixer attempted to weaken tests"):
+        ensure_test_patch_quality([patch], role="fixer")
+
+
+def test_test_patch_quality_rejects_renaming_tests_outside_test_tree() -> None:
+    patch = FilePatch(
+        path="tests/test_feature.py",
+        operation="rename",
+        new_path="docs/test_feature_backup.py",
+    )
+
+    with pytest.raises(QualityGateError, match="test_writer attempted to weaken tests"):
+        ensure_test_patch_quality([patch], role="test_writer")
+
+
+def test_test_patch_quality_allows_test_rename_inside_test_tree() -> None:
+    patch = FilePatch(
+        path="tests/test_feature.py",
+        operation="rename",
+        new_path="tests/test_feature_smoke.py",
+    )
+
+    ensure_test_patch_quality([patch], role="test_writer")
+
+
 def test_test_patch_quality_allows_non_test_files_with_skip_text() -> None:
     patch = FilePatch(
         path="frontend/src/App.tsx",

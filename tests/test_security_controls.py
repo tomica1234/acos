@@ -682,6 +682,32 @@ def test_job_runner_blocks_weak_frontend_test_writer_patch(tmp_path: Path) -> No
         )
 
 
+def test_job_runner_blocks_test_writer_test_delete_patch(tmp_path: Path) -> None:
+    registry = load_registry()
+    policy = PolicyEngine.from_path(config_dir() / "policies.yaml")
+    environment = FakeMCPEnvironment(
+        workspace_root=tmp_path,
+        memory_db_path=tmp_path / ".memory.sqlite3",
+    )
+    runner = JobRunner(registry=registry, policy=policy, router=environment.build_router())
+    record = JobRecord(
+        job_id="job-delete-test",
+        spec=JobSpec(
+            request_text="test",
+            repo_path=str(tmp_path),
+            workspace_root=str(tmp_path),
+            target_branch="acos/security-check",
+        ),
+    )
+
+    with pytest.raises(QualityGateError, match="test_writer attempted to weaken tests"):
+        runner._apply_patches(
+            record,
+            "test_writer",
+            [FilePatch(path="tests/test_feature.py", operation="delete")],
+        )
+
+
 def test_memory_and_notify_servers_redact_secret_payloads(tmp_path: Path) -> None:
     environment = FakeMCPEnvironment(
         workspace_root=tmp_path,
