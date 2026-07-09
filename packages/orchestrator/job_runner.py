@@ -1288,6 +1288,14 @@ class JobRunner:
             "current_recovery_event",
             "last_recoverable_error",
             "recovery_plan",
+            *JobRunner.FILE_RECOVERY_CONSTRAINT_KEYS,
+            "failed_stage_ids",
+            "failed_stages",
+            "failed_task_id",
+            "missing_stage_test_patch_stage_ids",
+            "missing_task_ids",
+            "stages_missing_test_patches",
+            "unmet_dependencies",
         ):
             record.runtime_state.pop(key, None)
         record.outputs.pop("last_recoverable_error", None)

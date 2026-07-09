@@ -99,6 +99,18 @@ def test_clear_active_recovery_state_removes_stale_done_markers(tmp_path: Path) 
             "current_recovery_event": {"error": "invalid_task_graph"},
             "last_recoverable_error": "invalid_task_graph",
             "recovery_plan": {"strategy": "task_graph_replanning"},
+            "missing_target_file": "frontend/test/project_scaffold.test.tsx",
+            "patch_operation_hint": "create",
+            "failed_patch_role": "test_writer",
+            "failed_patch_path": "frontend/test/project_scaffold.test.tsx",
+            "failed_patch_operation": "update",
+            "return_to_role": "test_writer",
+            "failed_stage_ids": ["1"],
+            "failed_stages": [{"stage": 1, "task_id": "core"}],
+            "missing_stage_test_patch_stage_ids": ["1"],
+            "missing_task_ids": ["core-tests"],
+            "stages_missing_test_patches": [{"stage": 1, "task_id": "core"}],
+            "unmet_dependencies": ["core"],
         }
     )
     record.outputs["last_recoverable_error"] = "invalid_task_graph"
@@ -109,6 +121,21 @@ def test_clear_active_recovery_state_removes_stale_done_markers(tmp_path: Path) 
     assert "current_recovery_event" not in record.runtime_state
     assert "last_recoverable_error" not in record.runtime_state
     assert "recovery_plan" not in record.runtime_state
+    for stale_key in (
+        "missing_target_file",
+        "patch_operation_hint",
+        "failed_patch_role",
+        "failed_patch_path",
+        "failed_patch_operation",
+        "return_to_role",
+        "failed_stage_ids",
+        "failed_stages",
+        "missing_stage_test_patch_stage_ids",
+        "missing_task_ids",
+        "stages_missing_test_patches",
+        "unmet_dependencies",
+    ):
+        assert stale_key not in record.runtime_state
     assert "last_recoverable_error" not in record.outputs
     assert record.outputs["recovery_history"] == [{"strategy": "task_graph_replanning"}]
     assert record.spec.metadata["constraints"] == {"max_autonomous_stages": 12}
