@@ -442,8 +442,7 @@ def build_demo_runner(config_dir: str | Path, workspace: str | Path) -> tuple[Jo
         routing_path=config_path / "model_routing.yaml",
     )
     demo_acceptance = (
-        "Running pytest confirms the feature.add sum helper in feature.py returns "
-        "two integers added together."
+        "Running pytest confirms the add helper returns two integers added together."
     )
     scenario = {
         "pm": PRD(
@@ -453,9 +452,9 @@ def build_demo_runner(config_dir: str | Path, workspace: str | Path) -> tuple[Jo
             goals=["Provide a correct add helper"],
             constraints=["Use deterministic tests"],
             success_criteria=["pytest passes"],
-            smallest_working_core=["Implement feature.add and validate it with pytest"],
-            small_parts=["Implement feature.add sum helper in feature.py"],
-            incremental_milestones=["feature.py add helper is implemented"],
+            smallest_working_core=["Implement the add helper and validate it with pytest"],
+            small_parts=["Implement add helper module"],
+            incremental_milestones=["Add helper module is implemented"],
             acceptance_tests=[demo_acceptance],
             definition_of_done=["The generated pytest suite passes"],
             required_artifacts=["feature.py", "tests/test_feature.py"],

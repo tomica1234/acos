@@ -160,17 +160,17 @@ def build_approval_harness(tmp_path: Path) -> ApprovalHarness:
     (workspace / "feature.py").write_text("VALUE = 0\n" * 2505, encoding="utf-8")
     registry = load_registry()
     value_acceptance = (
-        "Update feature.py VALUE constant works and can be verified by an observable app "
-        "or API check."
+        "Feature module VALUE constant equals 1 and can be verified by an observable "
+        "pytest check."
     )
     pm_outputs = [
         PRD(
             title="Update Feature Value",
             problem_statement="The feature module must expose the expected VALUE constant.",
             goals=["Expose VALUE = 1", "Validate the value with an automated test"],
-            smallest_working_core=["Update feature.py so VALUE is 1 and verify it with pytest"],
-            small_parts=["Update feature.py VALUE constant"],
-            incremental_milestones=["feature.py exposes VALUE = 1"],
+            smallest_working_core=["Expose the feature module and verify it with pytest"],
+            small_parts=["Create feature module"],
+            incremental_milestones=["Feature module exists"],
             acceptance_tests=[value_acceptance],
             definition_of_done=["The generated pytest suite passes"],
             required_artifacts=["feature.py", "tests/test_feature.py"],

@@ -191,6 +191,14 @@ def test_recovery_governor_preserves_prd_quality_artifact_context() -> None:
                     "missing_surfaces": ["frontend"],
                 }
             ],
+            "uncovered_implementation_artifact_domain_small_parts": [
+                {
+                    "small_part_index": 2,
+                    "small_part": "Word set CRUD operations",
+                    "required_domain_tokens": ["crud", "set", "word"],
+                    "covered_domain_tokens": [],
+                }
+            ],
             "invalid_required_artifacts": ["../outside.py"],
             "required_incremental_milestone_count": 2,
             "required_small_part_count": 2,
@@ -238,6 +246,14 @@ def test_recovery_governor_preserves_prd_quality_artifact_context() -> None:
             "small_part_index": 1,
             "small_part": "Create frontend UI",
             "missing_surfaces": ["frontend"],
+        }
+    ]
+    assert constraints["uncovered_implementation_artifact_domain_small_parts"] == [
+        {
+            "small_part_index": 2,
+            "small_part": "Word set CRUD operations",
+            "required_domain_tokens": ["crud", "set", "word"],
+            "covered_domain_tokens": [],
         }
     ]
     assert constraints["source_required_artifacts"] == [

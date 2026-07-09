@@ -206,6 +206,42 @@ class JobRunner:
         "type",
         "types",
     }
+    IMPLEMENTATION_ARTIFACT_GENERIC_TOKENS = {
+        "api",
+        "app",
+        "backend",
+        "client",
+        "common",
+        "component",
+        "contract",
+        "css",
+        "endpoint",
+        "fastapi",
+        "file",
+        "frontend",
+        "html",
+        "implementation",
+        "interface",
+        "js",
+        "jsx",
+        "main",
+        "model",
+        "page",
+        "py",
+        "route",
+        "schema",
+        "server",
+        "service",
+        "shared",
+        "source",
+        "src",
+        "ts",
+        "tsx",
+        "type",
+        "ui",
+        "view",
+        "web",
+    }
     TASK_GRAPH_VALIDATION_CONTEXT_KEYS = TASK_GRAPH_VALIDATION_CONTEXT_KEYS_SOURCE
     TASK_GRAPH_VALIDATION_DETAIL_KEYS = TASK_GRAPH_VALIDATION_DETAIL_KEYS_SOURCE
 
@@ -1300,6 +1336,7 @@ class JobRunner:
             "uncovered_smallest_working_core",
             "uncovered_incremental_milestone_small_parts",
             "uncovered_implementation_artifact_small_parts",
+            "uncovered_implementation_artifact_domain_small_parts",
             "non_observable_acceptance_tests",
             "invalid_required_artifacts",
             "prd_required_artifacts",
@@ -1914,6 +1951,8 @@ class JobRunner:
     @staticmethod
     def _looks_like_implementation_work_item(text: str) -> bool:
         tokens = set(re.findall(r"[a-z0-9_]+", text.lower()))
+        semantic_tokens = JobRunner._semantic_tokens(text)
+        combined_tokens = tokens | semantic_tokens
         if not tokens:
             return False
         documentation_tokens = {
@@ -1944,8 +1983,8 @@ class JobRunner:
             "ui",
             "view",
         } | JobRunner.SEMANTIC_ANCHOR_TOKENS | JobRunner.CRUD_OPERATION_TOKENS
-        return bool(tokens & implementation_tokens) and not (
-            tokens <= documentation_tokens
+        return bool(combined_tokens & implementation_tokens) and not (
+            combined_tokens <= documentation_tokens
         )
 
     @staticmethod
@@ -2072,6 +2111,87 @@ class JobRunner:
                     "missing_surfaces": missing_surfaces,
                     "implementation_artifacts": matched_artifacts,
                     "covered": not missing_surfaces,
+                }
+            )
+        return coverage
+
+    @classmethod
+    def _implementation_artifact_domain_coverage(
+        cls,
+        small_parts: list[str],
+        implementation_required_artifacts: list[str],
+    ) -> list[dict[str, Any]]:
+        artifact_token_entries = [
+            (
+                artifact,
+                cls._semantic_tokens(artifact, include_action_tokens=True),
+            )
+            for artifact in implementation_required_artifacts
+        ]
+        all_artifact_tokens: set[str] = set()
+        for _, tokens in artifact_token_entries:
+            all_artifact_tokens.update(tokens)
+        coverage: list[dict[str, Any]] = []
+        for index, part in enumerate(small_parts, start=1):
+            if not cls._looks_like_implementation_work_item(part):
+                continue
+            part_tokens = cls._semantic_tokens(part)
+            anchor_tokens = cls._semantic_anchor_tokens(part_tokens)
+            domain_tokens = part_tokens - cls.IMPLEMENTATION_ARTIFACT_GENERIC_TOKENS
+            if not part_tokens or (not anchor_tokens and not domain_tokens):
+                coverage.append(
+                    {
+                        "small_part_index": index,
+                        "small_part": part,
+                        "required_anchor_tokens": sorted(anchor_tokens),
+                        "required_domain_tokens": sorted(domain_tokens),
+                        "covered_anchor_tokens": [],
+                        "covered_domain_tokens": [],
+                        "missing_anchor_tokens": [],
+                        "implementation_artifacts": [],
+                        "covered": True,
+                    }
+                )
+                continue
+            anchor_satisfied = bool(anchor_tokens) and cls._semantic_anchor_satisfied(
+                anchor_tokens,
+                all_artifact_tokens,
+            )
+            required_domain_score = cls._semantic_overlap_required(domain_tokens)
+            covered_domain_tokens = domain_tokens & all_artifact_tokens
+            domain_satisfied = (
+                bool(domain_tokens)
+                and len(covered_domain_tokens) >= required_domain_score
+            )
+            covered = anchor_satisfied or domain_satisfied
+            matched_artifacts = [
+                artifact
+                for artifact, tokens in artifact_token_entries
+                if (
+                    bool(anchor_tokens)
+                    and cls._semantic_anchor_satisfied(anchor_tokens, tokens)
+                )
+                or bool(domain_tokens & tokens)
+            ]
+            covered_anchor_tokens = (
+                sorted(anchor_tokens)
+                if anchor_satisfied
+                else sorted(anchor_tokens & all_artifact_tokens)
+            )
+            missing_anchor_tokens = [] if covered else sorted(
+                anchor_tokens - all_artifact_tokens
+            )
+            coverage.append(
+                {
+                    "small_part_index": index,
+                    "small_part": part,
+                    "required_anchor_tokens": sorted(anchor_tokens),
+                    "required_domain_tokens": sorted(domain_tokens),
+                    "covered_anchor_tokens": covered_anchor_tokens,
+                    "covered_domain_tokens": sorted(covered_domain_tokens),
+                    "missing_anchor_tokens": missing_anchor_tokens,
+                    "implementation_artifacts": matched_artifacts,
+                    "covered": covered,
                 }
             )
         return coverage
@@ -2643,6 +2763,7 @@ class JobRunner:
             "uncovered_smallest_working_core",
             "uncovered_incremental_milestone_small_parts",
             "uncovered_implementation_artifact_small_parts",
+            "uncovered_implementation_artifact_domain_small_parts",
             "non_observable_acceptance_tests",
             "invalid_required_artifacts",
             "prd_required_artifacts",
@@ -2685,6 +2806,9 @@ class JobRunner:
         uncovered_implementation_artifacts = report.get(
             "uncovered_implementation_artifact_small_parts"
         )
+        uncovered_implementation_artifact_domains = report.get(
+            "uncovered_implementation_artifact_domain_small_parts"
+        )
         non_observable = report.get("non_observable_acceptance_tests")
         if missing:
             runtime_state["prd_quality_missing"] = missing
@@ -2707,6 +2831,13 @@ class JobRunner:
             runtime_state["uncovered_implementation_artifact_small_parts"] = (
                 uncovered_implementation_artifacts
             )
+        if (
+            isinstance(uncovered_implementation_artifact_domains, list)
+            and uncovered_implementation_artifact_domains
+        ):
+            runtime_state[
+                "uncovered_implementation_artifact_domain_small_parts"
+            ] = uncovered_implementation_artifact_domains
         if isinstance(non_observable, list) and non_observable:
             runtime_state["non_observable_acceptance_tests"] = non_observable
         if invalid_required_artifacts:
@@ -3234,6 +3365,37 @@ class JobRunner:
                 "Ensure required_artifacts includes implementation source files for every "
                 "backend, frontend, and shared small_part surface described in the PRD."
             )
+        if "implementation_artifacts_semantically_cover_small_parts" in missing:
+            uncovered_domains = report.get(
+                "uncovered_implementation_artifact_domain_small_parts"
+            )
+            if isinstance(uncovered_domains, list) and uncovered_domains:
+                summaries = []
+                for item in uncovered_domains:
+                    if not isinstance(item, dict):
+                        continue
+                    index = item.get("small_part_index")
+                    part = item.get("small_part")
+                    domain_tokens = item.get("required_domain_tokens")
+                    if not isinstance(part, str) or not part.strip():
+                        continue
+                    suffix = ""
+                    if isinstance(domain_tokens, list) and domain_tokens:
+                        suffix = " required domain tokens " + ", ".join(
+                            str(token) for token in domain_tokens
+                        )
+                    summaries.append(
+                        f"{index}: {part}{suffix}" if index else f"{part}{suffix}"
+                    )
+                if summaries:
+                    logs.append(
+                        "Implementation artifacts are too generic for small_parts: "
+                        + " | ".join(summaries)
+                    )
+            logs.append(
+                "Rewrite required_artifacts to include domain-specific implementation files "
+                "for each app behavior, not only generic entrypoints such as backend/main.py."
+            )
         if "required_test_artifacts" in missing:
             logs.append(
                 "Add at least one test required_artifact such as tests/test_*.py or frontend test/*.test.tsx."
@@ -3395,6 +3557,17 @@ class JobRunner:
             for item in implementation_artifact_small_part_coverage
             if not item["covered"]
         ]
+        implementation_artifact_domain_coverage = (
+            JobRunner._implementation_artifact_domain_coverage(
+                small_parts,
+                implementation_required_artifacts,
+            )
+        )
+        uncovered_implementation_artifact_domain_small_parts = [
+            item
+            for item in implementation_artifact_domain_coverage
+            if not item["covered"]
+        ]
         if (
             acceptance_tests
             and source_required_artifacts
@@ -3409,6 +3582,13 @@ class JobRunner:
             and uncovered_implementation_artifact_small_parts
         ):
             missing.append("implementation_artifacts_cover_small_parts")
+        if (
+            acceptance_tests
+            and implementation_small_parts
+            and implementation_required_artifacts
+            and uncovered_implementation_artifact_domain_small_parts
+        ):
+            missing.append("implementation_artifacts_semantically_cover_small_parts")
         if acceptance_tests and required_artifacts and not test_required_artifacts:
             missing.append("required_test_artifacts")
         if JobRunner._non_empty_items(prd.open_questions):
@@ -3471,6 +3651,15 @@ class JobRunner:
             ),
             "uncovered_implementation_artifact_small_parts": (
                 uncovered_implementation_artifact_small_parts
+            ),
+            "implementation_artifacts_semantically_cover_small_parts": (
+                not uncovered_implementation_artifact_domain_small_parts
+            ),
+            "implementation_artifact_domain_coverage": (
+                implementation_artifact_domain_coverage
+            ),
+            "uncovered_implementation_artifact_domain_small_parts": (
+                uncovered_implementation_artifact_domain_small_parts
             ),
             "test_required_artifact_count": len(test_required_artifacts),
             "test_required_artifacts": test_required_artifacts,
