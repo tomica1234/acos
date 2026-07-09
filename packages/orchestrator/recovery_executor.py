@@ -305,7 +305,7 @@ class RecoveryExecutor:
 
     @staticmethod
     def _looks_like_test_path(path: str) -> bool:
-        normalized = path.replace("\\", "/")
+        normalized = path.replace("\\", "/").lower()
         name = normalized.rsplit("/", 1)[-1]
         return (
             "/tests/" in f"/{normalized}"

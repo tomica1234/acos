@@ -448,6 +448,13 @@ def test_recovery_executor_deterministic_test_content_is_not_vacuous() -> None:
     )
 
 
+def test_recovery_executor_routes_case_insensitive_test_paths_to_test_writer() -> None:
+    assert (
+        RecoveryExecutor._owner_for_missing_paths(["Frontend/Test/App.Spec.tsx"])
+        == "test_writer"
+    )
+
+
 def test_project_scaffold_role_runs_deterministic_scaffold_before_test_writer(
     tmp_path: Path,
 ) -> None:

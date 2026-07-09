@@ -5046,6 +5046,53 @@ def test_completion_integrity_requires_test_path_patch_not_any_test_writer_patch
     ]
 
 
+def test_stage_change_summary_counts_case_insensitive_test_paths(
+    tmp_path: Path,
+) -> None:
+    registry = ModelRegistry.from_paths(
+        provider_path=config_dir() / "model_providers.yaml",
+        agents_path=config_dir() / "agents.yaml",
+        routing_path=config_dir() / "model_routing.yaml",
+    )
+    policy = PolicyEngine.from_path(config_dir() / "policies.yaml")
+    environment = FakeMCPEnvironment(
+        workspace_root=tmp_path,
+        memory_db_path=tmp_path / ".memory.sqlite3",
+    )
+    runner = JobRunner(registry=registry, policy=policy, router=environment.build_router())
+    implementation = ImplementationResult(
+        status=ImplementationStatus.IMPLEMENTED,
+        summary="Create module",
+        patches=[
+            {
+                "path": "src/App.tsx",
+                "content": "export default function App() { return null }\n",
+                "operation": "create",
+            }
+        ],
+    )
+    test_writer = TestWriterOutput(
+        summary="Add frontend spec",
+        patches=[
+            {
+                "path": "Frontend/Test/App.Spec.tsx",
+                "content": (
+                    "import { expect, test } from 'vitest'\n\n"
+                    "test('app spec path is tracked', () => {\n"
+                    "  expect('Frontend/Test/App.Spec.tsx').toContain('Spec')\n"
+                    "})\n"
+                ),
+                "operation": "create",
+            }
+        ],
+    )
+
+    summary = runner._build_stage_change_summary(implementation, [test_writer])
+
+    assert summary["test_patch_count"] == 1
+    assert summary["test_files"] == ["Frontend/Test/App.Spec.tsx"]
+
+
 def test_job_runner_blocks_unsupported_autonomous_task_role_before_implementation(
     tmp_path: Path,
 ) -> None:

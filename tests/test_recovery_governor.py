@@ -322,6 +322,19 @@ def test_recovery_governor_drops_stale_patch_context_for_artifact_replan() -> No
     assert "missing_target_file" not in constraints
 
 
+def test_recovery_governor_routes_case_insensitive_missing_test_target() -> None:
+    missing = "Frontend/Test/App.Spec.tsx"
+    record = _record(f"target_files_missing:update target does not exist: {missing}")
+
+    RecoveryGovernor().recover(record)
+
+    plan = record.runtime_state["recovery_plan"]
+    assert record.status == JobStatus.WRITING_TESTS
+    assert plan["strategy"] == "RETURN_TO_TEST_WRITER"
+    assert plan["next_actor"] == "test_writer"
+    assert plan["constraints"]["missing_target_file"] == missing
+
+
 def test_quality_gate_error_is_recoverable_unless_policy_denied(tmp_path: Path) -> None:
     runner, _environment = _runner(tmp_path)
     record = _record(status=JobStatus.TESTING)
