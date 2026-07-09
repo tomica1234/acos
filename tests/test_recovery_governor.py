@@ -170,6 +170,13 @@ def test_recovery_governor_preserves_prd_quality_artifact_context() -> None:
                     "acceptance_test": "Create frontend UI",
                 }
             ],
+            "uncovered_implementation_artifact_small_parts": [
+                {
+                    "small_part_index": 1,
+                    "small_part": "Create frontend UI",
+                    "missing_surfaces": ["frontend"],
+                }
+            ],
             "invalid_required_artifacts": ["../outside.py"],
             "required_incremental_milestone_count": 2,
             "required_small_part_count": 2,
@@ -196,6 +203,13 @@ def test_recovery_governor_preserves_prd_quality_artifact_context() -> None:
         {
             "acceptance_test_index": 1,
             "acceptance_test": "Create frontend UI",
+        }
+    ]
+    assert constraints["uncovered_implementation_artifact_small_parts"] == [
+        {
+            "small_part_index": 1,
+            "small_part": "Create frontend UI",
+            "missing_surfaces": ["frontend"],
         }
     ]
     assert constraints["source_required_artifacts"] == [

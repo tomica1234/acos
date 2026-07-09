@@ -140,6 +140,58 @@ class JobRunner:
         "upload",
     }
     CRUD_OPERATION_TOKENS = {"create", "read", "update", "delete"}
+    BACKEND_SURFACE_TOKENS = {
+        "api",
+        "apis",
+        "backend",
+        "crud",
+        "database",
+        "db",
+        "endpoint",
+        "endpoints",
+        "fastapi",
+        "persistence",
+        "route",
+        "routes",
+        "server",
+        "service",
+        "services",
+    }
+    FRONTEND_SURFACE_TOKENS = {
+        "browser",
+        "client",
+        "component",
+        "components",
+        "css",
+        "form",
+        "forms",
+        "frontend",
+        "jsx",
+        "mobile",
+        "page",
+        "pages",
+        "react",
+        "screen",
+        "tsx",
+        "ui",
+        "view",
+        "views",
+        "vite",
+    }
+    SHARED_SURFACE_TOKENS = {
+        "contract",
+        "contracts",
+        "dto",
+        "interface",
+        "interfaces",
+        "model",
+        "models",
+        "schema",
+        "schemas",
+        "shared",
+        "type",
+        "types",
+    }
     TASK_GRAPH_VALIDATION_CONTEXT_KEYS = TASK_GRAPH_VALIDATION_CONTEXT_KEYS_SOURCE
     TASK_GRAPH_VALIDATION_DETAIL_KEYS = TASK_GRAPH_VALIDATION_DETAIL_KEYS_SOURCE
 
@@ -1213,6 +1265,7 @@ class JobRunner:
             "prd_quality_warnings",
             "prd_open_questions",
             "uncovered_acceptance_small_parts",
+            "uncovered_implementation_artifact_small_parts",
             "non_observable_acceptance_tests",
             "invalid_required_artifacts",
             "prd_required_artifacts",
@@ -1884,6 +1937,94 @@ class JobRunner:
         }
         return any(normalized.endswith(suffix) for suffix in source_extensions)
 
+    @classmethod
+    def _implementation_surfaces_for_work_item(cls, text: str) -> set[str]:
+        tokens = set(re.findall(r"[a-z0-9_]+", text.lower()))
+        surfaces: set[str] = set()
+        if tokens & cls.BACKEND_SURFACE_TOKENS:
+            surfaces.add("backend")
+        if tokens & cls.FRONTEND_SURFACE_TOKENS:
+            surfaces.add("frontend")
+        if tokens & cls.SHARED_SURFACE_TOKENS:
+            surfaces.add("shared")
+        if not surfaces:
+            surfaces.add("implementation")
+        return surfaces
+
+    @classmethod
+    def _implementation_surfaces_for_artifact(cls, path: str) -> set[str]:
+        normalized = path.replace("\\", "/").lower().removeprefix("./")
+        name = normalized.rsplit("/", 1)[-1]
+        path_tokens = set(re.findall(r"[a-z0-9_]+", normalized))
+        surfaces = {"implementation"}
+        if (
+            normalized.startswith(("backend/", "api/", "server/"))
+            or "/backend/" in f"/{normalized}"
+            or "/api/" in f"/{normalized}"
+            or "/server/" in f"/{normalized}"
+            or name in {"app.py", "main.py"}
+            or path_tokens & {"fastapi", "flask", "django"}
+        ):
+            surfaces.add("backend")
+        if (
+            normalized.startswith(("frontend/", "web/", "client/", "static/"))
+            or "/frontend/" in f"/{normalized}"
+            or "/components/" in f"/{normalized}"
+            or "/pages/" in f"/{normalized}"
+            or name.endswith((".tsx", ".jsx", ".css", ".scss", ".html"))
+            or name in {"app.tsx", "app.jsx", "main.tsx", "main.jsx"}
+        ):
+            surfaces.add("frontend")
+        if (
+            normalized.startswith(("shared/", "common/"))
+            or "/shared/" in f"/{normalized}"
+            or "/common/" in f"/{normalized}"
+            or path_tokens & {"schema", "schemas", "types", "models", "contracts"}
+        ):
+            surfaces.add("shared")
+        return surfaces
+
+    @classmethod
+    def _implementation_artifact_surface_coverage(
+        cls,
+        small_parts: list[str],
+        implementation_required_artifacts: list[str],
+    ) -> list[dict[str, Any]]:
+        artifact_surface_entries = [
+            (artifact, cls._implementation_surfaces_for_artifact(artifact))
+            for artifact in implementation_required_artifacts
+        ]
+        all_artifact_surfaces: set[str] = set()
+        for _, surfaces in artifact_surface_entries:
+            all_artifact_surfaces.update(surfaces)
+        coverage: list[dict[str, Any]] = []
+        for index, part in enumerate(small_parts, start=1):
+            if not cls._looks_like_implementation_work_item(part):
+                continue
+            required_surfaces = cls._implementation_surfaces_for_work_item(part)
+            matched_artifacts = [
+                artifact
+                for artifact, surfaces in artifact_surface_entries
+                if required_surfaces & surfaces
+                or (
+                    required_surfaces == {"implementation"}
+                    and "implementation" in surfaces
+                )
+            ]
+            missing_surfaces = sorted(required_surfaces - all_artifact_surfaces)
+            coverage.append(
+                {
+                    "small_part_index": index,
+                    "small_part": part,
+                    "required_surfaces": sorted(required_surfaces),
+                    "covered_surfaces": sorted(required_surfaces & all_artifact_surfaces),
+                    "missing_surfaces": missing_surfaces,
+                    "implementation_artifacts": matched_artifacts,
+                    "covered": not missing_surfaces,
+                }
+            )
+        return coverage
+
     def _record_missing_target_repeat(self, record: JobRecord, path: str) -> int:
         repeats = record.runtime_state.setdefault("missing_target_file_repeats", {})
         if not isinstance(repeats, dict):
@@ -2266,6 +2407,7 @@ class JobRunner:
             "prd_quality_warnings",
             "prd_open_questions",
             "uncovered_acceptance_small_parts",
+            "uncovered_implementation_artifact_small_parts",
             "non_observable_acceptance_tests",
             "invalid_required_artifacts",
             "prd_required_artifacts",
@@ -2303,6 +2445,9 @@ class JobRunner:
             [str(item) for item in report.get("test_required_artifacts", [])]
         )
         uncovered = report.get("uncovered_acceptance_small_parts")
+        uncovered_implementation_artifacts = report.get(
+            "uncovered_implementation_artifact_small_parts"
+        )
         non_observable = report.get("non_observable_acceptance_tests")
         if missing:
             runtime_state["prd_quality_missing"] = missing
@@ -2312,6 +2457,13 @@ class JobRunner:
             runtime_state["prd_open_questions"] = open_questions
         if isinstance(uncovered, list) and uncovered:
             runtime_state["uncovered_acceptance_small_parts"] = uncovered
+        if (
+            isinstance(uncovered_implementation_artifacts, list)
+            and uncovered_implementation_artifacts
+        ):
+            runtime_state["uncovered_implementation_artifact_small_parts"] = (
+                uncovered_implementation_artifacts
+            )
         if isinstance(non_observable, list) and non_observable:
             runtime_state["non_observable_acceptance_tests"] = non_observable
         if invalid_required_artifacts:
@@ -2532,6 +2684,40 @@ class JobRunner:
                     "Repair acceptance_tests by adding or rewriting one observable check "
                     "for each uncovered small_part, reusing distinctive nouns and verbs from that small_part."
                 )
+        uncovered_implementation = report.get(
+            "uncovered_implementation_artifact_small_parts"
+        )
+        if isinstance(uncovered_implementation, list) and uncovered_implementation:
+            summaries = []
+            for item in uncovered_implementation:
+                if not isinstance(item, dict):
+                    continue
+                index = item.get("small_part_index")
+                part = item.get("small_part")
+                missing_surfaces = item.get("missing_surfaces")
+                if not isinstance(part, str) or not part.strip():
+                    continue
+                surfaces_text = ""
+                if isinstance(missing_surfaces, list) and missing_surfaces:
+                    surface_names = ", ".join(
+                        str(surface) for surface in missing_surfaces
+                    )
+                    surfaces_text = f" missing {surface_names}"
+                summaries.append(
+                    f"{index}: {part}{surfaces_text}"
+                    if index
+                    else f"{part}{surfaces_text}"
+                )
+            if summaries:
+                logs.append(
+                    "Implementation small_parts without matching required_artifacts: "
+                    + " | ".join(summaries)
+                )
+                logs.append(
+                    "Add implementation required_artifacts for each missing surface, such as "
+                    "backend/main.py for backend API work, frontend/src/App.tsx for frontend UI work, "
+                    "or shared schema/type files for shared contracts."
+                )
         non_observable = report.get("non_observable_acceptance_tests")
         if isinstance(non_observable, list) and non_observable:
             summaries = []
@@ -2600,6 +2786,11 @@ class JobRunner:
                 "Add at least one implementation source required_artifact such as backend/main.py, "
                 "frontend/src/App.tsx, src/server.ts, or app.py; README, .env, and package manifests "
                 "alone are not enough for app implementation."
+            )
+        if "implementation_artifacts_cover_small_parts" in missing:
+            logs.append(
+                "Ensure required_artifacts includes implementation source files for every "
+                "backend, frontend, and shared small_part surface described in the PRD."
             )
         if "required_test_artifacts" in missing:
             logs.append(
@@ -2719,6 +2910,17 @@ class JobRunner:
             for part in small_parts
             if JobRunner._looks_like_implementation_work_item(part)
         ]
+        implementation_artifact_small_part_coverage = (
+            JobRunner._implementation_artifact_surface_coverage(
+                small_parts,
+                implementation_required_artifacts,
+            )
+        )
+        uncovered_implementation_artifact_small_parts = [
+            item
+            for item in implementation_artifact_small_part_coverage
+            if not item["covered"]
+        ]
         if (
             acceptance_tests
             and source_required_artifacts
@@ -2726,6 +2928,13 @@ class JobRunner:
             and not implementation_required_artifacts
         ):
             missing.append("required_implementation_artifacts")
+        if (
+            acceptance_tests
+            and implementation_small_parts
+            and implementation_required_artifacts
+            and uncovered_implementation_artifact_small_parts
+        ):
+            missing.append("implementation_artifacts_cover_small_parts")
         if acceptance_tests and required_artifacts and not test_required_artifacts:
             missing.append("required_test_artifacts")
         if JobRunner._non_empty_items(prd.open_questions):
@@ -2766,6 +2975,15 @@ class JobRunner:
                 implementation_required_artifacts
             ),
             "implementation_required_artifacts": implementation_required_artifacts,
+            "implementation_artifacts_cover_small_parts": (
+                not uncovered_implementation_artifact_small_parts
+            ),
+            "implementation_artifact_small_part_coverage": (
+                implementation_artifact_small_part_coverage
+            ),
+            "uncovered_implementation_artifact_small_parts": (
+                uncovered_implementation_artifact_small_parts
+            ),
             "test_required_artifact_count": len(test_required_artifacts),
             "test_required_artifacts": test_required_artifacts,
             "invalid_required_artifacts": invalid_required_artifacts,

@@ -7348,6 +7348,19 @@ def test_job_runner_blocks_prd_quality_when_acceptance_tests_do_not_cover_small_
         "source_required_artifacts": ["feature.py"],
         "implementation_required_artifact_count": 1,
         "implementation_required_artifacts": ["feature.py"],
+        "implementation_artifacts_cover_small_parts": True,
+        "implementation_artifact_small_part_coverage": [
+            {
+                "small_part_index": 1,
+                "small_part": "Create feature module",
+                "required_surfaces": ["implementation"],
+                "covered_surfaces": ["implementation"],
+                "missing_surfaces": [],
+                "implementation_artifacts": ["feature.py"],
+                "covered": True,
+            }
+        ],
+        "uncovered_implementation_artifact_small_parts": [],
         "test_required_artifact_count": 1,
         "test_required_artifacts": ["tests/test_feature.py"],
         "invalid_required_artifacts": [],
@@ -7426,6 +7439,167 @@ def test_prd_quality_requires_implementation_source_for_app_work() -> None:
     assert report["source_required_artifacts"] == ["README.md", "package.json"]
     assert report["implementation_required_artifacts"] == []
     assert report["test_required_artifacts"] == ["tests/test_feature.py"]
+
+
+def test_prd_quality_requires_implementation_artifacts_for_each_surface() -> None:
+    prd = PRD(
+        title="English Vocab App",
+        problem_statement="Students need vocabulary practice.",
+        smallest_working_core=["Serve a vocabulary app shell"],
+        small_parts=[
+            "Create backend API endpoints",
+            "Create frontend UI component",
+        ],
+        incremental_milestones=[
+            "Backend API endpoints exist",
+            "Frontend UI component exists",
+        ],
+        acceptance_tests=[
+            "Backend API endpoints return HTTP responses",
+            "Frontend UI component renders vocabulary form",
+        ],
+        definition_of_done=["All tests pass"],
+        required_artifacts=[
+            "backend/main.py",
+            "tests/test_project_setup.py",
+        ],
+    )
+
+    report = JobRunner._build_prd_quality_report(prd)
+
+    assert report["passed"] is False
+    assert report["missing"] == ["implementation_artifacts_cover_small_parts"]
+    assert report["implementation_required_artifacts"] == ["backend/main.py"]
+    assert report["implementation_artifacts_cover_small_parts"] is False
+    assert report["uncovered_implementation_artifact_small_parts"] == [
+        {
+            "small_part_index": 2,
+            "small_part": "Create frontend UI component",
+            "required_surfaces": ["frontend"],
+            "covered_surfaces": [],
+            "missing_surfaces": ["frontend"],
+            "implementation_artifacts": [],
+            "covered": False,
+        }
+    ]
+
+
+def test_prd_quality_accepts_required_artifacts_covering_backend_and_frontend() -> None:
+    prd = PRD(
+        title="English Vocab App",
+        problem_statement="Students need vocabulary practice.",
+        smallest_working_core=["Serve a vocabulary app shell"],
+        small_parts=[
+            "Create backend API endpoints",
+            "Create frontend UI component",
+        ],
+        incremental_milestones=[
+            "Backend API endpoints exist",
+            "Frontend UI component exists",
+        ],
+        acceptance_tests=[
+            "Backend API endpoints return HTTP responses",
+            "Frontend UI component renders vocabulary form",
+        ],
+        definition_of_done=["All tests pass"],
+        required_artifacts=[
+            "backend/main.py",
+            "frontend/src/App.tsx",
+            "tests/test_project_setup.py",
+        ],
+    )
+
+    report = JobRunner._build_prd_quality_report(prd)
+
+    assert report["passed"] is True
+    assert report["missing"] == []
+    assert report["implementation_artifacts_cover_small_parts"] is True
+    assert report["uncovered_implementation_artifact_small_parts"] == []
+
+
+def test_job_runner_blocks_prd_quality_when_implementation_artifacts_miss_surface(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    registry = ModelRegistry.from_paths(
+        provider_path=config_dir() / "model_providers.yaml",
+        agents_path=config_dir() / "agents.yaml",
+        routing_path=config_dir() / "model_routing.yaml",
+    )
+    attach_mock_adapter(
+        registry,
+        {
+            "pm": PRD(
+                title="English Vocab App",
+                problem_statement="Students need vocabulary practice.",
+                smallest_working_core=["Serve a vocabulary app shell"],
+                small_parts=[
+                    "Create backend API endpoints",
+                    "Create frontend UI component",
+                ],
+                incremental_milestones=[
+                    "Backend API endpoints exist",
+                    "Frontend UI component exists",
+                ],
+                acceptance_tests=[
+                    "Backend API endpoints return HTTP responses",
+                    "Frontend UI component renders vocabulary form",
+                ],
+                definition_of_done=["All tests pass"],
+                required_artifacts=[
+                    "backend/main.py",
+                    "tests/test_project_setup.py",
+                ],
+            ).model_dump(),
+            "architect": ArchitecturePlan(summary="Should not run").model_dump(),
+        },
+    )
+    policy = PolicyEngine.from_path(config_dir() / "policies.yaml")
+    environment = FakeMCPEnvironment(
+        workspace_root=workspace,
+        memory_db_path=workspace / ".memory.sqlite3",
+    )
+    runner = JobRunner(registry=registry, policy=policy, router=environment.build_router())
+    spec = JobSpec(
+        request_text="Create an English vocabulary app",
+        repo_path=str(workspace),
+        target_branch="acos/strict-prd-artifact-surfaces",
+        metadata={
+            "constraints": {
+                "require_prd_quality": True,
+                "prd_quality_refinement_attempts": 0,
+            }
+        },
+    )
+
+    record = runner.run_job(spec)
+
+    assert_recovery_plan(
+        record,
+        status=JobStatus.ANALYZING,
+        strategy="REVISE_PRD_AND_ARCHITECTURE",
+    )
+    assert_recoverable_error(
+        record,
+        "prd_quality_gate_failed:implementation_artifacts_cover_small_parts",
+    )
+    constraints = record.runtime_state["recovery_plan"]["constraints"]
+    assert constraints["prd_quality_missing"] == [
+        "implementation_artifacts_cover_small_parts"
+    ]
+    assert constraints["uncovered_implementation_artifact_small_parts"] == [
+        {
+            "small_part_index": 2,
+            "small_part": "Create frontend UI component",
+            "required_surfaces": ["frontend"],
+            "covered_surfaces": [],
+            "missing_surfaces": ["frontend"],
+            "implementation_artifacts": [],
+            "covered": False,
+        }
+    ]
+    assert "architect" not in record.outputs
 
 
 def test_prd_quality_rejects_acceptance_tests_that_restate_work_items() -> None:
@@ -8200,6 +8374,13 @@ def test_job_runner_clears_planning_repair_constraints_after_prd_passes(
                 "uncovered_acceptance_small_parts": [
                     {"small_part_index": 1, "small_part": "Create module"}
                 ],
+                "uncovered_implementation_artifact_small_parts": [
+                    {
+                        "small_part_index": 1,
+                        "small_part": "Create frontend UI",
+                        "missing_surfaces": ["frontend"],
+                    }
+                ],
                 "non_observable_acceptance_tests": [
                     {
                         "acceptance_test_index": 1,
@@ -8245,6 +8426,7 @@ def test_job_runner_clears_planning_repair_constraints_after_prd_passes(
         "prd_quality_warnings",
         "prd_open_questions",
         "uncovered_acceptance_small_parts",
+        "uncovered_implementation_artifact_small_parts",
         "non_observable_acceptance_tests",
         "invalid_required_artifacts",
         "prd_required_artifacts",
