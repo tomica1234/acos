@@ -1297,6 +1297,7 @@ class JobRunner:
             "prd_quality_warnings",
             "prd_open_questions",
             "uncovered_acceptance_small_parts",
+            "uncovered_smallest_working_core",
             "uncovered_implementation_artifact_small_parts",
             "non_observable_acceptance_tests",
             "invalid_required_artifacts",
@@ -2676,6 +2677,7 @@ class JobRunner:
             [str(item) for item in report.get("test_required_artifacts", [])]
         )
         uncovered = report.get("uncovered_acceptance_small_parts")
+        uncovered_core = report.get("uncovered_smallest_working_core")
         uncovered_implementation_artifacts = report.get(
             "uncovered_implementation_artifact_small_parts"
         )
@@ -2688,6 +2690,8 @@ class JobRunner:
             runtime_state["prd_open_questions"] = open_questions
         if isinstance(uncovered, list) and uncovered:
             runtime_state["uncovered_acceptance_small_parts"] = uncovered
+        if isinstance(uncovered_core, list) and uncovered_core:
+            runtime_state["uncovered_smallest_working_core"] = uncovered_core
         if (
             isinstance(uncovered_implementation_artifacts, list)
             and uncovered_implementation_artifacts
@@ -2926,6 +2930,47 @@ class JobRunner:
         }
         return tokens <= generic_tokens
 
+    @classmethod
+    def _smallest_working_core_coverage(
+        cls,
+        core_items: list[str],
+        small_parts: list[str],
+    ) -> list[dict[str, Any]]:
+        small_part_tokens: set[str] = set()
+        for part in small_parts:
+            small_part_tokens.update(
+                cls._semantic_tokens(part, include_action_tokens=True)
+            )
+        coverage: list[dict[str, Any]] = []
+        for index, core in enumerate(core_items, start=1):
+            core_tokens = cls._semantic_tokens(core, include_action_tokens=True)
+            anchor_tokens = cls._semantic_anchor_tokens(core_tokens)
+            if not core_tokens or not anchor_tokens:
+                coverage.append(
+                    {
+                        "core_index": index,
+                        "smallest_working_core": core,
+                        "required_anchor_tokens": sorted(anchor_tokens),
+                        "covered_anchor_tokens": [],
+                        "missing_anchor_tokens": [],
+                        "covered": True,
+                    }
+                )
+                continue
+            covered_anchor_tokens = sorted(anchor_tokens & small_part_tokens)
+            missing_anchor_tokens = sorted(anchor_tokens - small_part_tokens)
+            coverage.append(
+                {
+                    "core_index": index,
+                    "smallest_working_core": core,
+                    "required_anchor_tokens": sorted(anchor_tokens),
+                    "covered_anchor_tokens": covered_anchor_tokens,
+                    "missing_anchor_tokens": missing_anchor_tokens,
+                    "covered": not missing_anchor_tokens,
+                }
+            )
+        return coverage
+
     @staticmethod
     def _prd_quality_repair_logs(prd: PRD, report: dict[str, Any]) -> list[str]:
         logs = [
@@ -2951,6 +2996,34 @@ class JobRunner:
                 logs.append(
                     "Repair acceptance_tests by adding or rewriting one observable check "
                     "for each uncovered small_part, reusing distinctive nouns and verbs from that small_part."
+                )
+        uncovered_core = report.get("uncovered_smallest_working_core")
+        if isinstance(uncovered_core, list) and uncovered_core:
+            summaries = []
+            for item in uncovered_core:
+                if not isinstance(item, dict):
+                    continue
+                index = item.get("core_index")
+                core = item.get("smallest_working_core")
+                missing_anchors = item.get("missing_anchor_tokens")
+                if not isinstance(core, str) or not core.strip():
+                    continue
+                suffix = ""
+                if isinstance(missing_anchors, list) and missing_anchors:
+                    suffix = " missing anchors " + ", ".join(
+                        str(token) for token in missing_anchors
+                    )
+                summaries.append(
+                    f"{index}: {core}{suffix}" if index else f"{core}{suffix}"
+                )
+            if summaries:
+                logs.append(
+                    "Smallest working core items not represented in small_parts: "
+                    + " | ".join(summaries)
+                )
+                logs.append(
+                    "Rewrite small_parts so they carry the distinctive domain anchors "
+                    "from smallest_working_core before planning implementation tasks."
                 )
         uncovered_implementation = report.get(
             "uncovered_implementation_artifact_small_parts"
@@ -3108,13 +3181,27 @@ class JobRunner:
             missing.append("title")
         if not prd.problem_statement.strip():
             missing.append("problem_statement")
-        if not JobRunner._non_empty_items(prd.smallest_working_core):
+        smallest_working_core = JobRunner._non_empty_items(prd.smallest_working_core)
+        if not smallest_working_core:
             missing.append("smallest_working_core")
         small_parts = JobRunner._non_empty_items(prd.small_parts)
         if not small_parts:
             missing.append("small_parts")
         elif len(small_parts) == 1:
             warnings.append("small_parts_has_single_item")
+        smallest_working_core_coverage = JobRunner._smallest_working_core_coverage(
+            smallest_working_core,
+            small_parts,
+        )
+        uncovered_smallest_working_core = [
+            item for item in smallest_working_core_coverage if not item["covered"]
+        ]
+        if (
+            smallest_working_core
+            and small_parts
+            and uncovered_smallest_working_core
+        ):
+            missing.append("smallest_working_core_covered_by_small_parts")
         if min_small_parts > 0 and small_parts and len(small_parts) < min_small_parts:
             missing.append("small_parts_split_for_autonomy")
         incremental_milestones = JobRunner._non_empty_items(prd.incremental_milestones)
@@ -3218,6 +3305,11 @@ class JobRunner:
             "missing": missing,
             "warnings": warnings,
             "small_part_count": len(small_parts),
+            "smallest_working_core_covered_by_small_parts": (
+                not uncovered_smallest_working_core
+            ),
+            "smallest_working_core_coverage": smallest_working_core_coverage,
+            "uncovered_smallest_working_core": uncovered_smallest_working_core,
             "incremental_milestone_count": len(incremental_milestones),
             "incremental_milestones_cover_small_parts": (
                 missing_incremental_milestone_count == 0
@@ -5465,6 +5557,9 @@ class JobRunner:
             "signin": "auth",
             "signup": "auth",
             "registration": "register",
+            "quiz": "quiz",
+            "quizzes": "quiz",
+            "quizze": "quiz",
             "add": "create",
             "added": "create",
             "adding": "create",

@@ -170,6 +170,13 @@ def test_recovery_governor_preserves_prd_quality_artifact_context() -> None:
                     "acceptance_test": "Create frontend UI",
                 }
             ],
+            "uncovered_smallest_working_core": [
+                {
+                    "core_index": 1,
+                    "smallest_working_core": "Generate quizzes and track progress",
+                    "missing_anchor_tokens": ["progress"],
+                }
+            ],
             "uncovered_implementation_artifact_small_parts": [
                 {
                     "small_part_index": 1,
@@ -203,6 +210,13 @@ def test_recovery_governor_preserves_prd_quality_artifact_context() -> None:
         {
             "acceptance_test_index": 1,
             "acceptance_test": "Create frontend UI",
+        }
+    ]
+    assert constraints["uncovered_smallest_working_core"] == [
+        {
+            "core_index": 1,
+            "smallest_working_core": "Generate quizzes and track progress",
+            "missing_anchor_tokens": ["progress"],
         }
     ]
     assert constraints["uncovered_implementation_artifact_small_parts"] == [

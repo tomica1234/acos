@@ -642,6 +642,9 @@ class RecoveryGovernor:
         uncovered = runtime_state.get("uncovered_acceptance_small_parts")
         if isinstance(uncovered, list) and uncovered:
             constraints["uncovered_acceptance_small_parts"] = uncovered
+        uncovered_core = runtime_state.get("uncovered_smallest_working_core")
+        if isinstance(uncovered_core, list) and uncovered_core:
+            constraints["uncovered_smallest_working_core"] = uncovered_core
         uncovered_implementation = runtime_state.get(
             "uncovered_implementation_artifact_small_parts"
         )

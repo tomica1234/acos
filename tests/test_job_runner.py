@@ -8142,6 +8142,18 @@ def test_job_runner_blocks_prd_quality_when_acceptance_tests_do_not_cover_small_
         "missing": ["acceptance_tests_cover_small_parts"],
         "warnings": [],
         "small_part_count": 2,
+        "smallest_working_core_covered_by_small_parts": True,
+        "smallest_working_core_coverage": [
+            {
+                "core_index": 1,
+                "smallest_working_core": "Expose a VALUE constant and test it",
+                "required_anchor_tokens": [],
+                "covered_anchor_tokens": [],
+                "missing_anchor_tokens": [],
+                "covered": True,
+            }
+        ],
+        "uncovered_smallest_working_core": [],
         "incremental_milestone_count": 2,
         "incremental_milestones_cover_small_parts": True,
         "missing_incremental_milestone_count": 0,
@@ -8462,6 +8474,71 @@ def test_prd_quality_rejects_acceptance_tests_that_restate_work_items() -> None:
             "acceptance_test": "Create backend feature module",
         }
     ]
+
+
+def test_prd_quality_rejects_small_parts_that_do_not_cover_core_anchors() -> None:
+    prd = PRD(
+        title="English Vocab App",
+        problem_statement="Students need quizzes and tracked progress.",
+        smallest_working_core=["Generate quizzes and track progress"],
+        small_parts=["Create quiz generator"],
+        incremental_milestones=["Quiz generator exists"],
+        acceptance_tests=["Quiz generator returns questions"],
+        definition_of_done=["All tests pass"],
+        required_artifacts=[
+            "backend/src/routes/quiz.js",
+            "tests/quiz.test.js",
+        ],
+    )
+
+    report = JobRunner._build_prd_quality_report(prd)
+
+    assert report["passed"] is False
+    assert report["missing"] == ["smallest_working_core_covered_by_small_parts"]
+    assert report["smallest_working_core_covered_by_small_parts"] is False
+    assert report["uncovered_smallest_working_core"] == [
+        {
+            "core_index": 1,
+            "smallest_working_core": "Generate quizzes and track progress",
+            "required_anchor_tokens": ["progress", "quiz"],
+            "covered_anchor_tokens": ["quiz"],
+            "missing_anchor_tokens": ["progress"],
+            "covered": False,
+        }
+    ]
+
+
+def test_prd_quality_accepts_small_parts_covering_core_anchors() -> None:
+    prd = PRD(
+        title="English Vocab App",
+        problem_statement="Students need quizzes and tracked progress.",
+        smallest_working_core=["Generate quizzes and track progress"],
+        small_parts=[
+            "Create quiz generator",
+            "Track user progress",
+        ],
+        incremental_milestones=[
+            "Quiz generator exists",
+            "Progress tracking exists",
+        ],
+        acceptance_tests=[
+            "Quiz generator returns questions",
+            "Progress tracker stores user progress",
+        ],
+        definition_of_done=["All tests pass"],
+        required_artifacts=[
+            "backend/src/routes/quiz.js",
+            "backend/src/routes/progress.js",
+            "tests/quiz_progress.test.js",
+        ],
+    )
+
+    report = JobRunner._build_prd_quality_report(prd)
+
+    assert report["passed"] is True
+    assert report["missing"] == []
+    assert report["smallest_working_core_covered_by_small_parts"] is True
+    assert report["uncovered_smallest_working_core"] == []
 
 
 def test_prd_quality_rejects_generic_tests_pass_acceptance_tests() -> None:
@@ -8860,7 +8937,7 @@ def test_prd_quality_deterministically_repairs_missing_incremental_milestones(
 
 
 def test_semantic_tokens_split_camel_case_domain_terms() -> None:
-    tokens = JobRunner._semantic_tokens("WordSet QuizQuestion UserProgress")
+    tokens = JobRunner._semantic_tokens("WordSet QuizQuestion UserProgress quizzes")
 
     assert {"word", "set", "quiz", "question", "user", "progress"}.issubset(tokens)
 
