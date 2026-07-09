@@ -36,6 +36,7 @@ class RecoveryExecutor:
     STALE_RECOVERY_CONSTRAINT_KEYS = {
         "deterministic_creation_attempted",
         "deterministically_created_files",
+        "failed_task_id",
         "failed_patch_operation",
         "failed_patch_path",
         "failed_patch_role",
@@ -49,6 +50,7 @@ class RecoveryExecutor:
         "recovery_mode",
         "recreate_target_files_attempt",
         "return_to_role",
+        "unmet_dependencies",
     }
 
     def __init__(self, store: Any | None = None) -> None:

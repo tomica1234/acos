@@ -374,6 +374,27 @@ def test_recovery_governor_preserves_completion_missing_task_context() -> None:
     assert constraints["missing_task_ids"] == ["core-tests", "prd-tests"]
 
 
+def test_recovery_governor_preserves_unmet_dependency_context() -> None:
+    record = _record("unmet_task_dependencies:core")
+
+    RecoveryGovernor().recover(
+        record,
+        error="unmet_task_dependencies:core",
+        runtime_state={
+            "failed_task_id": "core-tests",
+            "unmet_dependencies": ["core"],
+        },
+    )
+
+    plan = record.runtime_state["recovery_plan"]
+    constraints = plan["constraints"]
+    assert plan["strategy"] == "REPLAN_TASK"
+    assert record.status == JobStatus.REPLANNING
+    assert constraints["recovery_mode"] == "task_graph_repair"
+    assert constraints["failed_task_id"] == "core-tests"
+    assert constraints["unmet_dependencies"] == ["core"]
+
+
 def test_recovery_governor_drops_stale_patch_context_for_artifact_replan() -> None:
     record = _record("required_artifacts_missing:stage:core")
 

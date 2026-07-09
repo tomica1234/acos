@@ -1294,7 +1294,9 @@ class JobRunner:
             return
         for key in (
             *JobRunner.RECOVERY_METADATA_CONSTRAINT_KEYS,
+            "failed_task_id",
             "missing_task_ids",
+            "unmet_dependencies",
             "patch_operation_hint",
             "missing_target_file",
         ):
@@ -1355,7 +1357,11 @@ class JobRunner:
             if key.startswith("planning_repair_") or key in stale_planning_context_keys:
                 constraints.pop(key, None)
         if clear_planning_recovery_metadata:
-            for key in JobRunner.RECOVERY_METADATA_CONSTRAINT_KEYS:
+            for key in (
+                *JobRunner.RECOVERY_METADATA_CONSTRAINT_KEYS,
+                "failed_task_id",
+                "unmet_dependencies",
+            ):
                 constraints.pop(key, None)
         if clear_planning_pm_strategy:
             for key in (
@@ -6562,13 +6568,15 @@ class JobRunner:
                 completed_task_ids.update(task.id for task, _ in stage_test_pairs)
                 ready_task_ids.update(task.id for task, _ in stage_test_pairs)
                 continue
-            unmet_dependencies = [
-                dependency for dependency in task.depends_on if dependency not in completed_task_ids
-            ]
+            unmet_dependencies = self._unmet_dependencies_for_task(
+                task,
+                completed_task_ids,
+            )
             if unmet_dependencies:
-                self._recover_record(
+                self._recover_unmet_task_dependencies(
                     record,
-                    error=f"unmet_task_dependencies:{','.join(unmet_dependencies)}",
+                    task,
+                    unmet_dependencies,
                 )
                 return implementation_results, test_writer_results, last_test_result, stage_results
             if self._is_project_setup_task(task):
@@ -6668,6 +6676,17 @@ class JobRunner:
             if self._autonomous_stage_limit_reached(record, stage_results):
                 return implementation_results, test_writer_results, last_test_result, stage_results
             task = pending_test_tasks.pop(0)
+            unmet_dependencies = self._unmet_dependencies_for_task(
+                task,
+                completed_task_ids,
+            )
+            if unmet_dependencies:
+                self._recover_unmet_task_dependencies(
+                    record,
+                    task,
+                    unmet_dependencies,
+                )
+                return implementation_results, test_writer_results, last_test_result, stage_results
             test_writer = self._run_test_writer_task(
                 record,
                 task,
@@ -6742,6 +6761,32 @@ class JobRunner:
                 self._mark_task_completed(record, primary_task.id)
 
         return implementation_results, test_writer_results, last_test_result, stage_results
+
+    @staticmethod
+    def _unmet_dependencies_for_task(
+        task: PlannedTask,
+        completed_task_ids: set[str],
+    ) -> list[str]:
+        return [
+            dependency
+            for dependency in task.depends_on
+            if dependency not in completed_task_ids
+        ]
+
+    def _recover_unmet_task_dependencies(
+        self,
+        record: JobRecord,
+        task: PlannedTask,
+        unmet_dependencies: list[str],
+    ) -> None:
+        self._recover_record(
+            record,
+            error=f"unmet_task_dependencies:{','.join(unmet_dependencies)}",
+            runtime_state={
+                "failed_task_id": task.id,
+                "unmet_dependencies": list(unmet_dependencies),
+            },
+        )
 
     def _run_ready_test_tasks(
         self,

@@ -85,7 +85,9 @@ def test_clear_active_recovery_state_removes_stale_done_markers(tmp_path: Path) 
                 "recovery_failed_stage": 2,
                 "recovery_attempt": 3,
                 "patch_operation_hint": "create",
+                "failed_task_id": "core-tests",
                 "missing_task_ids": ["core-tests"],
+                "unmet_dependencies": ["core"],
                 "missing_target_file": "frontend/test/project_scaffold.test.tsx",
                 "max_autonomous_stages": 12,
             }
@@ -5829,6 +5831,84 @@ def test_job_runner_blocks_executor_unsatisfiable_dependency_order_before_implem
     assert not (workspace / "tests" / "test_later.py").exists()
 
 
+def test_autonomous_loop_blocks_tail_test_writer_with_unmet_dependency(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    registry = ModelRegistry.from_paths(
+        provider_path=config_dir() / "model_providers.yaml",
+        agents_path=config_dir() / "agents.yaml",
+        routing_path=config_dir() / "model_routing.yaml",
+    )
+    attach_mock_adapter(
+        registry,
+        {
+            "test_writer": TestWriterOutput(
+                summary="Should not run before core exists.",
+                patches=[
+                    {
+                        "path": "tests/test_core.py",
+                        "content": (
+                            "def test_core_exists() -> None:\n"
+                            "    assert 'core' in 'core exists'\n"
+                        ),
+                        "operation": "create",
+                    }
+                ],
+            ).model_dump(),
+        },
+    )
+    policy = PolicyEngine.from_path(config_dir() / "policies.yaml")
+    environment = FakeMCPEnvironment(
+        workspace_root=workspace,
+        memory_db_path=workspace / ".memory.sqlite3",
+    )
+    runner = JobRunner(
+        registry=registry,
+        policy=policy,
+        router=environment.build_router(),
+    )
+    record = runner.store.create(
+        JobSpec(
+            request_text="Create feature with tests",
+            repo_path=str(workspace),
+            target_branch="acos/tail-test-dependency-guard",
+        )
+    )
+    task_graph = TaskGraph(
+        goal="Build feature",
+        tasks=[
+            PlannedTask(
+                id="core-tests",
+                title="Test core",
+                description="Add tests for the core implementation.",
+                role="test_writer",
+                depends_on=["core"],
+                acceptance_criteria=["Core behavior is tested"],
+                target_files=["tests/test_core.py"],
+                required_artifacts=["tests/test_core.py"],
+            )
+        ],
+    )
+
+    implementation_results, test_writer_results, test_result, stages = (
+        runner._run_autonomous_task_loop(record, task_graph)
+    )
+
+    assert implementation_results == []
+    assert test_writer_results == []
+    assert stages == []
+    assert test_result.success is True
+    assert_recovery_plan(record, status=JobStatus.REPLANNING, strategy="REPLAN_TASK")
+    assert_recoverable_error(record, "unmet_task_dependencies:core")
+    constraints = record.runtime_state["recovery_plan"]["constraints"]
+    assert constraints["failed_task_id"] == "core-tests"
+    assert constraints["unmet_dependencies"] == ["core"]
+    assert "test_writer_tasks" not in record.outputs
+    assert not (workspace / "tests" / "test_core.py").exists()
+
+
 def test_job_runner_repairs_invalid_task_graph_before_implementation(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
     workspace.mkdir()
@@ -10001,7 +10081,9 @@ def test_job_runner_clears_planning_repair_constraints_after_prd_passes(
                     }
                 ],
                 "invalid_required_artifacts": ["../outside.py"],
+                "failed_task_id": "core-tests",
                 "missing_task_ids": ["core-tests"],
+                "unmet_dependencies": ["core"],
                 "prd_required_artifacts": ["tests/test_feature.py"],
                 "required_incremental_milestone_count": 2,
                 "required_small_part_count": 2,
@@ -10050,7 +10132,9 @@ def test_job_runner_clears_planning_repair_constraints_after_prd_passes(
         "uncovered_implementation_artifact_small_parts",
         "non_observable_acceptance_tests",
         "invalid_required_artifacts",
+        "failed_task_id",
         "missing_task_ids",
+        "unmet_dependencies",
         "prd_required_artifacts",
         "required_incremental_milestone_count",
         "required_small_part_count",
@@ -10098,6 +10182,8 @@ def test_job_runner_clears_planning_repair_constraints_after_task_graph_validate
                 "pm_strategy": "planning_repair_strategy_change",
                 "pm_intervention_count": 1,
                 "task_graph_validation_errors": ["unknown_dependencies"],
+                "failed_task_id": "core-tests",
+                "unmet_dependencies": ["core"],
                 "unknown_dependencies": [
                     {"task_id": "views", "dependency": "models"}
                 ],
@@ -10171,6 +10257,8 @@ def test_job_runner_clears_planning_repair_constraints_after_task_graph_validate
         "pm_strategy",
         "pm_intervention_count",
         "task_graph_validation_errors",
+        "failed_task_id",
+        "unmet_dependencies",
         "unknown_dependencies",
         "duplicate_task_ids",
         "dependency_cycle_task_ids",
@@ -10207,6 +10295,7 @@ def test_clear_planning_repair_constraints_keeps_active_implementation_recovery(
                 "recovery_mode": "implementation_failure",
                 "recovery_strategy": "replan_current_task",
                 "recovery_reason": "the implementer failed before producing a safe completed change",
+                "failed_task_id": "core",
                 "recovery_failed_task_id": "core",
                 "recovery_failed_stage": 2,
                 "recovery_attempt": 3,
@@ -10224,6 +10313,7 @@ def test_clear_planning_repair_constraints_keeps_active_implementation_recovery(
         "recovery_mode": "implementation_failure",
         "recovery_strategy": "replan_current_task",
         "recovery_reason": "the implementer failed before producing a safe completed change",
+        "failed_task_id": "core",
         "recovery_failed_task_id": "core",
         "recovery_failed_stage": 2,
         "recovery_attempt": 3,

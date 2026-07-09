@@ -711,11 +711,19 @@ class RecoveryGovernor:
     @classmethod
     def _task_graph_context_constraints(cls, runtime_state: dict[str, Any]) -> dict[str, Any]:
         constraints: dict[str, Any] = {}
+        failed_task_id = runtime_state.get("failed_task_id")
+        if isinstance(failed_task_id, str) and failed_task_id.strip():
+            constraints["failed_task_id"] = failed_task_id.strip()
         errors = cls._clean_string_list(
             runtime_state.get("task_graph_validation_errors")
         )
         if errors:
             constraints["task_graph_validation_errors"] = errors
+        unmet_dependencies = cls._clean_string_list(
+            runtime_state.get("unmet_dependencies")
+        )
+        if unmet_dependencies:
+            constraints["unmet_dependencies"] = unmet_dependencies
         for key in TASK_GRAPH_VALIDATION_CONTEXT_KEYS:
             value = cls._non_empty_list(runtime_state.get(key))
             if value:
