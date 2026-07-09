@@ -1337,6 +1337,31 @@ def test_project_setup_scaffold_creates_required_files(tmp_path: Path) -> None:
     assert all(item["exists"] for item in evidence)
 
 
+def test_project_setup_scaffold_preserves_existing_test_artifact(
+    tmp_path: Path,
+) -> None:
+    runner, _environment, record = _runner(tmp_path)
+    test_path = tmp_path / "backend/tests/test_project_setup.py"
+    existing_content = (
+        "def test_existing_project_contract() -> None:\n"
+        "    assert 'vocabulary' in 'english vocabulary app'\n"
+    )
+    test_path.parent.mkdir(parents=True)
+    test_path.write_text(existing_content, encoding="utf-8")
+    task = runner._normalize_project_setup_task_graph(
+        record,
+        _bad_project_setup_graph(),
+    ).tasks[0]
+
+    result = runner._run_project_setup_scaffold(record, task)
+
+    assert result.status == ImplementationStatus.IMPLEMENTED
+    assert test_path.read_text(encoding="utf-8") == existing_content
+    assert "backend/tests/test_project_setup.py" not in result.changed_files
+    for artifact in JobRunner.PROJECT_SETUP_REQUIRED_ARTIFACTS:
+        assert (tmp_path / artifact).exists(), artifact
+
+
 def test_project_setup_scaffold_blocks_on_non_file_artifact(
     tmp_path: Path,
 ) -> None:

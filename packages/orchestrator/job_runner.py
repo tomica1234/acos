@@ -3813,20 +3813,19 @@ class JobRunner:
                     "Non-file paths must be removed or renamed before deterministic scaffold can write project setup artifacts."
                 ],
             )
+        workspace_root = self._workspace_root(record)
+        missing_artifacts = [
+            artifact
+            for artifact in self.PROJECT_SETUP_REQUIRED_ARTIFACTS
+            if not artifact_path_exists(artifact, workspace_root=workspace_root)
+        ]
         patches = [
             FilePatch(
                 path=artifact,
-                operation=(
-                    "update"
-                    if artifact_path_exists(
-                        artifact,
-                        workspace_root=self._workspace_root(record),
-                    )
-                    else "create"
-                ),
+                operation="create",
                 content=self._project_setup_file_content(artifact, record),
             )
-            for artifact in self.PROJECT_SETUP_REQUIRED_ARTIFACTS
+            for artifact in missing_artifacts
         ]
         result = ImplementationResult(
             status=ImplementationStatus.IMPLEMENTED,
