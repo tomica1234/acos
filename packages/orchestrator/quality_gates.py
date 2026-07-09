@@ -369,6 +369,7 @@ def _line_has_test_assertion(line: str) -> bool:
     stripped = _line_code_before_comment(line)
     if not stripped:
         return False
+    stripped = _mask_quoted_segments(stripped)
     return any(
         re.search(pattern, stripped)
         for pattern in (
@@ -400,6 +401,29 @@ def _line_code_before_comment(line: str) -> str:
     if comment_start is None:
         return stripped
     return stripped[:comment_start].rstrip()
+
+
+def _mask_quoted_segments(line: str) -> str:
+    output: list[str] = []
+    quote: str | None = None
+    escaped = False
+    for character in line:
+        if quote is not None:
+            if escaped:
+                escaped = False
+                continue
+            if character == "\\":
+                escaped = True
+                continue
+            if character == quote:
+                quote = None
+                output.append('""')
+            continue
+        if character in {"'", '"', "`"}:
+            quote = character
+            continue
+        output.append(character)
+    return "".join(output)
 
 
 def _python_payload_has_vacuous_assertion(payload: str) -> bool:
