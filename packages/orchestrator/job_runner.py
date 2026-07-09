@@ -2145,8 +2145,25 @@ class JobRunner:
         approval = self.approval_gateway.get(record.pending_approval_id)
         if approval.status == ApprovalStatus.APPROVED:
             record.runtime_state["approved_approval_id"] = approval.id
-            pending_patch = record.runtime_state.pop("pending_approval_patch", None)
+            pending_patch = record.runtime_state.get("pending_approval_patch")
+            pending_patch_role = str(
+                record.runtime_state.get("pending_approval_patch_role")
+                or "approved_patch"
+            )
             if isinstance(pending_patch, dict):
+                try:
+                    self._ensure_pending_approval_patch_quality(
+                        record,
+                        pending_patch,
+                        role=pending_patch_role,
+                    )
+                except QualityGateError:
+                    record.runtime_state.pop("pending_approval_patch", None)
+                    record.runtime_state.pop("pending_approval_patch_role", None)
+                    record.pending_approval_id = None
+                    raise
+                record.runtime_state.pop("pending_approval_patch", None)
+                record.runtime_state.pop("pending_approval_patch_role", None)
                 result = self.router.call("repo_server.apply_patch", **pending_patch)
                 if not result.ok:
                     raise RuntimeError(result.error or "approved patch application failed")
@@ -2158,11 +2175,34 @@ class JobRunner:
         if approval.status == ApprovalStatus.REJECTED:
             record.last_error = approval.resolution_reason or "approval rejected"
             record.pending_approval_id = None
+            record.runtime_state.pop("pending_approval_patch_role", None)
             if record.status != JobStatus.BLOCKED:
                 record.status = JobStatus.BLOCKED
                 record.history.append(JobStatus.BLOCKED)
             return True
         return False
+
+    def _ensure_pending_approval_patch_quality(
+        self,
+        record: JobRecord,
+        pending_patch: dict[str, Any],
+        *,
+        role: str,
+    ) -> None:
+        patch_payload = {
+            key: pending_patch[key]
+            for key in FilePatch.model_fields
+            if key in pending_patch
+        }
+        try:
+            patch = FilePatch.model_validate(patch_payload)
+        except ValueError as exc:
+            raise QualityGateError(f"approved_patch_invalid:{exc}") from exc
+        ensure_test_patch_quality(
+            [patch],
+            role=role,
+            workspace_root=self._workspace_root(record),
+        )
 
     def _ensure_patch_approved_or_pause(
         self,
@@ -2221,6 +2261,7 @@ class JobRunner:
             "expected_old_content": patch.expected_old_content,
             "executable": patch.executable,
         }
+        record.runtime_state["pending_approval_patch_role"] = role
         if record.status != JobStatus.WAITING_APPROVAL:
             record.status = JobStatus.WAITING_APPROVAL
             record.history.append(JobStatus.WAITING_APPROVAL)
