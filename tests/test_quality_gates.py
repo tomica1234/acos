@@ -239,6 +239,22 @@ def test_test_patch_quality_rejects_empty_frontend_tests() -> None:
         ensure_test_patch_quality([patch], role="test_writer")
 
 
+def test_test_patch_quality_rejects_frontend_test_without_assertion() -> None:
+    patch = FilePatch(
+        path="frontend/test/project_scaffold.test.tsx",
+        operation="create",
+        content=(
+            "import { test } from 'vitest'\n\n"
+            "test('loads project scaffold', () => {\n"
+            "  renderProjectScaffold()\n"
+            "})\n"
+        ),
+    )
+
+    with pytest.raises(QualityGateError, match="test_writer attempted to weaken tests"):
+        ensure_test_patch_quality([patch], role="test_writer")
+
+
 def test_test_patch_quality_rejects_empty_test_file_create() -> None:
     patch = FilePatch(
         path="tests/test_project_setup.py",
@@ -371,6 +387,27 @@ def test_test_patch_quality_rejects_python_pass_tests() -> None:
 
     with pytest.raises(QualityGateError, match="test_writer attempted to weaken tests"):
         ensure_test_patch_quality([patch], role="test_writer")
+
+
+def test_test_patch_quality_rejects_python_test_without_assertion() -> None:
+    patch = FilePatch(
+        path="tests/test_feature.py",
+        operation="create",
+        content="def test_feature() -> None:\n    build_feature()\n",
+    )
+
+    with pytest.raises(QualityGateError, match="test_writer attempted to weaken tests"):
+        ensure_test_patch_quality([patch], role="test_writer")
+
+
+def test_test_patch_quality_allows_test_helper_without_new_test_case() -> None:
+    patch = FilePatch(
+        path="tests/helpers.py",
+        operation="update",
+        content="def build_feature_payload() -> dict[str, str]:\n    return {'name': 'feature'}\n",
+    )
+
+    ensure_test_patch_quality([patch], role="test_writer")
 
 
 def test_test_patch_quality_rejects_python_importorskip_tests() -> None:

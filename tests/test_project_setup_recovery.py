@@ -729,12 +729,11 @@ def test_stage_test_gate_rewrites_declared_new_test_file_update_to_create(
                         path=test_path,
                         operation="update",
                         content=(
+                            "import { expect } from 'vitest'\n\n"
                             "describe('scaffold backend', () => {\n"
                             "  it('names the scaffold target', () => {\n"
                             "    const target = 'backend/test/scaffold.test.js'\n"
-                            "    if (!target.includes('scaffold')) {\n"
-                            "      throw new Error('missing scaffold target')\n"
-                            "    }\n"
+                            "    expect(target).toContain('scaffold')\n"
                             "  })\n"
                             "})\n"
                         ),

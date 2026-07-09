@@ -212,6 +212,8 @@ def _test_patch_is_suspicious(patch: FilePatch) -> bool:
         return True
     if not payload:
         return False
+    if _test_patch_introduces_test_case_without_assertion(payload):
+        return True
     compact = re.sub(r"\s+", "", payload).lower()
     vacuous_assertions = (
         "expect(true).tobe(true)",
@@ -278,6 +280,20 @@ def _test_patch_diff_lines(unified_diff: str, prefix: str) -> list[str]:
             continue
         lines.append(line[1:])
     return lines
+
+
+def _test_patch_introduces_test_case_without_assertion(payload: str) -> bool:
+    if not _payload_introduces_test_case(payload):
+        return False
+    return not any(_line_has_test_assertion(line) for line in payload.splitlines())
+
+
+def _payload_introduces_test_case(payload: str) -> bool:
+    test_case_patterns = (
+        r"(?m)^\s*(?:async\s+)?def\s+test_[A-Za-z0-9_]+\s*\(",
+        r"\b(?:describe|it|test)(?:\s*\.\s*[A-Za-z_$][\w$]*)*\s*\(",
+    )
+    return any(re.search(pattern, payload) for pattern in test_case_patterns)
 
 
 def _line_has_test_assertion(line: str) -> bool:
