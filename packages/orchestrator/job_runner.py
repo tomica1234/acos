@@ -3143,7 +3143,6 @@ class JobRunner:
             "verified",
             "verify",
             "visible",
-            "works",
         }
         if tokens & observable_tokens:
             return True

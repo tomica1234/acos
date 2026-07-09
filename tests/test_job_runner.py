@@ -9333,6 +9333,32 @@ def test_prd_quality_rejects_generic_feature_works_acceptance_tests() -> None:
     ]
 
 
+def test_prd_quality_rejects_domain_works_acceptance_tests() -> None:
+    prd = PRD(
+        title="English Vocab App",
+        problem_statement="Students need account-based vocabulary practice.",
+        smallest_working_core=["Serve an authenticated vocabulary shell"],
+        small_parts=["User authentication and roles"],
+        incremental_milestones=["Users can sign in"],
+        acceptance_tests=["User authentication works"],
+        definition_of_done=["All tests pass"],
+        required_artifacts=["backend/auth.py", "tests/test_auth.py"],
+    )
+
+    report = JobRunner._build_prd_quality_report(prd)
+
+    assert report["passed"] is False
+    assert report["missing"] == ["acceptance_tests_observable"]
+    assert report["acceptance_tests_semantically_cover_small_parts"] is True
+    assert report["acceptance_tests_observable"] is False
+    assert report["non_observable_acceptance_tests"] == [
+        {
+            "acceptance_test_index": 1,
+            "acceptance_test": "User authentication works",
+        }
+    ]
+
+
 def test_prd_quality_requires_incremental_milestones_for_each_small_part() -> None:
     prd = PRD(
         title="Feature",
