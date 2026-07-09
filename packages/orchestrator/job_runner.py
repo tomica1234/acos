@@ -3242,6 +3242,7 @@ class JobRunner:
         )
         task_graph = self._refine_task_graph_for_autonomy(record, prd, task_graph)
         task_graph = self._normalize_project_setup_task_graph(record, task_graph)
+        ignored_project_setup_artifacts = self._ignored_project_setup_artifacts(record)
         validation = self._build_task_graph_validation(
             task_graph,
             prd=prd,
@@ -3257,6 +3258,7 @@ class JobRunner:
                 record,
                 "require_task_artifacts",
             ),
+            ignored_project_setup_artifacts=ignored_project_setup_artifacts,
         )
         record.outputs["task_graph_validation"] = validation
         self._record_task_graph_validation_attempt(
@@ -3314,6 +3316,7 @@ class JobRunner:
             self._write_memory_item(record, "planner", "task_graph", task_graph.model_dump_json())
             task_graph = self._refine_task_graph_for_autonomy(record, prd, task_graph)
             task_graph = self._normalize_project_setup_task_graph(record, task_graph)
+            ignored_project_setup_artifacts = self._ignored_project_setup_artifacts(record)
             validation = self._build_task_graph_validation(
                 task_graph,
                 prd=prd,
@@ -3329,6 +3332,7 @@ class JobRunner:
                     record,
                     "require_task_artifacts",
                 ),
+                ignored_project_setup_artifacts=ignored_project_setup_artifacts,
             )
             record.outputs["task_graph_validation"] = validation
             self._record_task_graph_validation_attempt(
@@ -3425,6 +3429,7 @@ class JobRunner:
     ) -> bool:
         validation = self._build_task_graph_validation(
             task_graph,
+            ignored_project_setup_artifacts=self._ignored_project_setup_artifacts(record),
             require_acceptance_criteria=self._constraint_flag(
                 record,
                 "require_task_acceptance_criteria",
@@ -3454,12 +3459,39 @@ class JobRunner:
         return False
 
     @staticmethod
+    def _ignored_project_setup_artifacts(record: JobRecord) -> list[dict[str, Any]]:
+        normalization = record.outputs.get("task_graph_normalization")
+        if not isinstance(normalization, dict):
+            return []
+        ignored = normalization.get("ignored_project_setup_artifacts")
+        if not isinstance(ignored, list):
+            return []
+        cleaned: list[dict[str, Any]] = []
+        for item in ignored:
+            if not isinstance(item, dict):
+                continue
+            raw_paths = item.get("paths")
+            if not isinstance(raw_paths, list):
+                continue
+            paths = [str(path).strip() for path in raw_paths if str(path).strip()]
+            if not paths:
+                continue
+            cleaned.append(
+                {
+                    "task_id": str(item.get("task_id") or "").strip(),
+                    "paths": paths,
+                }
+            )
+        return cleaned
+
+    @staticmethod
     def _build_task_graph_validation(
         task_graph: TaskGraph,
         prd: PRD | None = None,
         require_acceptance_criteria: bool = False,
         require_executable_task_roles: bool = False,
         require_task_artifacts: bool = False,
+        ignored_project_setup_artifacts: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         ids = [task.id for task in task_graph.tasks]
         duplicate_ids = sorted({task_id for task_id in ids if ids.count(task_id) > 1})
@@ -3644,6 +3676,22 @@ class JobRunner:
         test_writer_acceptance_dependency_mismatches = (
             JobRunner._test_writer_acceptance_dependency_mismatches(task_graph)
         )
+        cleaned_ignored_project_setup_artifacts: list[dict[str, Any]] = []
+        for item in ignored_project_setup_artifacts or []:
+            if not isinstance(item, dict):
+                continue
+            raw_paths = item.get("paths")
+            if not isinstance(raw_paths, list):
+                continue
+            paths = [str(path).strip() for path in raw_paths if str(path).strip()]
+            if paths:
+                cleaned_ignored_project_setup_artifacts.append(
+                    {
+                        "task_id": str(item.get("task_id") or "").strip(),
+                        "paths": paths,
+                    }
+                )
+        ignored_project_setup_artifacts = cleaned_ignored_project_setup_artifacts
         project_setup_scaffold_covers_test_artifacts = (
             bool(prd_test_required_artifacts)
             and all(
@@ -3918,6 +3966,13 @@ class JobRunner:
                     "items": invalid_task_artifacts,
                 }
             )
+        if require_task_artifacts and ignored_project_setup_artifacts:
+            errors.append(
+                {
+                    "type": "ignored_project_setup_artifacts",
+                    "items": ignored_project_setup_artifacts,
+                }
+            )
         unsupported_task_roles = [
             {"task_id": task.id, "role": task.role}
             for task in task_graph.tasks
@@ -3960,6 +4015,8 @@ class JobRunner:
             ),
             "invalid_task_artifact_count": len(invalid_task_artifacts),
             "invalid_task_artifacts": invalid_task_artifacts,
+            "ignored_project_setup_artifact_count": len(ignored_project_setup_artifacts),
+            "ignored_project_setup_artifacts": ignored_project_setup_artifacts,
             "prd_required_artifact_count": len(prd_required_artifacts),
             "assigned_required_artifact_count": len(
                 prd_required_artifacts & assigned_artifacts

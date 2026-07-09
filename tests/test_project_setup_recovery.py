@@ -11,6 +11,7 @@ from packages.orchestrator.recovery_executor import RecoveryExecutor
 from packages.schemas.agent_outputs import (
     FilePatch,
     ImplementationResult,
+    PRD,
     TestRunResult,
     TestWriterResult,
 )
@@ -126,6 +127,78 @@ def test_project_setup_normalization_uses_canonical_artifacts_only(
             "paths": ["../outside.py", "docs/extra.md", "C:\\outside.py"],
         }
     ]
+    validation = runner._build_task_graph_validation(
+        normalized,
+        require_task_artifacts=True,
+        ignored_project_setup_artifacts=runner._ignored_project_setup_artifacts(record),
+    )
+    assert validation["valid"] is False
+    assert validation["ignored_project_setup_artifacts"] == [
+        {
+            "task_id": "project-scaffold",
+            "paths": ["../outside.py", "docs/extra.md", "C:\\outside.py"],
+        }
+    ]
+    assert {
+        error["type"] for error in validation["errors"]
+    } == {"ignored_project_setup_artifacts"}
+
+
+def test_project_setup_ignored_artifacts_are_recovered_as_invalid_task_graph(
+    tmp_path: Path,
+) -> None:
+    task_graph = TaskGraph(
+        goal="Build English vocabulary test app",
+        tasks=[
+            PlannedTask(
+                id="project-scaffold",
+                title="Project scaffold",
+                description="Create backend frontend shared monorepo setup",
+                role="architect",
+                target_files=["backend/auth.py"],
+                required_artifacts=["backend/main.py", "../outside.py"],
+            )
+        ],
+    )
+    runner, _environment, record = _runner(
+        tmp_path,
+        scenario={"planner": task_graph.model_dump()},
+    )
+    record.spec.metadata["constraints"] = {
+        "require_task_artifacts": True,
+        "task_graph_validation_refinement_attempts": 0,
+    }
+    prd = PRD(
+        title="English vocabulary app",
+        problem_statement="Build the app.",
+    )
+
+    result = runner._load_or_repair_task_graph_for_autonomy(record, prd)
+
+    assert result is None
+    validation = record.outputs["task_graph_validation"]
+    ignored = [
+        {
+            "task_id": "project-scaffold",
+            "paths": ["backend/auth.py", "../outside.py"],
+        }
+    ]
+    assert validation["valid"] is False
+    assert validation["ignored_project_setup_artifacts"] == ignored
+    assert validation["errors"] == [
+        {
+            "type": "ignored_project_setup_artifacts",
+            "items": ignored,
+        }
+    ]
+    plan = record.runtime_state["recovery_plan"]
+    assert record.status == JobStatus.REPLANNING
+    assert plan["strategy"] == "REPLAN_TASK"
+    assert plan["constraints"]["task_graph_validation_errors"] == [
+        "ignored_project_setup_artifacts"
+    ]
+    assert plan["constraints"]["ignored_project_setup_artifacts"] == ignored
+    assert record.spec.metadata["constraints"]["ignored_project_setup_artifacts"] == ignored
 
 
 def test_project_setup_cannot_enter_test_writer_before_required_artifacts_exist(

@@ -21,6 +21,7 @@ TASK_GRAPH_VALIDATION_DETAIL_KEYS = (
     "test_writer_acceptance_dependency_mismatches",
     "executor_order_dependency_violations",
     "invalid_task_artifacts",
+    "ignored_project_setup_artifacts",
 )
 
 TASK_GRAPH_VALIDATION_CONTEXT_KEYS = (
