@@ -4952,6 +4952,100 @@ def test_job_runner_blocks_completion_when_implementation_stage_has_no_test_patc
     ]
 
 
+def test_completion_integrity_requires_test_path_patch_not_any_test_writer_patch(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    registry = ModelRegistry.from_paths(
+        provider_path=config_dir() / "model_providers.yaml",
+        agents_path=config_dir() / "agents.yaml",
+        routing_path=config_dir() / "model_routing.yaml",
+    )
+    policy = PolicyEngine.from_path(config_dir() / "policies.yaml")
+    environment = FakeMCPEnvironment(
+        workspace_root=workspace,
+        memory_db_path=workspace / ".memory.sqlite3",
+    )
+    runner = JobRunner(registry=registry, policy=policy, router=environment.build_router())
+    implementation = ImplementationResult(
+        status=ImplementationStatus.IMPLEMENTED,
+        summary="Create module",
+        patches=[
+            {
+                "path": "feature.py",
+                "content": "VALUE = 1\n",
+                "operation": "create",
+            }
+        ],
+    )
+    test_writer = TestWriterOutput(
+        summary="Document existing test strategy",
+        patches=[
+            {
+                "path": "README.md",
+                "content": "# Feature\n\nTests still need to be written.\n",
+                "operation": "create",
+            }
+        ],
+    )
+    summary = runner._build_stage_change_summary(implementation, [test_writer])
+    assert summary["test_writer_patch_count"] == 1
+    assert summary["test_patch_count"] == 0
+    assert summary["test_files"] == []
+    assert summary["test_writer_files"] == ["README.md"]
+
+    spec = JobSpec(
+        request_text="Create feature with tests",
+        repo_path=str(workspace),
+        target_branch="acos/non-test-writer-patch",
+    )
+    record = runner.store.create(spec)
+    record.completed_task_ids = ["core"]
+    record.outputs["autonomous_stages"] = [
+        {
+            "stage": 1,
+            "task": {
+                "id": "core",
+                "role": "implementer",
+            },
+            "change_summary": summary,
+            "test_run": {"success": True},
+        }
+    ]
+    task_graph = TaskGraph(
+        goal="Build feature",
+        tasks=[
+            PlannedTask(
+                id="core",
+                title="Core",
+                description="Build core",
+                role="implementer",
+            )
+        ],
+    )
+
+    report = JobRunner._build_completion_integrity_report(
+        record,
+        task_graph,
+        TestRunResult(success=True, executed_test_count=1),
+        require_completion_integrity=True,
+        require_test_evidence=True,
+        require_stage_test_patches=True,
+    )
+
+    assert report["passed"] is False
+    assert report["failure_reasons"] == ["missing_stage_test_patches:1"]
+    assert report["stages_missing_test_patches"] == [
+        {
+            "stage": 1,
+            "task_id": "core",
+            "implementation_patch_count": 1,
+            "test_patch_count": 0,
+        }
+    ]
+
+
 def test_job_runner_blocks_unsupported_autonomous_task_role_before_implementation(
     tmp_path: Path,
 ) -> None:

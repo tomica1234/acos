@@ -6557,7 +6557,7 @@ class JobRunner:
                 ]
             )
             implementation_patch_count = len(implementation.patches)
-        test_files = self._unique_paths(
+        test_writer_files = self._unique_paths(
             [
                 path
                 for result in test_writer_results
@@ -6567,15 +6567,30 @@ class JobRunner:
                 ]
             ]
         )
-        test_patch_count = sum(len(result.patches) for result in test_writer_results)
-        changed_files = self._unique_paths([*implementation_files, *test_files])
+        test_files = [
+            path
+            for path in test_writer_files
+            if self._looks_like_test_path(path)
+        ]
+        test_writer_patch_count = sum(
+            len(result.patches) for result in test_writer_results
+        )
+        test_patch_count = sum(
+            1
+            for result in test_writer_results
+            for patch in result.patches
+            if self._looks_like_test_path(patch.path)
+        )
+        changed_files = self._unique_paths([*implementation_files, *test_writer_files])
         return {
             "changed_files": changed_files,
             "implementation_files": implementation_files,
             "test_files": test_files,
+            "test_writer_files": test_writer_files,
             "implementation_patch_count": implementation_patch_count,
             "test_patch_count": test_patch_count,
-            "patch_count": implementation_patch_count + test_patch_count,
+            "test_writer_patch_count": test_writer_patch_count,
+            "patch_count": implementation_patch_count + test_writer_patch_count,
         }
 
     @staticmethod
