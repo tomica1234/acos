@@ -6,6 +6,7 @@ import argparse
 from pathlib import Path
 from typing import Sequence
 
+from packages.orchestrator.job_constraints import apply_strict_job_constraints
 from packages.orchestrator.job_runner import build_default_runner
 from packages.orchestrator.job_store import SQLiteJobStore
 from packages.orchestrator.worker_daemon import WorkerConfig, WorkerDaemon
@@ -56,6 +57,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         repo_path=str(Path(args.repo).resolve()),
         target_branch=args.branch,
     )
+    apply_strict_job_constraints(spec)
     record = store.create(spec)
     record = daemon.run_once(record.job_id)
     print(record.model_dump_json(indent=2))

@@ -28,6 +28,7 @@ from apps.cli import (
 )
 from packages.llm.registry import ModelRegistry
 from packages.orchestrator.approval import ApprovalError
+from packages.orchestrator.job_constraints import apply_strict_job_constraints
 from packages.orchestrator.job_runner import JobRunner, build_default_runner
 from packages.orchestrator.job_store import FileJobStore
 from packages.orchestrator.policy import PolicyEngine
@@ -106,26 +107,6 @@ class BackgroundSupervisedJobRequest(SupervisedJobRequest):
 class ProviderProbeRequest(BaseModel):
     provider: str = "local_ornith"
     timeout: float = 5.0
-
-
-STRICT_API_JOB_CONSTRAINTS = {
-    "require_prd_quality": True,
-    "require_task_acceptance_criteria": True,
-    "require_task_artifacts": True,
-    "require_completion_integrity": True,
-    "require_test_evidence": True,
-    "require_stage_test_patches": True,
-    "stage_review": True,
-}
-
-
-def _apply_strict_api_job_constraints(spec: JobSpec) -> None:
-    constraints = spec.metadata.setdefault("constraints", {})
-    if not isinstance(constraints, dict):
-        constraints = {}
-        spec.metadata["constraints"] = constraints
-    constraints.update(STRICT_API_JOB_CONSTRAINTS)
-    constraints.setdefault("test_timeout_seconds", 1200)
 
 
 def create_app(
@@ -396,7 +377,7 @@ def create_app(
             target_branch=payload.target_branch,
             metadata=payload.metadata,
         )
-        _apply_strict_api_job_constraints(spec)
+        apply_strict_job_constraints(spec)
         return get_runner().run_job(spec)
 
     @app.post("/providers/check")
