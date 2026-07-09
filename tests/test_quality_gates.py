@@ -211,6 +211,41 @@ def test_test_patch_quality_rejects_vacuous_frontend_literal_transform_expectati
         ensure_test_patch_quality([patch], role="test_writer")
 
 
+def test_test_patch_quality_rejects_vacuous_frontend_literal_boolean_method() -> None:
+    patch = FilePatch(
+        path="src/App.spec.tsx",
+        operation="create",
+        content=(
+            "import { expect, test } from 'vitest'\n\n"
+            "test('placeholder', () => {\n"
+            "  const label = 'project scaffold'\n"
+            "  expect(label.includes('scaffold')).toBe(true)\n"
+            "})\n"
+        ),
+    )
+
+    with pytest.raises(QualityGateError, match="test_writer attempted to weaken tests"):
+        ensure_test_patch_quality([patch], role="test_writer")
+
+
+def test_test_patch_quality_rejects_vacuous_frontend_literal_boolean_method_truthy() -> None:
+    patch = FilePatch(
+        path="src/App.spec.tsx",
+        operation="create",
+        content=(
+            "import { expect, test } from 'vitest'\n\n"
+            "test('placeholder', () => {\n"
+            "  const label = 'project scaffold'\n"
+            "  const prefix = 'project'\n"
+            "  expect(label.startsWith(prefix)).toBeTruthy()\n"
+            "})\n"
+        ),
+    )
+
+    with pytest.raises(QualityGateError, match="test_writer attempted to weaken tests"):
+        ensure_test_patch_quality([patch], role="test_writer")
+
+
 def test_test_patch_quality_allows_frontend_reassigned_runtime_value() -> None:
     patch = FilePatch(
         path="src/App.spec.tsx",
@@ -221,6 +256,22 @@ def test_test_patch_quality_allows_frontend_reassigned_runtime_value() -> None:
             "  let label = 'ACOS project scaffold is ready'\n"
             "  label = renderProjectScaffoldLabel()\n"
             "  expect(label).toContain('project scaffold')\n"
+            "})\n"
+        ),
+    )
+
+    ensure_test_patch_quality([patch], role="test_writer")
+
+
+def test_test_patch_quality_allows_frontend_runtime_boolean_method() -> None:
+    patch = FilePatch(
+        path="src/App.spec.tsx",
+        operation="create",
+        content=(
+            "import { expect, test } from 'vitest'\n\n"
+            "test('uses app output', () => {\n"
+            "  const label = renderProjectScaffoldLabel()\n"
+            "  expect(label.includes('project scaffold')).toBe(true)\n"
             "})\n"
         ),
     )

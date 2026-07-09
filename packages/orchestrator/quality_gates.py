@@ -781,7 +781,14 @@ _JS_IDENTIFIER = r"[A-Za-z_$][\w$]*"
 _JS_STRING_METHOD_CALL = (
     rf"{_JS_IDENTIFIER}\s*\.\s*(?:toLowerCase|toUpperCase|trim)\s*\(\s*\)"
 )
-_JS_EXPECTATION_VALUE = rf"(?:{_JS_LITERAL}|{_JS_STRING_METHOD_CALL}|{_JS_IDENTIFIER})"
+_JS_BOOLEAN_STRING_METHOD_CALL = (
+    rf"{_JS_IDENTIFIER}\s*\.\s*(?:includes|startsWith|endsWith)\s*"
+    rf"\(\s*(?:{_JS_LITERAL}|{_JS_IDENTIFIER})\s*\)"
+)
+_JS_EXPECTATION_VALUE = (
+    rf"(?:{_JS_LITERAL}|{_JS_BOOLEAN_STRING_METHOD_CALL}|"
+    rf"{_JS_STRING_METHOD_CALL}|{_JS_IDENTIFIER})"
+)
 _JS_EXPECTATION_ARGUMENT = rf"(?:{_JS_EXPECTATION_VALUE}|{_JS_REGEX_LITERAL})"
 
 
@@ -886,6 +893,32 @@ def _javascript_expression_value(
             return receiver.upper()
         if method == "trim":
             return receiver.strip()
+    boolean_method_match = re.fullmatch(
+        rf"(?P<name>{_JS_IDENTIFIER})\s*\.\s*"
+        rf"(?P<method>includes|startsWith|endsWith)\s*"
+        rf"\(\s*(?P<argument>{_JS_EXPECTATION_VALUE})\s*\)",
+        stripped,
+    )
+    if boolean_method_match:
+        receiver = literal_bindings.get(
+            boolean_method_match.group("name"),
+            _MISSING_LITERAL,
+        )
+        if not isinstance(receiver, str):
+            return _MISSING_LITERAL
+        argument = _javascript_expression_value(
+            boolean_method_match.group("argument"),
+            literal_bindings,
+        )
+        if not isinstance(argument, str):
+            return _MISSING_LITERAL
+        method = boolean_method_match.group("method")
+        if method == "includes":
+            return argument in receiver
+        if method == "startsWith":
+            return receiver.startswith(argument)
+        if method == "endsWith":
+            return receiver.endswith(argument)
     if re.fullmatch(_JS_REGEX_LITERAL, stripped):
         return _javascript_regex_value(stripped)
     return _javascript_literal_value(stripped)
