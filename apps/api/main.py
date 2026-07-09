@@ -108,6 +108,26 @@ class ProviderProbeRequest(BaseModel):
     timeout: float = 5.0
 
 
+STRICT_API_JOB_CONSTRAINTS = {
+    "require_prd_quality": True,
+    "require_task_acceptance_criteria": True,
+    "require_task_artifacts": True,
+    "require_completion_integrity": True,
+    "require_test_evidence": True,
+    "require_stage_test_patches": True,
+    "stage_review": True,
+}
+
+
+def _apply_strict_api_job_constraints(spec: JobSpec) -> None:
+    constraints = spec.metadata.setdefault("constraints", {})
+    if not isinstance(constraints, dict):
+        constraints = {}
+        spec.metadata["constraints"] = constraints
+    constraints.update(STRICT_API_JOB_CONSTRAINTS)
+    constraints.setdefault("test_timeout_seconds", 1200)
+
+
 def create_app(
     job_runner: JobRunner | None = None,
     *,
@@ -376,6 +396,7 @@ def create_app(
             target_branch=payload.target_branch,
             metadata=payload.metadata,
         )
+        _apply_strict_api_job_constraints(spec)
         return get_runner().run_job(spec)
 
     @app.post("/providers/check")

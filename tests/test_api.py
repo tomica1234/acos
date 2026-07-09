@@ -14,6 +14,52 @@ from packages.schemas.models import JobStatus
 from packages.schemas.tasks import PlannedTask, TaskGraph
 
 
+def test_submit_job_api_applies_strict_quality_gates(tmp_path: Path) -> None:
+    captured: dict[str, object] = {}
+
+    class DummyRunner:
+        def run_job(self, spec: JobSpec) -> JobRecord:
+            captured["spec"] = spec
+            return JobRecord(job_id=spec.job_id, spec=spec, status=JobStatus.DONE)
+
+    client = TestClient(api_main.create_app(job_runner=DummyRunner()))
+    response = client.post(
+        "/jobs",
+        json={
+            "request_text": "Build something useful.",
+            "repo_path": str(tmp_path / "workspace"),
+            "target_branch": "acos/direct-api-job",
+            "metadata": {
+                "source": "legacy_api",
+                "constraints": {
+                    "require_prd_quality": False,
+                    "require_task_acceptance_criteria": False,
+                    "require_task_artifacts": False,
+                    "require_completion_integrity": False,
+                    "require_test_evidence": False,
+                    "require_stage_test_patches": False,
+                    "stage_review": False,
+                },
+            },
+        },
+    )
+
+    assert response.status_code == 200
+    spec = captured["spec"]
+    assert isinstance(spec, JobSpec)
+    assert spec.metadata["source"] == "legacy_api"
+    assert spec.metadata["constraints"] == {
+        "require_prd_quality": True,
+        "require_task_acceptance_criteria": True,
+        "require_task_artifacts": True,
+        "require_completion_integrity": True,
+        "require_test_evidence": True,
+        "require_stage_test_patches": True,
+        "stage_review": True,
+        "test_timeout_seconds": 1200,
+    }
+
+
 def test_supervised_api_stops_before_runner_when_provider_unhealthy(
     tmp_path: Path,
     monkeypatch,
