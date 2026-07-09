@@ -371,23 +371,99 @@ _JS_LITERAL = (
 
 
 def _javascript_payload_has_vacuous_expectation(payload: str) -> bool:
-    expectation = re.compile(
+    expectation_with_argument = re.compile(
         rf"\bexpect\s*\(\s*(?P<actual>{_JS_LITERAL})\s*\)"
-        rf"\s*\.\s*(?P<matcher>toBe|toEqual|toStrictEqual|toContain)\s*"
+        rf"\s*\.\s*(?:(?P<negated>not)\s*\.\s*)?"
+        rf"(?P<matcher>"
+        rf"toBeGreaterThanOrEqual|toBeLessThanOrEqual|toBeGreaterThan|"
+        rf"toBeLessThan|toBe|toEqual|toStrictEqual|toContain"
+        rf")\s*"
         rf"\(\s*(?P<expected>{_JS_LITERAL})\s*\)",
         re.MULTILINE,
     )
-    for match in expectation.finditer(payload):
+    expectation_without_argument = re.compile(
+        rf"\bexpect\s*\(\s*(?P<actual>{_JS_LITERAL})\s*\)"
+        rf"\s*\.\s*(?:(?P<negated>not)\s*\.\s*)?"
+        rf"(?P<matcher>"
+        rf"toBeTruthy|toBeFalsy|toBeNull|toBeUndefined|toBeDefined"
+        rf")\s*\(\s*\)",
+        re.MULTILINE,
+    )
+    for match in expectation_with_argument.finditer(payload):
         actual = _javascript_literal_value(match.group("actual"))
         expected = _javascript_literal_value(match.group("expected"))
         if actual is _MISSING_LITERAL or expected is _MISSING_LITERAL:
             continue
-        matcher = match.group("matcher")
-        if matcher in {"toBe", "toEqual", "toStrictEqual"} and actual == expected:
+        passes = _javascript_matcher_passes(
+            actual,
+            match.group("matcher"),
+            expected,
+        )
+        if passes is None:
+            continue
+        if bool(match.group("negated")):
+            passes = not passes
+        if passes:
             return True
-        if matcher == "toContain" and isinstance(actual, str) and isinstance(expected, str):
-            return expected in actual
+    for match in expectation_without_argument.finditer(payload):
+        actual = _javascript_literal_value(match.group("actual"))
+        if actual is _MISSING_LITERAL:
+            continue
+        passes = _javascript_matcher_passes(actual, match.group("matcher"))
+        if passes is None:
+            continue
+        if bool(match.group("negated")):
+            passes = not passes
+        if passes:
+            return True
     return False
+
+
+def _javascript_matcher_passes(
+    actual: object,
+    matcher: str,
+    expected: object = _MISSING_LITERAL,
+) -> bool | None:
+    if matcher in {"toBe", "toEqual", "toStrictEqual"}:
+        return actual == expected
+    if matcher == "toContain":
+        if isinstance(actual, str) and isinstance(expected, str):
+            return expected in actual
+        return None
+    if matcher == "toBeTruthy":
+        return _javascript_truthy(actual)
+    if matcher == "toBeFalsy":
+        return not _javascript_truthy(actual)
+    if matcher == "toBeNull":
+        return actual is None
+    if matcher == "toBeUndefined":
+        return actual is _JS_UNDEFINED
+    if matcher == "toBeDefined":
+        return actual is not _JS_UNDEFINED
+    try:
+        if matcher == "toBeGreaterThan":
+            return actual > expected
+        if matcher == "toBeGreaterThanOrEqual":
+            return actual >= expected
+        if matcher == "toBeLessThan":
+            return actual < expected
+        if matcher == "toBeLessThanOrEqual":
+            return actual <= expected
+    except TypeError:
+        return None
+    return None
+
+
+def _javascript_truthy(value: object) -> bool:
+    if value is None or value is _JS_UNDEFINED:
+        return False
+    if value is False:
+        return False
+    if isinstance(value, (int, float)) and value == 0:
+        return False
+    if isinstance(value, str) and value == "":
+        return False
+    return True
 
 
 def _javascript_literal_value(raw_literal: str) -> object:

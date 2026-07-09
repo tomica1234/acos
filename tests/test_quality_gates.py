@@ -112,6 +112,54 @@ def test_test_patch_quality_rejects_vacuous_frontend_expectation_update_diff() -
         ensure_test_patch_quality([patch], role="fixer")
 
 
+def test_test_patch_quality_rejects_vacuous_frontend_negated_expectations() -> None:
+    patch = FilePatch(
+        path="src/App.spec.tsx",
+        operation="create",
+        content=(
+            "import { expect, test } from 'vitest'\n\n"
+            "test('placeholder', () => {\n"
+            "  expect(true).not.toBe(false)\n"
+            "})\n"
+        ),
+    )
+
+    with pytest.raises(QualityGateError, match="test_writer attempted to weaken tests"):
+        ensure_test_patch_quality([patch], role="test_writer")
+
+
+def test_test_patch_quality_rejects_vacuous_frontend_comparison_expectations() -> None:
+    patch = FilePatch(
+        path="src/App.spec.tsx",
+        operation="create",
+        content=(
+            "import { expect, test } from 'vitest'\n\n"
+            "test('placeholder', () => {\n"
+            "  expect(3).toBeGreaterThan(1)\n"
+            "})\n"
+        ),
+    )
+
+    with pytest.raises(QualityGateError, match="test_writer attempted to weaken tests"):
+        ensure_test_patch_quality([patch], role="test_writer")
+
+
+def test_test_patch_quality_rejects_vacuous_frontend_truthiness_expectations() -> None:
+    patch = FilePatch(
+        path="src/App.spec.tsx",
+        operation="create",
+        content=(
+            "import { expect, test } from 'vitest'\n\n"
+            "test('placeholder', () => {\n"
+            "  expect('ready').toBeTruthy()\n"
+            "})\n"
+        ),
+    )
+
+    with pytest.raises(QualityGateError, match="test_writer attempted to weaken tests"):
+        ensure_test_patch_quality([patch], role="test_writer")
+
+
 def test_test_patch_quality_allows_frontend_variable_expectation() -> None:
     patch = FilePatch(
         path="src/App.spec.tsx",
