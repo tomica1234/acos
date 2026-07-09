@@ -283,9 +283,73 @@ def _test_patch_diff_lines(unified_diff: str, prefix: str) -> list[str]:
 
 
 def _test_patch_introduces_test_case_without_assertion(payload: str) -> bool:
+    python_result = _python_payload_has_test_case_without_assertion(payload)
+    if python_result is not None:
+        return python_result
+    if _javascript_payload_has_test_case_without_assertion(payload):
+        return True
     if not _payload_introduces_test_case(payload):
         return False
     return not any(_line_has_test_assertion(line) for line in payload.splitlines())
+
+
+def _python_payload_has_test_case_without_assertion(payload: str) -> bool | None:
+    try:
+        tree = ast.parse(payload)
+    except SyntaxError:
+        return None
+    test_functions = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and node.name.startswith("test_")
+    ]
+    if not test_functions:
+        return None
+    return any(not _python_test_function_has_assertion(node) for node in test_functions)
+
+
+def _python_test_function_has_assertion(
+    node: ast.FunctionDef | ast.AsyncFunctionDef,
+) -> bool:
+    for child in ast.walk(node):
+        if child is node:
+            continue
+        if isinstance(child, ast.Assert):
+            return True
+        if _python_call_is_assertion(child):
+            return True
+    return False
+
+
+def _python_call_is_assertion(node: ast.AST) -> bool:
+    if not isinstance(node, ast.Call):
+        return False
+    function = node.func
+    if isinstance(function, ast.Attribute):
+        if function.attr.startswith("assert"):
+            return True
+        return (
+            function.attr == "raises"
+            and isinstance(function.value, ast.Name)
+            and function.value.id == "pytest"
+        )
+    return False
+
+
+def _javascript_payload_has_test_case_without_assertion(payload: str) -> bool:
+    test_block = re.compile(
+        r"\b(?:it|test)(?:\s*\.\s*[A-Za-z_$][\w$]*)*\s*"
+        r"\([^,{]*,\s*(?:async\s*)?(?:\([^)]*\)|[A-Za-z_$][\w$]*)\s*=>\s*\{"
+        r"(?P<body>.*?)"
+        r"^\s*\}\s*\)",
+        re.MULTILINE | re.DOTALL,
+    )
+    for match in test_block.finditer(payload):
+        body = match.group("body")
+        if not any(_line_has_test_assertion(line) for line in body.splitlines()):
+            return True
+    return False
 
 
 def _payload_introduces_test_case(payload: str) -> bool:
