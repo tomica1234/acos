@@ -2878,6 +2878,74 @@ def test_task_graph_validation_requires_test_writer_to_cover_prd_acceptance() ->
     } in validation["errors"]
 
 
+def test_task_graph_validation_requires_implementation_to_cover_prd_acceptance() -> None:
+    prd = PRD(
+        title="WordSet API",
+        problem_statement="Teachers need to create word sets.",
+        smallest_working_core=["Serve a backend API"],
+        small_parts=["Create backend service shell"],
+        incremental_milestones=["Backend service starts"],
+        acceptance_tests=["POST /api/word-sets creates a WordSet"],
+        definition_of_done=["All generated tests pass"],
+        required_artifacts=["src/server/index.ts", "tests/backend.test.ts"],
+    )
+    task_graph = TaskGraph(
+        goal="Build WordSet API",
+        tasks=[
+            PlannedTask(
+                id="backend-shell",
+                title="Build backend service shell",
+                description="Create the backend service shell.",
+                role="implementer",
+                acceptance_criteria=["Backend service starts"],
+                target_files=["src/server/index.ts"],
+                required_artifacts=["src/server/index.ts"],
+            ),
+            PlannedTask(
+                id="wordset-create-tests",
+                title="Test WordSet creation",
+                description="Test the WordSet creation endpoint.",
+                role="test_writer",
+                depends_on=["backend-shell"],
+                acceptance_criteria=["POST /api/word-sets creates a WordSet"],
+                target_files=["tests/backend.test.ts"],
+                required_artifacts=["tests/backend.test.ts"],
+            ),
+        ],
+    )
+
+    validation = JobRunner._build_task_graph_validation(
+        task_graph,
+        prd=prd,
+        require_acceptance_criteria=True,
+        require_task_artifacts=True,
+    )
+
+    assert validation["valid"] is False
+    assert validation["uncovered_acceptance_tests"] == [
+        {
+            "acceptance_test_index": 1,
+            "acceptance_test": "POST /api/word-sets creates a WordSet",
+            "task_id": None,
+            "covered": False,
+        }
+    ]
+    assert validation["test_writer_acceptance_test_coverage"] == [
+        {
+            "acceptance_test_index": 1,
+            "acceptance_test": "POST /api/word-sets creates a WordSet",
+            "task_id": "wordset-create-tests",
+            "covered": True,
+        }
+    ]
+    assert {
+        "type": "semantic_acceptance_test_mismatch",
+        "acceptance_test_count": 1,
+        "implementation_task_count": 1,
+        "uncovered_acceptance_tests": validation["uncovered_acceptance_tests"],
+    } in validation["errors"]
+
+
 def test_task_graph_validation_allows_test_writer_dependency_on_scaffold() -> None:
     task_graph = TaskGraph(
         goal="Build scaffold",

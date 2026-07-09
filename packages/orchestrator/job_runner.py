@@ -4285,7 +4285,7 @@ class JobRunner:
         )
         acceptance_test_coverage = JobRunner._semantic_task_coverage(
             acceptance_tests,
-            [task for task in task_graph.tasks if task.role in executable_roles],
+            implementation_tasks,
             item_key="acceptance_test",
             index_key="acceptance_test_index",
             allow_reuse=True,
