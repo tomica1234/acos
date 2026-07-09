@@ -1633,7 +1633,11 @@ class JobRunner:
                 f"patch_limit_exceeded:{role}:{len(patches)}>{max_patches}"
             )
         if role in {"fixer", "test_writer"}:
-            ensure_test_patch_quality(patches, role=role)
+            ensure_test_patch_quality(
+                patches,
+                role=role,
+                workspace_root=self._workspace_root(record),
+            )
         for patch in patches:
             self.policy.assert_patch_target_allowed(role, patch.path)
             patch = self._patch_for_missing_target_operation(record, role, patch)

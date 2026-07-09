@@ -2,12 +2,17 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from packages.llm.registry import ModelRegistry
 from packages.mcp_client.fake import FakeMCPEnvironment
 from packages.orchestrator.job_runner import JobRunner
 from packages.orchestrator.job_store import InMemoryJobStore
 from packages.orchestrator.policy import PolicyEngine
-from packages.orchestrator.quality_gates import ensure_test_patch_quality
+from packages.orchestrator.quality_gates import (
+    QualityGateError,
+    ensure_test_patch_quality,
+)
 from packages.orchestrator.recovery_executor import RecoveryExecutor
 from packages.schemas.agent_outputs import (
     FilePatch,
@@ -446,6 +451,33 @@ def test_recovery_executor_deterministic_test_content_is_not_vacuous() -> None:
         ],
         role="test_writer",
     )
+
+
+def test_runner_rejects_content_update_that_removes_existing_test_assertion(
+    tmp_path: Path,
+) -> None:
+    runner, _environment, record = _runner(tmp_path)
+    test_path = tmp_path / "tests/test_feature.py"
+    original = (
+        "def test_feature_status() -> None:\n"
+        "    result = build_feature()\n"
+        "    assert result.status == 'ready'\n"
+    )
+    test_path.parent.mkdir(parents=True)
+    test_path.write_text(original, encoding="utf-8")
+    patch = FilePatch(
+        path="tests/test_feature.py",
+        operation="update",
+        content=(
+            "def test_feature_status() -> None:\n"
+            "    result = build_feature()\n"
+            "    result.status\n"
+        ),
+    )
+
+    with pytest.raises(QualityGateError, match="fixer attempted to weaken tests"):
+        runner._apply_patches(record, "fixer", [patch])
+    assert test_path.read_text(encoding="utf-8") == original
 
 
 def test_recovery_executor_routes_case_insensitive_test_paths_to_test_writer() -> None:

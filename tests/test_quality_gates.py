@@ -448,6 +448,55 @@ def test_test_patch_quality_rejects_assertion_removal_hidden_by_other_hunk() -> 
         ensure_test_patch_quality([patch], role="fixer")
 
 
+def test_test_patch_quality_rejects_content_update_that_removes_assertion(
+    tmp_path,
+) -> None:
+    target = tmp_path / "tests/test_feature.py"
+    target.parent.mkdir(parents=True)
+    target.write_text(
+        "def test_feature_status() -> None:\n"
+        "    result = build_feature()\n"
+        "    assert result.status == 'ready'\n",
+        encoding="utf-8",
+    )
+    patch = FilePatch(
+        path="tests/test_feature.py",
+        operation="update",
+        content=(
+            "def test_feature_status() -> None:\n"
+            "    result = build_feature()\n"
+            "    result.status\n"
+        ),
+    )
+
+    with pytest.raises(QualityGateError, match="fixer attempted to weaken tests"):
+        ensure_test_patch_quality([patch], role="fixer", workspace_root=tmp_path)
+
+
+def test_test_patch_quality_allows_content_update_that_replaces_assertion(
+    tmp_path,
+) -> None:
+    target = tmp_path / "tests/test_feature.py"
+    target.parent.mkdir(parents=True)
+    target.write_text(
+        "def test_feature_status() -> None:\n"
+        "    result = build_feature()\n"
+        "    assert result.status == 'ready'\n",
+        encoding="utf-8",
+    )
+    patch = FilePatch(
+        path="tests/test_feature.py",
+        operation="update",
+        content=(
+            "def test_feature_status() -> None:\n"
+            "    result = build_feature()\n"
+            "    assert result.status in {'ready', 'warm'}\n"
+        ),
+    )
+
+    ensure_test_patch_quality([patch], role="fixer", workspace_root=tmp_path)
+
+
 def test_test_patch_quality_allows_assertion_replacement_diff() -> None:
     patch = FilePatch(
         path="tests/test_feature.py",

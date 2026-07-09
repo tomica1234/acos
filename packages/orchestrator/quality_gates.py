@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+import difflib
 from pathlib import Path, PurePosixPath
 import re
 from typing import Iterable, Sequence
@@ -29,8 +30,15 @@ def ensure_fixer_safe(patches: list[FilePatch]) -> None:
     ensure_test_patch_quality(patches, role="fixer")
 
 
-def ensure_test_patch_quality(patches: list[FilePatch], *, role: str) -> None:
+def ensure_test_patch_quality(
+    patches: list[FilePatch],
+    *,
+    role: str,
+    workspace_root: str | Path | None = None,
+) -> None:
     for patch in patches:
+        if workspace_root is not None:
+            patch = _patch_with_workspace_diff(patch, workspace_root=workspace_root)
         if _looks_like_test_path(patch.path) and _test_patch_is_suspicious(patch):
             raise QualityGateError(f"{role} attempted to weaken tests")
 
@@ -260,6 +268,36 @@ def _test_patch_removes_test_coverage(patch: FilePatch) -> bool:
         patch.new_path and _looks_like_active_test_location(patch.new_path)
     )
     return source_is_test and not target_is_test
+
+
+def _patch_with_workspace_diff(
+    patch: FilePatch,
+    *,
+    workspace_root: str | Path,
+) -> FilePatch:
+    if (
+        patch.operation != "update"
+        or patch.unified_diff is not None
+        or patch.content is None
+    ):
+        return patch
+    target = _resolve_valid_artifact_path(patch.path, workspace_root=workspace_root)
+    if target is None or not target.is_file():
+        return patch
+    try:
+        original = target.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return patch
+    unified_diff = "\n".join(
+        difflib.unified_diff(
+            original.splitlines(),
+            patch.content.splitlines(),
+            fromfile=patch.path,
+            tofile=patch.path,
+            lineterm="",
+        )
+    )
+    return patch.model_copy(update={"unified_diff": unified_diff})
 
 
 def _test_patch_removes_assertions_without_replacement(patch: FilePatch) -> bool:
