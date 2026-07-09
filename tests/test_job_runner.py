@@ -2839,6 +2839,7 @@ def test_task_graph_validation_requires_test_writer_artifacts_when_requested() -
     assert validation["valid"] is False
     assert validation["implementation_task_artifact_count"] == 1
     assert validation["executable_task_artifact_count"] == 1
+    assert validation["test_writer_tasks_missing_target_files"] == ["tests"]
     assert {"type": "missing_task_artifacts", "task_ids": ["tests"]} in validation["errors"]
     assert {"type": "missing_required_artifacts", "task_ids": ["tests"]} in validation["errors"]
     assert {"type": "missing_test_writer_target_files", "task_ids": ["tests"]} in validation["errors"]
@@ -3378,6 +3379,13 @@ def test_task_graph_validation_requires_test_writer_for_acceptance_tests() -> No
     assert validation["valid"] is False
     assert validation["test_writer_task_count"] == 0
     assert validation["missing_test_writer_tasks"] is True
+    assert validation["missing_test_writer_task_requirements"] == [
+        {
+            "acceptance_tests": True,
+            "test_focused_small_parts": False,
+            "prd_test_required_artifacts": [],
+        }
+    ]
     assert {
         "type": "missing_test_writer_tasks",
         "required_by": {
@@ -3386,6 +3394,18 @@ def test_task_graph_validation_requires_test_writer_for_acceptance_tests() -> No
             "prd_test_required_artifacts": [],
         },
     } in validation["errors"]
+    record = JobRecord(
+        job_id="missing-test-writer-context",
+        spec=JobSpec(request_text="Build it", repo_path="."),
+    )
+    runtime_state = JobRunner._task_graph_validation_recovery_state(record, validation)
+    assert runtime_state["missing_test_writer_task_requirements"] == [
+        {
+            "acceptance_tests": True,
+            "test_focused_small_parts": False,
+            "prd_test_required_artifacts": [],
+        }
+    ]
 
 
 def test_task_graph_validation_allows_multiple_acceptance_tests_per_task() -> None:

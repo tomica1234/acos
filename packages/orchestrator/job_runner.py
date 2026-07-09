@@ -5166,6 +5166,17 @@ class JobRunner:
             and not test_writer_task_ids
             and not project_setup_scaffold_covers_test_artifacts
         )
+        missing_test_writer_task_requirements = (
+            [
+                {
+                    "acceptance_tests": bool(acceptance_tests),
+                    "test_focused_small_parts": bool(test_focused_small_parts),
+                    "prd_test_required_artifacts": prd_test_required_artifacts,
+                }
+            ]
+            if missing_test_writer_tasks
+            else []
+        )
         errors: list[dict[str, Any]] = []
         if not task_graph.tasks:
             errors.append({"type": "empty_task_graph"})
@@ -5349,11 +5360,7 @@ class JobRunner:
             errors.append(
                 {
                     "type": "missing_test_writer_tasks",
-                    "required_by": {
-                        "acceptance_tests": bool(acceptance_tests),
-                        "test_focused_small_parts": bool(test_focused_small_parts),
-                        "prd_test_required_artifacts": prd_test_required_artifacts,
-                    },
+                    "required_by": missing_test_writer_task_requirements[0],
                 }
             )
         implementation_tasks_missing_target_files = [
@@ -5487,6 +5494,9 @@ class JobRunner:
             "dependency_cycle_task_ids": cycle,
             "prd_test_required_artifacts": prd_test_required_artifacts,
             "missing_test_writer_tasks": missing_test_writer_tasks,
+            "missing_test_writer_task_requirements": (
+                missing_test_writer_task_requirements
+            ),
             "project_setup_scaffold_covers_test_artifacts": (
                 project_setup_scaffold_covers_test_artifacts
             ),
@@ -5498,6 +5508,9 @@ class JobRunner:
             ),
             "implementation_tasks_missing_target_files": (
                 implementation_tasks_missing_target_files
+            ),
+            "test_writer_tasks_missing_target_files": (
+                test_writer_tasks_missing_target_files
             ),
             "test_writer_missing_implementation_dependencies": (
                 test_writer_missing_implementation_dependencies
