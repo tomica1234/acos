@@ -7071,6 +7071,74 @@ def test_job_runner_blocks_prd_quality_when_acceptance_tests_are_not_observable(
     assert "architect" not in record.outputs
 
 
+def test_job_runner_blocks_prd_quality_when_incremental_milestones_do_not_cover_parts(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    registry = ModelRegistry.from_paths(
+        provider_path=config_dir() / "model_providers.yaml",
+        agents_path=config_dir() / "agents.yaml",
+        routing_path=config_dir() / "model_routing.yaml",
+    )
+    attach_mock_adapter(
+        registry,
+        {
+            "pm": PRD(
+                title="Feature",
+                problem_statement="Need feature",
+                smallest_working_core=["Expose a feature module"],
+                small_parts=["Create feature module", "Add focused tests"],
+                incremental_milestones=["Feature module exists"],
+                acceptance_tests=["Feature module exists", "Focused tests exist"],
+                definition_of_done=["All tests pass"],
+                required_artifacts=["feature.py", "tests/test_feature.py"],
+            ).model_dump(),
+            "architect": ArchitecturePlan(summary="Should not run").model_dump(),
+        },
+    )
+    policy = PolicyEngine.from_path(config_dir() / "policies.yaml")
+    environment = FakeMCPEnvironment(
+        workspace_root=workspace,
+        memory_db_path=workspace / ".memory.sqlite3",
+    )
+    runner = JobRunner(registry=registry, policy=policy, router=environment.build_router())
+    spec = JobSpec(
+        request_text="Create a feature with incremental milestones",
+        repo_path=str(workspace),
+        target_branch="acos/strict-prd-milestone-coverage",
+        metadata={
+            "constraints": {
+                "require_prd_quality": True,
+                "prd_quality_refinement_attempts": 0,
+            }
+        },
+    )
+
+    record = runner.run_job(spec)
+
+    assert_recovery_plan(
+        record,
+        status=JobStatus.ANALYZING,
+        strategy="REVISE_PRD_AND_ARCHITECTURE",
+    )
+    assert_recoverable_error(
+        record,
+        "prd_quality_gate_failed:incremental_milestones_cover_small_parts",
+    )
+    report = record.outputs["prd_quality"]
+    assert report["missing"] == ["incremental_milestones_cover_small_parts"]
+    assert report["incremental_milestone_count"] == 1
+    assert report["missing_incremental_milestone_count"] == 1
+    assert report["required_incremental_milestone_count"] == 2
+    constraints = record.runtime_state["recovery_plan"]["constraints"]
+    assert constraints["prd_quality_missing"] == [
+        "incremental_milestones_cover_small_parts"
+    ]
+    assert constraints["required_incremental_milestone_count"] == 2
+    assert "architect" not in record.outputs
+
+
 def test_job_runner_refines_sparse_prd_before_implementation_when_required(
     tmp_path: Path,
 ) -> None:
@@ -7238,6 +7306,10 @@ def test_job_runner_blocks_prd_quality_when_acceptance_tests_do_not_cover_small_
         "missing": ["acceptance_tests_cover_small_parts"],
         "warnings": [],
         "small_part_count": 2,
+        "incremental_milestone_count": 2,
+        "incremental_milestones_cover_small_parts": True,
+        "missing_incremental_milestone_count": 0,
+        "required_incremental_milestone_count": 2,
         "acceptance_test_count": 1,
         "acceptance_tests_cover_small_parts": False,
         "missing_acceptance_test_count": 1,
@@ -7380,6 +7452,28 @@ def test_prd_quality_rejects_acceptance_tests_that_restate_work_items() -> None:
             "acceptance_test": "Create backend feature module",
         }
     ]
+
+
+def test_prd_quality_requires_incremental_milestones_for_each_small_part() -> None:
+    prd = PRD(
+        title="Feature",
+        problem_statement="Need feature",
+        smallest_working_core=["Expose a feature module"],
+        small_parts=["Create feature module", "Add focused tests"],
+        incremental_milestones=["Feature module exists"],
+        acceptance_tests=["Feature module exists", "Focused tests exist"],
+        definition_of_done=["All tests pass"],
+        required_artifacts=["feature.py", "tests/test_feature.py"],
+    )
+
+    report = JobRunner._build_prd_quality_report(prd)
+
+    assert report["passed"] is False
+    assert report["missing"] == ["incremental_milestones_cover_small_parts"]
+    assert report["incremental_milestone_count"] == 1
+    assert report["incremental_milestones_cover_small_parts"] is False
+    assert report["missing_incremental_milestone_count"] == 1
+    assert report["required_incremental_milestone_count"] == 2
 
 
 def test_prd_quality_allows_docs_artifact_for_docs_only_work() -> None:
@@ -7646,6 +7740,59 @@ def test_prd_quality_deterministically_repairs_non_observable_acceptance_tests(
     assert repaired.acceptance_tests == record.outputs[
         "prd_quality_deterministic_repair"
     ]["added_acceptance_tests"]
+
+
+def test_prd_quality_deterministically_repairs_missing_incremental_milestones(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    registry = ModelRegistry.from_paths(
+        provider_path=config_dir() / "model_providers.yaml",
+        agents_path=config_dir() / "agents.yaml",
+        routing_path=config_dir() / "model_routing.yaml",
+    )
+    policy = PolicyEngine.from_path(config_dir() / "policies.yaml")
+    environment = FakeMCPEnvironment(
+        workspace_root=workspace,
+        memory_db_path=workspace / ".memory.sqlite3",
+    )
+    runner = JobRunner(registry=registry, policy=policy, router=environment.build_router())
+    record = runner.store.create(
+        JobSpec(
+            request_text="Build feature incrementally",
+            repo_path=str(workspace),
+            metadata={"constraints": {"require_prd_quality": True}},
+        )
+    )
+    prd = PRD(
+        title="Feature",
+        problem_statement="Need feature",
+        smallest_working_core=["Expose a feature module"],
+        small_parts=["Create feature module", "Add focused tests"],
+        incremental_milestones=["Feature module exists"],
+        acceptance_tests=["Feature module exists", "Focused tests exist"],
+        definition_of_done=["All tests pass"],
+        required_artifacts=["feature.py", "tests/test_feature.py"],
+    )
+
+    repaired = runner._refine_prd_quality_for_autonomy(record, prd)
+
+    assert repaired is not None
+    assert record.outputs["prd_quality"]["passed"] is True
+    assert [
+        attempt["action"] for attempt in record.outputs["prd_quality_attempts"]
+    ] == ["initial", "deterministic_repair"]
+    assert record.outputs["prd_quality_deterministic_repair"] == {
+        "applied": True,
+        "added_incremental_milestones": [
+            "Automated checks for Add focused tests exist and pass"
+        ],
+    }
+    assert repaired.incremental_milestones == [
+        "Feature module exists",
+        "Automated checks for Add focused tests exist and pass",
+    ]
 
 
 def test_semantic_tokens_split_camel_case_domain_terms() -> None:
@@ -8061,6 +8208,7 @@ def test_job_runner_clears_planning_repair_constraints_after_prd_passes(
                 ],
                 "invalid_required_artifacts": ["../outside.py"],
                 "prd_required_artifacts": ["tests/test_feature.py"],
+                "required_incremental_milestone_count": 2,
                 "required_small_part_count": 2,
                 "source_required_artifacts": ["feature.py"],
                 "implementation_required_artifacts": ["feature.py"],
@@ -8100,6 +8248,7 @@ def test_job_runner_clears_planning_repair_constraints_after_prd_passes(
         "non_observable_acceptance_tests",
         "invalid_required_artifacts",
         "prd_required_artifacts",
+        "required_incremental_milestone_count",
         "required_small_part_count",
         "source_required_artifacts",
         "implementation_required_artifacts",

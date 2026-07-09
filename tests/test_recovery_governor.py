@@ -171,6 +171,7 @@ def test_recovery_governor_preserves_prd_quality_artifact_context() -> None:
                 }
             ],
             "invalid_required_artifacts": ["../outside.py"],
+            "required_incremental_milestone_count": 2,
             "required_small_part_count": 2,
             "prd_required_artifacts": [
                 "README.md",
@@ -190,6 +191,7 @@ def test_recovery_governor_preserves_prd_quality_artifact_context() -> None:
         "frontend/src/App.tsx"
     ]
     assert constraints["required_small_part_count"] == 2
+    assert constraints["required_incremental_milestone_count"] == 2
     assert constraints["non_observable_acceptance_tests"] == [
         {
             "acceptance_test_index": 1,

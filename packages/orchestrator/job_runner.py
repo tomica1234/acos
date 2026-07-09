@@ -1216,6 +1216,7 @@ class JobRunner:
             "non_observable_acceptance_tests",
             "invalid_required_artifacts",
             "prd_required_artifacts",
+            "required_incremental_milestone_count",
             "required_small_part_count",
             "source_required_artifacts",
             "implementation_required_artifacts",
@@ -2147,7 +2148,7 @@ class JobRunner:
         )
         attempt_offset = 0
         deterministic_prd = (
-            self._deterministically_repair_prd_acceptance_tests(
+            self._deterministically_repair_prd_quality(
                 current_prd,
                 report,
             )
@@ -2166,8 +2167,20 @@ class JobRunner:
             ]
             record.outputs["prd_quality_deterministic_repair"] = {
                 "applied": True,
-                "added_acceptance_tests": added_acceptance_tests,
             }
+            if added_acceptance_tests:
+                record.outputs["prd_quality_deterministic_repair"][
+                    "added_acceptance_tests"
+                ] = added_acceptance_tests
+            added_milestones = [
+                item
+                for item in self._non_empty_items(current_prd.incremental_milestones)
+                if item not in self._non_empty_items(prd.incremental_milestones)
+            ]
+            if added_milestones:
+                record.outputs["prd_quality_deterministic_repair"][
+                    "added_incremental_milestones"
+                ] = added_milestones
             self._write_memory_item(record, "pm", "prd", current_prd.model_dump_json())
             record.outputs["pm"] = current_prd.model_dump()
             report = self._build_prd_quality_report(
@@ -2256,6 +2269,7 @@ class JobRunner:
             "non_observable_acceptance_tests",
             "invalid_required_artifacts",
             "prd_required_artifacts",
+            "required_incremental_milestone_count",
             "required_small_part_count",
             "source_required_artifacts",
             "implementation_required_artifacts",
@@ -2274,6 +2288,9 @@ class JobRunner:
         )
         prd_required_artifacts = JobRunner._non_empty_items(
             [str(item) for item in report.get("required_artifacts", [])]
+        )
+        required_incremental_milestone_count = report.get(
+            "required_incremental_milestone_count"
         )
         required_small_part_count = report.get("required_small_part_count")
         source_required_artifacts = JobRunner._non_empty_items(
@@ -2301,6 +2318,13 @@ class JobRunner:
             runtime_state["invalid_required_artifacts"] = invalid_required_artifacts
         if prd_required_artifacts:
             runtime_state["prd_required_artifacts"] = prd_required_artifacts
+        if (
+            isinstance(required_incremental_milestone_count, int)
+            and required_incremental_milestone_count > 0
+        ):
+            runtime_state["required_incremental_milestone_count"] = (
+                required_incremental_milestone_count
+            )
         if isinstance(required_small_part_count, int) and required_small_part_count > 0:
             runtime_state["required_small_part_count"] = required_small_part_count
         if source_required_artifacts:
@@ -2314,7 +2338,7 @@ class JobRunner:
         return runtime_state
 
     @classmethod
-    def _deterministically_repair_prd_acceptance_tests(
+    def _deterministically_repair_prd_quality(
         cls,
         prd: PRD,
         report: dict[str, Any],
@@ -2324,13 +2348,29 @@ class JobRunner:
             "acceptance_tests_cover_small_parts",
             "acceptance_tests_semantically_cover_small_parts",
             "acceptance_tests_observable",
+            "incremental_milestones",
+            "incremental_milestones_cover_small_parts",
         }
         missing = set(report.get("missing") or [])
         if not missing or not missing.issubset(repairable_missing):
             return None
         acceptance_tests = cls._non_empty_items(prd.acceptance_tests)
+        incremental_milestones = cls._non_empty_items(prd.incremental_milestones)
+        small_parts = cls._non_empty_items(prd.small_parts)
         changed = False
         added_tests: list[str] = []
+        added_milestones: list[str] = []
+        if {
+            "incremental_milestones",
+            "incremental_milestones_cover_small_parts",
+        } & missing and small_parts:
+            for index, part in enumerate(small_parts, start=1):
+                if index <= len(incremental_milestones):
+                    continue
+                milestone = cls._incremental_milestone_for_small_part(part)
+                incremental_milestones.append(milestone)
+                added_milestones.append(milestone)
+                changed = True
         coverage = report.get("acceptance_test_small_part_coverage")
         small_part_by_acceptance_index: dict[int, str] = {}
         if isinstance(coverage, list):
@@ -2378,7 +2418,22 @@ class JobRunner:
                 changed = True
         if not changed:
             return None
-        return prd.model_copy(update={"acceptance_tests": acceptance_tests})
+        updates: dict[str, Any] = {}
+        if added_tests:
+            updates["acceptance_tests"] = acceptance_tests
+        if added_milestones:
+            updates["incremental_milestones"] = incremental_milestones
+        return prd.model_copy(update=updates)
+
+    @staticmethod
+    def _incremental_milestone_for_small_part(small_part: str) -> str:
+        part = " ".join(small_part.split())
+        lower = part.lower()
+        if "test" in lower or "tests" in lower:
+            return f"Automated checks for {part} exist and pass"
+        if "readme" in lower or "doc" in lower:
+            return f"{part} documentation exists and is verified"
+        return f"{part} works and is ready for focused tests"
 
     @staticmethod
     def _acceptance_test_for_small_part(small_part: str) -> str:
@@ -2507,6 +2562,22 @@ class JobRunner:
         if required_artifacts:
             logs.append("Current required_artifacts: " + " | ".join(required_artifacts))
         missing = set(report.get("missing") or [])
+        if "incremental_milestones" in missing:
+            logs.append(
+                "Add incremental_milestones that show the build order from smallest working core "
+                "through each independently testable small_part."
+            )
+        if "incremental_milestones_cover_small_parts" in missing:
+            required_count = report.get("required_incremental_milestone_count")
+            required_text = (
+                str(required_count)
+                if isinstance(required_count, int) and required_count > 0
+                else "one per small_part"
+            )
+            logs.append(
+                "Add at least "
+                f"{required_text} incremental_milestones so the milestone sequence covers every small_part."
+            )
         if "small_parts_split_for_autonomy" in missing:
             required_count = report.get("required_small_part_count")
             required_text = (
@@ -2587,8 +2658,11 @@ class JobRunner:
             warnings.append("small_parts_has_single_item")
         if min_small_parts > 0 and small_parts and len(small_parts) < min_small_parts:
             missing.append("small_parts_split_for_autonomy")
-        if not JobRunner._non_empty_items(prd.incremental_milestones):
+        incremental_milestones = JobRunner._non_empty_items(prd.incremental_milestones)
+        if not incremental_milestones:
             missing.append("incremental_milestones")
+        elif small_parts and len(incremental_milestones) < len(small_parts):
+            missing.append("incremental_milestones_cover_small_parts")
         acceptance_tests = JobRunner._non_empty_items(prd.acceptance_tests)
         acceptance_test_small_part_coverage = JobRunner._semantic_item_coverage(
             small_parts,
@@ -2658,11 +2732,21 @@ class JobRunner:
             missing.append("open_questions_resolved")
             warnings.append("open_questions_present")
         missing_acceptance_test_count = max(0, len(small_parts) - len(acceptance_tests))
+        missing_incremental_milestone_count = max(
+            0,
+            len(small_parts) - len(incremental_milestones),
+        )
         report = {
             "passed": not missing,
             "missing": missing,
             "warnings": warnings,
             "small_part_count": len(small_parts),
+            "incremental_milestone_count": len(incremental_milestones),
+            "incremental_milestones_cover_small_parts": (
+                missing_incremental_milestone_count == 0
+            ),
+            "missing_incremental_milestone_count": missing_incremental_milestone_count,
+            "required_incremental_milestone_count": len(small_parts),
             "acceptance_test_count": len(acceptance_tests),
             "acceptance_tests_cover_small_parts": missing_acceptance_test_count == 0,
             "missing_acceptance_test_count": missing_acceptance_test_count,

@@ -651,6 +651,16 @@ class RecoveryGovernor:
             and required_small_part_count > 0
         ):
             constraints["required_small_part_count"] = required_small_part_count
+        required_incremental_milestone_count = runtime_state.get(
+            "required_incremental_milestone_count"
+        )
+        if (
+            isinstance(required_incremental_milestone_count, int)
+            and required_incremental_milestone_count > 0
+        ):
+            constraints["required_incremental_milestone_count"] = (
+                required_incremental_milestone_count
+            )
         return constraints
 
     @staticmethod
