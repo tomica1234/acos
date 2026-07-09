@@ -642,6 +642,9 @@ class RecoveryGovernor:
         uncovered = runtime_state.get("uncovered_acceptance_small_parts")
         if isinstance(uncovered, list) and uncovered:
             constraints["uncovered_acceptance_small_parts"] = uncovered
+        non_observable = runtime_state.get("non_observable_acceptance_tests")
+        if isinstance(non_observable, list) and non_observable:
+            constraints["non_observable_acceptance_tests"] = non_observable
         required_small_part_count = runtime_state.get("required_small_part_count")
         if (
             isinstance(required_small_part_count, int)

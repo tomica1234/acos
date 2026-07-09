@@ -6997,6 +6997,80 @@ def test_large_autonomous_prd_quality_requires_split_small_parts(
     assert "architect" not in record.outputs
 
 
+def test_job_runner_blocks_prd_quality_when_acceptance_tests_are_not_observable(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    registry = ModelRegistry.from_paths(
+        provider_path=config_dir() / "model_providers.yaml",
+        agents_path=config_dir() / "agents.yaml",
+        routing_path=config_dir() / "model_routing.yaml",
+    )
+    attach_mock_adapter(
+        registry,
+        {
+            "pm": PRD(
+                title="Feature",
+                problem_statement="Need feature",
+                smallest_working_core=["Expose a feature module"],
+                small_parts=["Create backend feature module"],
+                incremental_milestones=["Module exists"],
+                acceptance_tests=["Create backend feature module"],
+                definition_of_done=["All tests pass"],
+                required_artifacts=["backend/main.py", "tests/test_feature.py"],
+            ).model_dump(),
+            "architect": ArchitecturePlan(summary="Should not run").model_dump(),
+        },
+    )
+    policy = PolicyEngine.from_path(config_dir() / "policies.yaml")
+    environment = FakeMCPEnvironment(
+        workspace_root=workspace,
+        memory_db_path=workspace / ".memory.sqlite3",
+    )
+    runner = JobRunner(registry=registry, policy=policy, router=environment.build_router())
+    spec = JobSpec(
+        request_text="Create a feature with executable acceptance tests",
+        repo_path=str(workspace),
+        target_branch="acos/strict-prd-observable-acceptance",
+        metadata={
+            "constraints": {
+                "require_prd_quality": True,
+                "prd_quality_refinement_attempts": 0,
+            }
+        },
+    )
+
+    record = runner.run_job(spec)
+
+    assert_recovery_plan(
+        record,
+        status=JobStatus.ANALYZING,
+        strategy="REVISE_PRD_AND_ARCHITECTURE",
+    )
+    assert_recoverable_error(
+        record,
+        "prd_quality_gate_failed:acceptance_tests_observable",
+    )
+    report = record.outputs["prd_quality"]
+    assert report["missing"] == ["acceptance_tests_observable"]
+    assert report["non_observable_acceptance_tests"] == [
+        {
+            "acceptance_test_index": 1,
+            "acceptance_test": "Create backend feature module",
+        }
+    ]
+    constraints = record.runtime_state["recovery_plan"]["constraints"]
+    assert constraints["prd_quality_missing"] == ["acceptance_tests_observable"]
+    assert constraints["non_observable_acceptance_tests"] == [
+        {
+            "acceptance_test_index": 1,
+            "acceptance_test": "Create backend feature module",
+        }
+    ]
+    assert "architect" not in record.outputs
+
+
 def test_job_runner_refines_sparse_prd_before_implementation_when_required(
     tmp_path: Path,
 ) -> None:
@@ -7168,6 +7242,7 @@ def test_job_runner_blocks_prd_quality_when_acceptance_tests_do_not_cover_small_
         "acceptance_tests_cover_small_parts": False,
         "missing_acceptance_test_count": 1,
         "acceptance_tests_semantically_cover_small_parts": False,
+        "acceptance_tests_observable": True,
         "acceptance_test_small_part_coverage": [
             {
                 "small_part_index": 1,
@@ -7193,6 +7268,7 @@ def test_job_runner_blocks_prd_quality_when_acceptance_tests_do_not_cover_small_
                 "covered": False,
             }
         ],
+        "non_observable_acceptance_tests": [],
         "definition_of_done_count": 1,
         "required_artifact_count": 2,
         "required_artifacts": ["feature.py", "tests/test_feature.py"],
@@ -7266,7 +7342,7 @@ def test_prd_quality_requires_implementation_source_for_app_work() -> None:
         smallest_working_core=["Expose a feature module"],
         small_parts=["Create backend feature module"],
         incremental_milestones=["Module exists"],
-        acceptance_tests=["Create backend feature module"],
+        acceptance_tests=["Backend feature module exists"],
         definition_of_done=["All tests pass"],
         required_artifacts=["README.md", "package.json", "tests/test_feature.py"],
     )
@@ -7278,6 +7354,32 @@ def test_prd_quality_requires_implementation_source_for_app_work() -> None:
     assert report["source_required_artifacts"] == ["README.md", "package.json"]
     assert report["implementation_required_artifacts"] == []
     assert report["test_required_artifacts"] == ["tests/test_feature.py"]
+
+
+def test_prd_quality_rejects_acceptance_tests_that_restate_work_items() -> None:
+    prd = PRD(
+        title="Feature",
+        problem_statement="Need feature",
+        smallest_working_core=["Expose a feature module"],
+        small_parts=["Create backend feature module"],
+        incremental_milestones=["Module exists"],
+        acceptance_tests=["Create backend feature module"],
+        definition_of_done=["All tests pass"],
+        required_artifacts=["backend/main.py", "tests/test_feature.py"],
+    )
+
+    report = JobRunner._build_prd_quality_report(prd)
+
+    assert report["passed"] is False
+    assert report["missing"] == ["acceptance_tests_observable"]
+    assert report["acceptance_tests_semantically_cover_small_parts"] is True
+    assert report["acceptance_tests_observable"] is False
+    assert report["non_observable_acceptance_tests"] == [
+        {
+            "acceptance_test_index": 1,
+            "acceptance_test": "Create backend feature module",
+        }
+    ]
 
 
 def test_prd_quality_allows_docs_artifact_for_docs_only_work() -> None:
@@ -7487,6 +7589,61 @@ def test_prd_quality_deterministically_repairs_uncovered_acceptance_tests(
         ],
     }
     assert repaired.acceptance_tests[-2:] == record.outputs[
+        "prd_quality_deterministic_repair"
+    ]["added_acceptance_tests"]
+
+
+def test_prd_quality_deterministically_repairs_non_observable_acceptance_tests(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    registry = ModelRegistry.from_paths(
+        provider_path=config_dir() / "model_providers.yaml",
+        agents_path=config_dir() / "agents.yaml",
+        routing_path=config_dir() / "model_routing.yaml",
+    )
+    policy = PolicyEngine.from_path(config_dir() / "policies.yaml")
+    environment = FakeMCPEnvironment(
+        workspace_root=workspace,
+        memory_db_path=workspace / ".memory.sqlite3",
+    )
+    runner = JobRunner(registry=registry, policy=policy, router=environment.build_router())
+    record = runner.store.create(
+        JobSpec(
+            request_text="Build backend feature",
+            repo_path=str(workspace),
+            metadata={"constraints": {"require_prd_quality": True}},
+        )
+    )
+    prd = PRD(
+        title="Feature",
+        problem_statement="Need feature",
+        smallest_working_core=["Expose a feature module"],
+        small_parts=["Create backend feature module"],
+        incremental_milestones=["Module exists"],
+        acceptance_tests=["Create backend feature module"],
+        definition_of_done=["All tests pass"],
+        required_artifacts=["backend/main.py", "tests/test_feature.py"],
+    )
+
+    repaired = runner._refine_prd_quality_for_autonomy(record, prd)
+
+    assert repaired is not None
+    assert record.outputs["prd_quality"]["passed"] is True
+    assert [
+        attempt["action"] for attempt in record.outputs["prd_quality_attempts"]
+    ] == ["initial", "deterministic_repair"]
+    assert record.outputs["prd_quality_deterministic_repair"] == {
+        "applied": True,
+        "added_acceptance_tests": [
+            (
+                "Create backend feature module works and can be verified by an "
+                "observable app or API check."
+            )
+        ],
+    }
+    assert repaired.acceptance_tests == record.outputs[
         "prd_quality_deterministic_repair"
     ]["added_acceptance_tests"]
 
@@ -7896,6 +8053,12 @@ def test_job_runner_clears_planning_repair_constraints_after_prd_passes(
                 "uncovered_acceptance_small_parts": [
                     {"small_part_index": 1, "small_part": "Create module"}
                 ],
+                "non_observable_acceptance_tests": [
+                    {
+                        "acceptance_test_index": 1,
+                        "acceptance_test": "Create module",
+                    }
+                ],
                 "invalid_required_artifacts": ["../outside.py"],
                 "prd_required_artifacts": ["tests/test_feature.py"],
                 "required_small_part_count": 2,
@@ -7934,6 +8097,7 @@ def test_job_runner_clears_planning_repair_constraints_after_prd_passes(
         "prd_quality_warnings",
         "prd_open_questions",
         "uncovered_acceptance_small_parts",
+        "non_observable_acceptance_tests",
         "invalid_required_artifacts",
         "prd_required_artifacts",
         "required_small_part_count",

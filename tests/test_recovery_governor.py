@@ -164,6 +164,12 @@ def test_recovery_governor_preserves_prd_quality_artifact_context() -> None:
             "prd_quality_missing": ["required_implementation_artifacts"],
             "prd_quality_warnings": ["open_questions_present"],
             "prd_open_questions": ["Which UI?"],
+            "non_observable_acceptance_tests": [
+                {
+                    "acceptance_test_index": 1,
+                    "acceptance_test": "Create frontend UI",
+                }
+            ],
             "invalid_required_artifacts": ["../outside.py"],
             "required_small_part_count": 2,
             "prd_required_artifacts": [
@@ -184,6 +190,12 @@ def test_recovery_governor_preserves_prd_quality_artifact_context() -> None:
         "frontend/src/App.tsx"
     ]
     assert constraints["required_small_part_count"] == 2
+    assert constraints["non_observable_acceptance_tests"] == [
+        {
+            "acceptance_test_index": 1,
+            "acceptance_test": "Create frontend UI",
+        }
+    ]
     assert constraints["source_required_artifacts"] == [
         "README.md",
         "frontend/src/App.tsx",

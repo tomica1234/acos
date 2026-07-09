@@ -1213,6 +1213,7 @@ class JobRunner:
             "prd_quality_warnings",
             "prd_open_questions",
             "uncovered_acceptance_small_parts",
+            "non_observable_acceptance_tests",
             "invalid_required_artifacts",
             "prd_required_artifacts",
             "required_small_part_count",
@@ -2252,6 +2253,7 @@ class JobRunner:
             "prd_quality_warnings",
             "prd_open_questions",
             "uncovered_acceptance_small_parts",
+            "non_observable_acceptance_tests",
             "invalid_required_artifacts",
             "prd_required_artifacts",
             "required_small_part_count",
@@ -2284,6 +2286,7 @@ class JobRunner:
             [str(item) for item in report.get("test_required_artifacts", [])]
         )
         uncovered = report.get("uncovered_acceptance_small_parts")
+        non_observable = report.get("non_observable_acceptance_tests")
         if missing:
             runtime_state["prd_quality_missing"] = missing
         if warnings:
@@ -2292,6 +2295,8 @@ class JobRunner:
             runtime_state["prd_open_questions"] = open_questions
         if isinstance(uncovered, list) and uncovered:
             runtime_state["uncovered_acceptance_small_parts"] = uncovered
+        if isinstance(non_observable, list) and non_observable:
+            runtime_state["non_observable_acceptance_tests"] = non_observable
         if invalid_required_artifacts:
             runtime_state["invalid_required_artifacts"] = invalid_required_artifacts
         if prd_required_artifacts:
@@ -2318,15 +2323,48 @@ class JobRunner:
             "acceptance_tests",
             "acceptance_tests_cover_small_parts",
             "acceptance_tests_semantically_cover_small_parts",
+            "acceptance_tests_observable",
         }
         missing = set(report.get("missing") or [])
         if not missing or not missing.issubset(repairable_missing):
             return None
-        uncovered = report.get("uncovered_acceptance_small_parts")
-        if not isinstance(uncovered, list) or not uncovered:
-            return None
         acceptance_tests = cls._non_empty_items(prd.acceptance_tests)
+        changed = False
         added_tests: list[str] = []
+        coverage = report.get("acceptance_test_small_part_coverage")
+        small_part_by_acceptance_index: dict[int, str] = {}
+        if isinstance(coverage, list):
+            for item in coverage:
+                if not isinstance(item, dict):
+                    continue
+                acceptance_index = item.get("acceptance_test_index")
+                small_part = item.get("small_part")
+                if isinstance(acceptance_index, int) and isinstance(small_part, str):
+                    small_part_by_acceptance_index[acceptance_index] = small_part
+        non_observable = report.get("non_observable_acceptance_tests")
+        if isinstance(non_observable, list):
+            for item in non_observable:
+                if not isinstance(item, dict):
+                    continue
+                acceptance_index = item.get("acceptance_test_index")
+                if (
+                    not isinstance(acceptance_index, int)
+                    or acceptance_index < 1
+                    or acceptance_index > len(acceptance_tests)
+                ):
+                    continue
+                source_text = small_part_by_acceptance_index.get(
+                    acceptance_index,
+                    acceptance_tests[acceptance_index - 1],
+                )
+                replacement = cls._acceptance_test_for_small_part(source_text)
+                if acceptance_tests[acceptance_index - 1] != replacement:
+                    acceptance_tests[acceptance_index - 1] = replacement
+                    changed = True
+                    added_tests.append(replacement)
+        uncovered = report.get("uncovered_acceptance_small_parts")
+        if not isinstance(uncovered, list):
+            uncovered = []
         for item in uncovered:
             if not isinstance(item, dict):
                 continue
@@ -2337,7 +2375,8 @@ class JobRunner:
             if acceptance_test not in acceptance_tests:
                 acceptance_tests.append(acceptance_test)
                 added_tests.append(acceptance_test)
-        if not added_tests:
+                changed = True
+        if not changed:
             return None
         return prd.model_copy(update={"acceptance_tests": acceptance_tests})
 
@@ -2352,6 +2391,65 @@ class JobRunner:
         if "test" in lower or "tests" in lower:
             return f"Automated checks for {part} exist and pass."
         return f"{part} works and can be verified by an observable app or API check."
+
+    @staticmethod
+    def _looks_like_observable_acceptance_test(text: str) -> bool:
+        stripped = " ".join(text.split())
+        lowered = stripped.lower()
+        if re.search(r"\b(get|post|put|patch|delete)\s+/", lowered):
+            return True
+        tokens = set(re.findall(r"[a-z0-9_]+", lowered))
+        observable_tokens = {
+            "accepts",
+            "assert",
+            "asserts",
+            "available",
+            "can",
+            "contains",
+            "created",
+            "delete",
+            "deletes",
+            "display",
+            "displayed",
+            "displays",
+            "equal",
+            "equals",
+            "exist",
+            "exists",
+            "fail",
+            "fails",
+            "initializes",
+            "initialized",
+            "listed",
+            "lists",
+            "pass",
+            "passes",
+            "persist",
+            "persists",
+            "read",
+            "rejects",
+            "render",
+            "rendered",
+            "renders",
+            "return",
+            "returns",
+            "saved",
+            "shows",
+            "stores",
+            "successfully",
+            "supports",
+            "tracks",
+            "update",
+            "updates",
+            "validates",
+            "verified",
+            "verify",
+            "visible",
+            "works",
+        }
+        if tokens & observable_tokens:
+            return True
+        return False
 
     @staticmethod
     def _prd_quality_repair_logs(prd: PRD, report: dict[str, Any]) -> list[str]:
@@ -2378,6 +2476,27 @@ class JobRunner:
                 logs.append(
                     "Repair acceptance_tests by adding or rewriting one observable check "
                     "for each uncovered small_part, reusing distinctive nouns and verbs from that small_part."
+                )
+        non_observable = report.get("non_observable_acceptance_tests")
+        if isinstance(non_observable, list) and non_observable:
+            summaries = []
+            for item in non_observable:
+                if not isinstance(item, dict):
+                    continue
+                index = item.get("acceptance_test_index")
+                acceptance_test = item.get("acceptance_test")
+                if isinstance(acceptance_test, str) and acceptance_test.strip():
+                    summaries.append(
+                        f"{index}: {acceptance_test}" if index else acceptance_test
+                    )
+            if summaries:
+                logs.append(
+                    "Non-observable acceptance_tests that restate work instead of proving behavior: "
+                    + " | ".join(summaries)
+                )
+                logs.append(
+                    "Rewrite each acceptance_test as an observable result, for example exists, "
+                    "returns, renders, contains, validates, persists, or passes."
                 )
         if prd.acceptance_tests:
             logs.append(
@@ -2482,12 +2601,22 @@ class JobRunner:
         uncovered_acceptance_small_parts = [
             item for item in acceptance_test_small_part_coverage if not item["covered"]
         ]
+        non_observable_acceptance_tests = [
+            {
+                "acceptance_test_index": index,
+                "acceptance_test": acceptance_test,
+            }
+            for index, acceptance_test in enumerate(acceptance_tests, start=1)
+            if not JobRunner._looks_like_observable_acceptance_test(acceptance_test)
+        ]
         if not acceptance_tests:
             missing.append("acceptance_tests")
         elif small_parts and len(acceptance_tests) < len(small_parts):
             missing.append("acceptance_tests_cover_small_parts")
         elif small_parts and uncovered_acceptance_small_parts:
             missing.append("acceptance_tests_semantically_cover_small_parts")
+        if acceptance_tests and non_observable_acceptance_tests:
+            missing.append("acceptance_tests_observable")
         if not JobRunner._non_empty_items(prd.definition_of_done):
             missing.append("definition_of_done")
         required_artifacts = valid_artifact_paths(prd.required_artifacts)
@@ -2540,8 +2669,10 @@ class JobRunner:
             "acceptance_tests_semantically_cover_small_parts": (
                 not uncovered_acceptance_small_parts
             ),
+            "acceptance_tests_observable": not non_observable_acceptance_tests,
             "acceptance_test_small_part_coverage": acceptance_test_small_part_coverage,
             "uncovered_acceptance_small_parts": uncovered_acceptance_small_parts,
+            "non_observable_acceptance_tests": non_observable_acceptance_tests,
             "definition_of_done_count": len(JobRunner._non_empty_items(prd.definition_of_done)),
             "required_artifact_count": len(required_artifacts),
             "required_artifacts": sorted(required_artifacts),
