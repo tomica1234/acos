@@ -205,6 +205,63 @@ def test_completion_verifier_requires_requested_runtime_and_acceptance_evidence(
     assert "acceptance_checks_success" in result.missing_evidence
 
 
+def test_completion_verifier_rejects_zero_executed_unit_tests(
+    tmp_path: Path,
+) -> None:
+    record = _record(tmp_path, status=JobStatus.FINALIZING, error="")
+    record.outputs["task_graph"] = {
+        "goal": "Build it",
+        "tasks": [
+            {
+                "id": "core",
+                "title": "Core",
+                "description": "Core",
+                "role": "implementer",
+            }
+        ],
+    }
+    record.completed_task_ids.append("core")
+    record.outputs["test_run"] = {
+        "success": True,
+        "executed_test_count": 0,
+        "output_excerpt": "no tests ran in 0.01s",
+    }
+    record.audit_events.append({"event": "verified"})
+    record.checkpoints.append({"kind": "stage"})
+
+    result = DefinitionOfDoneVerifier().verify(record)
+
+    assert not result.passed
+    assert "unit_tests_executed" in result.missing_evidence
+
+
+def test_completion_verifier_requires_test_count_when_test_evidence_required(
+    tmp_path: Path,
+) -> None:
+    record = _record(tmp_path, status=JobStatus.FINALIZING, error="")
+    record.spec.metadata["constraints"] = {"require_test_evidence": True}
+    record.outputs["task_graph"] = {
+        "goal": "Build it",
+        "tasks": [
+            {
+                "id": "core",
+                "title": "Core",
+                "description": "Core",
+                "role": "implementer",
+            }
+        ],
+    }
+    record.completed_task_ids.append("core")
+    record.outputs["test_run"] = {"success": True}
+    record.audit_events.append({"event": "verified"})
+    record.checkpoints.append({"kind": "stage"})
+
+    result = DefinitionOfDoneVerifier().verify(record)
+
+    assert not result.passed
+    assert "unit_tests_executed" in result.missing_evidence
+
+
 def test_completion_verifier_requires_metadata_required_artifacts(
     tmp_path: Path,
 ) -> None:

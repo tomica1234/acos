@@ -51,6 +51,8 @@ class DefinitionOfDoneVerifier:
         test_run = outputs.get("test_run")
         if not isinstance(test_run, dict) or test_run.get("success") is not True:
             missing.append("unit_tests_success")
+        elif not self._unit_tests_executed(record, test_run):
+            missing.append("unit_tests_executed")
         if (
             self._runtime_required(record)
             or "runtime_smoke" in outputs
@@ -97,6 +99,20 @@ class DefinitionOfDoneVerifier:
     @classmethod
     def _acceptance_checks_required(cls, record: JobRecord) -> bool:
         return cls._metadata_has_non_empty(record, "acceptance_checks")
+
+    @classmethod
+    def _test_evidence_required(cls, record: JobRecord) -> bool:
+        return cls._metadata_has_non_empty(record, "require_test_evidence")
+
+    @classmethod
+    def _unit_tests_executed(cls, record: JobRecord, test_run: dict[str, Any]) -> bool:
+        executed = test_run.get("executed_test_count")
+        if isinstance(executed, int):
+            return executed >= 1
+        output = str(test_run.get("output_excerpt") or "").lower()
+        if "no tests ran" in output:
+            return False
+        return not cls._test_evidence_required(record)
 
     @staticmethod
     def _metadata_has_non_empty(record: JobRecord, key: str) -> bool:
