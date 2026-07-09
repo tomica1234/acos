@@ -4760,6 +4760,7 @@ class JobRunner:
             task_tokens = JobRunner._semantic_tokens(JobRunner._task_semantic_text(task))
             if not task_tokens:
                 continue
+            required_score = JobRunner._semantic_overlap_required(task_tokens)
             anchor_tokens = JobRunner._semantic_anchor_tokens(task_tokens)
             matching_dependencies: list[str] = []
             for dependency in implementation_dependencies:
@@ -4771,7 +4772,7 @@ class JobRunner:
                     dependency_tokens,
                 )
                 if (
-                    score >= 1
+                    score >= required_score
                     and JobRunner._semantic_anchor_satisfied(
                         anchor_tokens,
                         dependency_tokens,
