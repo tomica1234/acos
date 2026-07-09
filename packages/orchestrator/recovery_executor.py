@@ -36,6 +36,9 @@ class RecoveryExecutor:
     STALE_RECOVERY_CONSTRAINT_KEYS = {
         "deterministic_creation_attempted",
         "deterministically_created_files",
+        "completion_integrity_failure_reasons",
+        "failed_stage_ids",
+        "failed_stages",
         "failed_task_id",
         "failed_patch_operation",
         "failed_patch_path",
@@ -43,6 +46,7 @@ class RecoveryExecutor:
         "force_project_setup_scaffold",
         "invalid_artifacts",
         "missing_artifacts",
+        "missing_stage_test_patch_stage_ids",
         "missing_task_ids",
         "missing_target_file",
         "non_file_artifacts",
@@ -50,6 +54,7 @@ class RecoveryExecutor:
         "recovery_mode",
         "recreate_target_files_attempt",
         "return_to_role",
+        "stages_missing_test_patches",
         "unmet_dependencies",
     }
 

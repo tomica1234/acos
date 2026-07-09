@@ -618,12 +618,19 @@ class RecoveryGovernor:
             elif isinstance(value, (int, float, bool)):
                 constraints[key] = value
         for key in (
+            "completion_integrity_failure_reasons",
+            "failed_stage_ids",
             "missing_artifacts",
             "invalid_artifacts",
+            "missing_stage_test_patch_stage_ids",
             "non_file_artifacts",
             "missing_task_ids",
         ):
             value = cls._clean_string_list(runtime_state.get(key))
+            if value:
+                constraints[key] = value
+        for key in ("failed_stages", "stages_missing_test_patches"):
+            value = cls._non_empty_list(runtime_state.get(key))
             if value:
                 constraints[key] = value
         return constraints

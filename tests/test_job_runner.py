@@ -5023,6 +5023,62 @@ def test_completion_integrity_recovery_state_preserves_missing_task_ids(
     ]
 
 
+def test_completion_integrity_recovery_state_preserves_stage_context(
+    tmp_path: Path,
+) -> None:
+    store = InMemoryJobStore()
+    spec = JobSpec(
+        request_text="Create feature with tests",
+        repo_path=str(tmp_path),
+        target_branch="acos/completion-integrity-stage-context",
+    )
+    record = store.create(spec)
+    record.outputs["completion_integrity"] = {
+        "failed_stages": [
+            {
+                "stage": 2,
+                "task_id": "core",
+                "failure_reason": "tests_failed",
+            }
+        ],
+        "stages_missing_test_patches": [
+            {
+                "stage": 1,
+                "task_id": "core",
+                "implementation_patch_count": 1,
+                "test_patch_count": 0,
+            }
+        ],
+    }
+
+    runtime_state = JobRunner._completion_integrity_recovery_state(
+        record,
+        ["missing_stage_test_patches:1", "failed_stages:2"],
+    )
+
+    assert runtime_state["completion_integrity_failure_reasons"] == [
+        "missing_stage_test_patches:1",
+        "failed_stages:2",
+    ]
+    assert runtime_state["missing_stage_test_patch_stage_ids"] == ["1"]
+    assert runtime_state["failed_stage_ids"] == ["2"]
+    assert runtime_state["stages_missing_test_patches"] == [
+        {
+            "stage": 1,
+            "task_id": "core",
+            "implementation_patch_count": 1,
+            "test_patch_count": 0,
+        }
+    ]
+    assert runtime_state["failed_stages"] == [
+        {
+            "stage": 2,
+            "task_id": "core",
+            "failure_reason": "tests_failed",
+        }
+    ]
+
+
 def test_job_runner_blocks_completion_without_test_evidence(
     tmp_path: Path,
 ) -> None:

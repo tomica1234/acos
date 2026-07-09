@@ -374,6 +374,70 @@ def test_recovery_governor_preserves_completion_missing_task_context() -> None:
     assert constraints["missing_task_ids"] == ["core-tests", "prd-tests"]
 
 
+def test_recovery_governor_preserves_completion_stage_context() -> None:
+    record = _record(
+        "completion_integrity_failed:missing_stage_test_patches:1,failed_stages:2"
+    )
+
+    RecoveryGovernor().recover(
+        record,
+        error=(
+            "completion_integrity_failed:"
+            "missing_stage_test_patches:1,failed_stages:2"
+        ),
+        runtime_state={
+            "completion_integrity_failure_reasons": [
+                "missing_stage_test_patches:1",
+                "failed_stages:2",
+            ],
+            "missing_stage_test_patch_stage_ids": ["1"],
+            "failed_stage_ids": ["2"],
+            "stages_missing_test_patches": [
+                {
+                    "stage": 1,
+                    "task_id": "core",
+                    "implementation_patch_count": 1,
+                    "test_patch_count": 0,
+                }
+            ],
+            "failed_stages": [
+                {
+                    "stage": 2,
+                    "task_id": "core",
+                    "failure_reason": "tests_failed",
+                }
+            ],
+        },
+    )
+
+    plan = record.runtime_state["recovery_plan"]
+    constraints = plan["constraints"]
+    assert plan["strategy"] == "REPLAN_TASK_WITH_REQUIRED_ARTIFACTS"
+    assert record.status == JobStatus.REPLANNING
+    assert constraints["recovery_mode"] == "required_artifacts_replan"
+    assert constraints["completion_integrity_failure_reasons"] == [
+        "missing_stage_test_patches:1",
+        "failed_stages:2",
+    ]
+    assert constraints["missing_stage_test_patch_stage_ids"] == ["1"]
+    assert constraints["failed_stage_ids"] == ["2"]
+    assert constraints["stages_missing_test_patches"] == [
+        {
+            "stage": 1,
+            "task_id": "core",
+            "implementation_patch_count": 1,
+            "test_patch_count": 0,
+        }
+    ]
+    assert constraints["failed_stages"] == [
+        {
+            "stage": 2,
+            "task_id": "core",
+            "failure_reason": "tests_failed",
+        }
+    ]
+
+
 def test_recovery_governor_preserves_unmet_dependency_context() -> None:
     record = _record("unmet_task_dependencies:core")
 

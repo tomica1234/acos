@@ -1294,8 +1294,12 @@ class JobRunner:
             return
         for key in (
             *JobRunner.RECOVERY_METADATA_CONSTRAINT_KEYS,
+            "failed_stage_ids",
+            "failed_stages",
             "failed_task_id",
+            "missing_stage_test_patch_stage_ids",
             "missing_task_ids",
+            "stages_missing_test_patches",
             "unmet_dependencies",
             "patch_operation_hint",
             "missing_target_file",
@@ -1343,7 +1347,11 @@ class JobRunner:
             "uncovered_test_artifact_domain_small_parts",
             "non_observable_acceptance_tests",
             "invalid_required_artifacts",
+            "failed_stage_ids",
+            "failed_stages",
+            "missing_stage_test_patch_stage_ids",
             "missing_task_ids",
+            "stages_missing_test_patches",
             "prd_required_artifacts",
             "required_incremental_milestone_count",
             "required_small_part_count",
@@ -7733,14 +7741,21 @@ class JobRunner:
     ) -> dict[str, Any]:
         runtime_state = dict(record.runtime_state)
         parsed: dict[str, list[str]] = {
+            "failed_stage_ids": [],
             "missing_task_ids": [],
+            "missing_stage_test_patch_stage_ids": [],
             "required_artifacts": [],
             "target_files": [],
             "missing_artifacts": [],
             "non_file_artifacts": [],
             "invalid_artifacts": [],
         }
-        for key in (*parsed.keys(), "completion_integrity_failure_reasons"):
+        for key in (
+            *parsed.keys(),
+            "completion_integrity_failure_reasons",
+            "failed_stages",
+            "stages_missing_test_patches",
+        ):
             runtime_state.pop(key, None)
         prefix_map = {
             "required_artifact_missing": ("required_artifacts", "missing_artifacts"),
@@ -7760,6 +7775,16 @@ class JobRunner:
                     item.strip() for item in artifact.split("|") if item.strip()
                 )
                 continue
+            if prefix == "missing_stage_test_patches":
+                parsed["missing_stage_test_patch_stage_ids"].extend(
+                    item.strip() for item in artifact.split("|") if item.strip()
+                )
+                continue
+            if prefix == "failed_stages":
+                parsed["failed_stage_ids"].extend(
+                    item.strip() for item in artifact.split("|") if item.strip()
+                )
+                continue
             if not artifact or prefix not in prefix_map:
                 continue
             owner_key, evidence_key = prefix_map[prefix]
@@ -7770,6 +7795,12 @@ class JobRunner:
             deduped = list(dict.fromkeys(value for value in values if value.strip()))
             if deduped:
                 runtime_state[key] = deduped
+        completion_report = record.outputs.get("completion_integrity")
+        if isinstance(completion_report, dict):
+            for key in ("failed_stages", "stages_missing_test_patches"):
+                value = completion_report.get(key)
+                if isinstance(value, list) and value:
+                    runtime_state[key] = value
         if failure_reasons:
             runtime_state["completion_integrity_failure_reasons"] = [
                 str(reason) for reason in failure_reasons
