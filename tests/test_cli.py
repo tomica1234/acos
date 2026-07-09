@@ -4456,6 +4456,88 @@ def test_supervise_job_pm_recovery_changes_strategy_after_stall(
     assert constraints["pm_focus_task_id"] == "core"
 
 
+def test_supervise_job_blocks_repeated_pm_recovery_in_autonomous_until_done(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    from packages.orchestrator.job_store import FileJobStore
+
+    jobs_dir = tmp_path / "jobs"
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    spec = JobSpec(
+        job_id="supervise-repeated-pm-recovery-job",
+        request_text="Build something useful.",
+        repo_path=str(workspace),
+    )
+    store = FileJobStore(jobs_dir)
+    record = store.create(spec)
+    record.status = JobStatus.TESTING
+    _mark_strict_planning_ready(record, _strict_ready_task_graph())
+    store.update(record)
+    captured: dict[str, object] = {"resume_count": 0}
+
+    class DummyRunner:
+        def resume_job(self, job_id: str) -> JobRecord:
+            captured["resume_count"] += 1
+            resumed = captured["store"].get(job_id)
+            resumed.status = JobStatus.TESTING
+            resumed.last_error = None
+            captured["store"].update(resumed)
+            return resumed
+
+    def fake_build_default_runner(config_dir: str | Path, workspace_root: str | Path, store=None):
+        captured["store"] = store
+        return DummyRunner(), None
+
+    monkeypatch.setattr("apps.cli.build_default_runner", fake_build_default_runner)
+
+    exit_code = main(
+        [
+            "supervise-job",
+            "--config-dir",
+            str(config_dir()),
+            "--jobs-dir",
+            str(jobs_dir),
+            "--job-id",
+            "supervise-repeated-pm-recovery-job",
+            "--max-cycles",
+            "2",
+            "--steps-per-cycle",
+            "1",
+            "--max-stalled-cycles",
+            "1",
+            "--autonomous-until-done",
+        ]
+    )
+
+    assert exit_code == 1
+    assert captured["resume_count"] == 4
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["terminal_reason"] == "stalled"
+    assert payload["autonomous_until_done"] is True
+    assert payload["pm_stall_recovery"] is True
+    assert payload["pm_stall_recoveries"] == 1
+    assert len(payload["cycle_summaries"]) == 4
+    assert [cycle["terminal_reason"] for cycle in payload["cycle_summaries"]] == [
+        "max_steps_reached",
+        "pm_strategy_change",
+        "max_steps_reached",
+        "stalled",
+    ]
+    first_recovery = payload["cycle_summaries"][1]["pm_decision"]
+    repeated_decision = payload["cycle_summaries"][3]["pm_decision"]
+    assert first_recovery["applied"] is True
+    assert repeated_decision["applied"] is False
+    assert repeated_decision["repeat_blocked"] is True
+    assert repeated_decision["repeat_block_reason"] == (
+        "pm_stall_strategy_already_applied"
+    )
+    assert repeated_decision["can_apply_automatically"] is False
+    assert payload["pm_interventions"] == [first_recovery]
+
+
 def test_supervise_job_auto_resumes_diagnosed_failure_with_pm_strategy(
     tmp_path: Path,
     monkeypatch,

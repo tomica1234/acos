@@ -1461,6 +1461,16 @@ def supervise_persisted_job(
                 stall_analysis=stall_analysis,
                 can_apply_automatically=can_apply_pm_recovery,
             )
+            if (
+                can_apply_pm_recovery
+                and _pm_stall_decision_already_applied(record, pm_decision)
+            ):
+                can_apply_pm_recovery = False
+                pm_decision["can_apply_automatically"] = False
+                pm_decision["repeat_blocked"] = True
+                pm_decision["repeat_block_reason"] = (
+                    "pm_stall_strategy_already_applied"
+                )
             cycle_payload["terminal_reason"] = "stalled"
             cycle_payload["can_continue"] = False
             cycle_payload["next_continue_cli_args"] = []
@@ -1514,7 +1524,7 @@ def supervise_persisted_job(
             stalled_cycle_count = 0
             previous_progress_marker = None
             continue
-        if stalled_cycle_count >= max_stalled_cycles and not autonomous_until_done:
+        if stalled_cycle_count >= max_stalled_cycles:
             stopped_for_stall = True
             break
         if max_runtime_seconds is not None and elapsed_seconds >= max_runtime_seconds:
@@ -2165,7 +2175,72 @@ def _pm_stall_decision(
         "focus_task_id": focus_task_id,
         "repeated_cycle_count": stall_analysis.get("repeated_cycle_count", 0),
         "constraints": constraints,
+        "stall_fingerprint": _pm_stall_decision_fingerprint(
+            strategy=strategy,
+            resume_action=resume_action,
+            focus_task_id=focus_task_id,
+            marker=marker,
+            constraints=constraints,
+        ),
     }
+
+
+def _pm_stall_decision_already_applied(
+    record: JobRecord,
+    decision: dict[str, Any],
+) -> bool:
+    fingerprint = decision.get("stall_fingerprint")
+    if not isinstance(fingerprint, dict):
+        return False
+    interventions = record.outputs.get("pm_interventions", [])
+    if not isinstance(interventions, list):
+        return False
+    return any(
+        isinstance(intervention, dict)
+        and intervention.get("applied") is True
+        and intervention.get("stall_fingerprint") == fingerprint
+        for intervention in interventions
+    )
+
+
+def _pm_stall_decision_fingerprint(
+    *,
+    strategy: str,
+    resume_action: object,
+    focus_task_id: object,
+    marker: dict[str, Any],
+    constraints: dict[str, Any],
+) -> dict[str, Any]:
+    relevant_constraints = {
+        key: constraints.get(key)
+        for key in (
+            "max_autonomous_stages",
+            "planning_repair_strategy_change",
+            "recovery_strategy",
+        )
+        if key in constraints
+    }
+    return {
+        "strategy": strategy,
+        "resume_action": resume_action if isinstance(resume_action, str) else None,
+        "focus_task_id": focus_task_id if isinstance(focus_task_id, str) else None,
+        "progress_marker": _jsonable_marker(_supervision_progress_marker(marker)),
+        "constraints": relevant_constraints,
+    }
+
+
+def _jsonable_marker(value: object) -> object:
+    if isinstance(value, tuple):
+        return [_jsonable_marker(item) for item in value]
+    if isinstance(value, list):
+        return [_jsonable_marker(item) for item in value]
+    if isinstance(value, dict):
+        return {
+            str(key): _jsonable_marker(item)
+            for key, item in value.items()
+            if isinstance(key, str)
+        }
+    return value
 
 
 def _apply_pm_stall_decision(
