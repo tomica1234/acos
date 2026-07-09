@@ -4152,7 +4152,7 @@ def test_job_runner_stops_when_implementation_reports_blocked(
                 patches=[
                     {
                         "path": "tests/test_feature.py",
-                        "content": "def test_placeholder() -> None:\n    assert True\n",
+                        "content": "def test_placeholder() -> None:\n    assert 'feature' in 'feature test'\n",
                         "operation": "create",
                     }
                 ],
@@ -5185,7 +5185,7 @@ def test_job_runner_blocks_test_writer_without_implementation_dependency(
                 patches=[
                     {
                         "path": "tests/test_feature.py",
-                        "content": "def test_placeholder() -> None:\n    assert True\n",
+                        "content": "def test_placeholder() -> None:\n    assert 'feature' in 'feature test'\n",
                         "operation": "create",
                     }
                 ],
@@ -5378,7 +5378,7 @@ def test_job_runner_blocks_executor_unsatisfiable_dependency_order_before_implem
                 patches=[
                     {
                         "path": "tests/test_later.py",
-                        "content": "def test_placeholder() -> None:\n    assert True\n",
+                        "content": "def test_placeholder() -> None:\n    assert 'feature' in 'feature test'\n",
                         "operation": "create",
                     }
                 ],
@@ -6065,7 +6065,7 @@ def test_job_runner_blocks_task_graph_without_implementation_tasks(tmp_path: Pat
                 patches=[
                     {
                         "path": "tests/test_feature.py",
-                        "content": "def test_placeholder() -> None:\n    assert True\n",
+                        "content": "def test_placeholder() -> None:\n    assert 'feature' in 'feature test'\n",
                         "operation": "create",
                     }
                 ],

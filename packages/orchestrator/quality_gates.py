@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path, PurePosixPath
+import re
 from typing import Iterable, Sequence
 
 from packages.schemas.agent_outputs import FilePatch, ReviewResult, SecurityReviewResult, TestRunResult
@@ -28,16 +29,8 @@ def ensure_fixer_safe(patches: list[FilePatch]) -> None:
 
 
 def ensure_test_patch_quality(patches: list[FilePatch], *, role: str) -> None:
-    suspicious_tokens = (
-        "xfail",
-        "skip(",
-        "skipif(",
-        "mark.skip",
-        "mark.xfail",
-        "assert True",
-    )
     for patch in patches:
-        if patch.path.startswith("tests/") and any(token in patch.content for token in suspicious_tokens):
+        if _looks_like_test_path(patch.path) and _test_patch_is_suspicious(patch):
             raise QualityGateError(f"{role} attempted to weaken tests")
 
 
@@ -194,3 +187,56 @@ def valid_artifact_paths(paths: Iterable[str]) -> set[str]:
 def invalid_artifact_paths(paths: Iterable[str]) -> list[str]:
     _normalized, invalid = _normalize_artifact_paths(paths)
     return invalid
+
+
+def _looks_like_test_path(path: str) -> bool:
+    normalized = str(path).replace("\\", "/").lower()
+    name = normalized.rsplit("/", 1)[-1]
+    return (
+        "/tests/" in f"/{normalized}"
+        or "/test/" in f"/{normalized}"
+        or name.startswith("test_")
+        or ".test." in name
+        or ".spec." in name
+    )
+
+
+def _test_patch_is_suspicious(patch: FilePatch) -> bool:
+    payload = _test_patch_payload(patch)
+    if not payload:
+        return False
+    compact = re.sub(r"\s+", "", payload).lower()
+    vacuous_assertions = (
+        "expect(true).tobe(true)",
+        "expect(true).tobetruthy()",
+        "expect(false).tobe(false)",
+        "expect(false).tobefalsy()",
+        "expect(1).tobe(1)",
+        "expect(0).tobe(0)",
+    )
+    if any(snippet in compact for snippet in vacuous_assertions):
+        return True
+
+    suspicious_patterns = (
+        r"\bassert\s+True\b",
+        r"\bpytest\s*\.\s*(?:skip|xfail|skipif)\s*\(",
+        r"\bskipif\s*\(",
+        r"\bxfail\s*\(",
+        r"\bmark\s*\.\s*(?:skip|xfail)\b",
+        r"\b(?:describe|it|test)\s*\.\s*(?:skip|only)\s*\(",
+        r"\.\s*(?:skip|only)\s*\(",
+    )
+    return any(re.search(pattern, payload) for pattern in suspicious_patterns)
+
+
+def _test_patch_payload(patch: FilePatch) -> str:
+    if patch.content is not None:
+        return patch.content
+    if patch.unified_diff is None:
+        return ""
+    added_lines: list[str] = []
+    for line in patch.unified_diff.splitlines():
+        if line.startswith("+++") or not line.startswith("+"):
+            continue
+        added_lines.append(line[1:])
+    return "\n".join(added_lines)

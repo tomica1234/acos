@@ -16,6 +16,7 @@ from packages.memory.redaction import redact_text
 from packages.orchestrator.audit import AuditRecorder
 from packages.orchestrator.job_runner import JobRunner, build_default_runner
 from packages.orchestrator.policy import PolicyEngine
+from packages.orchestrator.quality_gates import QualityGateError
 from packages.schemas.runtime import RuntimeHttpCheck
 from packages.schemas.agent_outputs import FilePatch, ImplementationResult, TestRunResult
 from packages.schemas.context import ContextPacket
@@ -642,6 +643,43 @@ def test_job_runner_blocks_dependency_manifest_patch(tmp_path: Path) -> None:
             record,
             "implementer",
             [FilePatch(path="pyproject.toml", content="[project]\nname='bad'\n")],
+        )
+
+
+def test_job_runner_blocks_weak_frontend_test_writer_patch(tmp_path: Path) -> None:
+    registry = load_registry()
+    policy = PolicyEngine.from_path(config_dir() / "policies.yaml")
+    environment = FakeMCPEnvironment(
+        workspace_root=tmp_path,
+        memory_db_path=tmp_path / ".memory.sqlite3",
+    )
+    runner = JobRunner(registry=registry, policy=policy, router=environment.build_router())
+    record = JobRecord(
+        job_id="job-weak-test",
+        spec=JobSpec(
+            request_text="test",
+            repo_path=str(tmp_path),
+            workspace_root=str(tmp_path),
+            target_branch="acos/security-check",
+        ),
+    )
+
+    with pytest.raises(QualityGateError, match="test_writer attempted to weaken tests"):
+        runner._apply_patches(
+            record,
+            "test_writer",
+            [
+                FilePatch(
+                    path="frontend/test/project_scaffold.test.tsx",
+                    operation="create",
+                    content=(
+                        "import { expect, it } from 'vitest'\n\n"
+                        "it('placeholder', () => {\n"
+                        "  expect(true).toBe(true)\n"
+                        "})\n"
+                    ),
+                )
+            ],
         )
 
 

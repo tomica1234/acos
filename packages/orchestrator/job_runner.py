@@ -31,6 +31,7 @@ from packages.orchestrator.quality_gates import (
     artifact_path_exists,
     ensure_fixer_safe,
     ensure_reviews_pass,
+    ensure_test_patch_quality,
     invalid_artifact_paths,
     valid_artifact_paths,
 )
@@ -1631,6 +1632,8 @@ class JobRunner:
             raise QualityGateError(
                 f"patch_limit_exceeded:{role}:{len(patches)}>{max_patches}"
             )
+        if role in {"fixer", "test_writer"}:
+            ensure_test_patch_quality(patches, role=role)
         for patch in patches:
             self.policy.assert_patch_target_allowed(role, patch.path)
             patch = self._patch_for_missing_target_operation(record, role, patch)

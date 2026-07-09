@@ -414,7 +414,8 @@ def test_project_scaffold_role_runs_deterministic_scaffold_before_test_writer(
                             "import { describe, expect, it } from 'vitest'\n\n"
                             "describe('project scaffold', () => {\n"
                             "  it('loads the scaffold smoke test', () => {\n"
-                            "    expect(true).toBe(true)\n"
+                            "    const label = 'ACOS project scaffold is ready'\n"
+                            "    expect(label).toContain('project scaffold')\n"
                             "  })\n"
                             "})\n"
                         ),
@@ -523,7 +524,7 @@ def test_update_missing_test_file_recovery_returns_to_test_writer_with_create_hi
     patch = FilePatch(
         path="backend/tests/test_project_setup.py",
         operation="update",
-        content="def test_project_setup() -> None:\n    assert True\n",
+        content="def test_project_setup() -> None:\n    assert 'project' in 'project setup'\n",
     )
 
     runner._apply_patches(record, "test_writer", [patch])
@@ -546,7 +547,7 @@ def test_update_directory_target_recovery_returns_create_hint(
     patch = FilePatch(
         path="backend/tests/test_project_setup.py",
         operation="update",
-        content="def test_project_setup() -> None:\n    assert True\n",
+        content="def test_project_setup() -> None:\n    assert 'project' in 'project setup'\n",
     )
 
     runner._apply_patches(record, "test_writer", [patch])
@@ -610,7 +611,8 @@ def test_missing_frontend_test_file_create_hint_rewrites_update_to_create(
                             "import { describe, expect, it } from 'vitest'\n\n"
                             "describe('project scaffold', () => {\n"
                             "  it('exists', () => {\n"
-                            "    expect(true).toBe(true)\n"
+                            "    const label = 'ACOS project scaffold is ready'\n"
+                            "    expect(label).toContain('project scaffold')\n"
                             "  })\n"
                             "})\n"
                         ),
