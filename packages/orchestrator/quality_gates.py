@@ -633,7 +633,7 @@ def _update_python_literal_binding(
         return
     if not isinstance(target, ast.Name) or value is None:
         return
-    literal_value = _literal_value(value)
+    literal_value = _literal_value(value, literal_bindings)
     if literal_value is _MISSING_LITERAL:
         literal_bindings.pop(target.id, None)
         return
@@ -803,15 +803,21 @@ def _javascript_payload_has_vacuous_expectation(payload: str) -> bool:
 
 def _javascript_literal_bindings(payload: str) -> dict[str, object]:
     assignment = re.compile(
-        rf"\b(?:const|let|var)\s+(?P<name>{_JS_IDENTIFIER})\s*=\s*"
-        rf"(?P<literal>{_JS_LITERAL})\s*;?",
+        rf"\b(?:(?:const|let|var)\s+)?(?P<name>{_JS_IDENTIFIER})\s*=\s*"
+        rf"(?P<value>{_JS_EXPECTATION_VALUE})(?=\s*(?:[;,\n\r()]|$))",
         re.MULTILINE,
     )
     bindings: dict[str, object] = {}
     for match in assignment.finditer(payload):
-        value = _javascript_literal_value(match.group("literal"))
+        suffix = payload[match.end() :]
+        if re.match(r"\s*\(", suffix):
+            bindings.pop(match.group("name"), None)
+            continue
+        value = _javascript_expression_value(match.group("value"), bindings)
         if value is not _MISSING_LITERAL:
             bindings[match.group("name")] = value
+        else:
+            bindings.pop(match.group("name"), None)
     return bindings
 
 
