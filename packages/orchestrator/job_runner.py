@@ -3999,6 +3999,27 @@ class JobRunner:
                 if task.role in self.TEST_TASK_ROLES
             ]
         )
+        project_setup_scaffold_covers_test_artifacts = (
+            bool(source_test_artifacts)
+            and all(
+                path in self.PROJECT_SETUP_REQUIRED_ARTIFACTS
+                for path in source_test_artifacts
+            )
+            and any(
+                task.role == "scaffold"
+                and self._is_project_setup_task(task)
+                and set(source_test_artifacts).issubset(
+                    self._valid_unique_artifact_paths(task.target_files)
+                )
+                for task in task_graph.tasks
+            )
+        )
+        should_synthesize_test_writer_tasks = (
+            test_writer_task_count == 0
+            and implementation_task_count > 0
+            and bool(source_test_artifacts)
+            and not project_setup_scaffold_covers_test_artifacts
+        )
         if (
             not acceptance_tests
             and not definition_of_done
@@ -4016,6 +4037,8 @@ class JobRunner:
         artifact_updated_task_ids: list[str] = []
         implementation_index = 0
         test_writer_index = 0
+        synthesized_test_writer_task_ids: list[str] = []
+        used_task_ids = {task.id for task in task_graph.tasks}
         tasks: list[PlannedTask] = []
         for task in task_graph.tasks:
             if task.role in self.IMPLEMENTATION_TASK_ROLES:
@@ -4061,7 +4084,47 @@ class JobRunner:
                     updates["required_artifacts"] = required_artifacts
                 if "target_files" in updates or "required_artifacts" in updates:
                     artifact_updated_task_ids.append(task.id)
-            tasks.append(task.model_copy(update=updates) if updates else task)
+            updated_task = task.model_copy(update=updates) if updates else task
+            tasks.append(updated_task)
+            if (
+                should_synthesize_test_writer_tasks
+                and task.role in self.IMPLEMENTATION_TASK_ROLES
+            ):
+                test_task_id = self._unique_task_id(f"{task.id}-tests", used_task_ids)
+                used_task_ids.add(test_task_id)
+                criteria = self._criteria_for_task_from_prd(
+                    task,
+                    acceptance_tests,
+                    definition_of_done,
+                    criteria_index,
+                )
+                synthetic_test_task = PlannedTask(
+                    id=test_task_id,
+                    title=f"{task.title} tests",
+                    description=(
+                        "Write focused tests for this implementation task before "
+                        f"the next stage: {task.title}."
+                    ),
+                    role="test_writer",
+                    complexity=TaskComplexity.MEDIUM,
+                    depends_on=[task.id],
+                    acceptance_criteria=criteria,
+                )
+                test_artifacts = self._prd_artifacts_for_task(
+                    synthetic_test_task,
+                    source_test_artifacts,
+                    task_count=implementation_task_count,
+                ) or list(source_test_artifacts)
+                tasks.append(
+                    synthetic_test_task.model_copy(
+                        update={
+                            "target_files": test_artifacts,
+                            "required_artifacts": test_artifacts,
+                        }
+                    )
+                )
+                synthesized_test_writer_task_ids.append(test_task_id)
+                artifact_updated_task_ids.append(test_task_id)
 
         tasks, supplemental_artifact_assignments = (
             self._assign_missing_prd_implementation_artifacts(
@@ -4087,6 +4150,10 @@ class JobRunner:
             "reason": "filled_missing_task_acceptance_criteria_from_prd",
             "updated_task_ids": updated_task_ids,
         }
+        if synthesized_test_writer_task_ids:
+            enrichment["synthesized_test_writer_task_ids"] = (
+                synthesized_test_writer_task_ids
+            )
         if artifact_updated_task_ids:
             enrichment["artifact_updated_task_ids"] = self._unique_paths(
                 artifact_updated_task_ids
@@ -4110,6 +4177,16 @@ class JobRunner:
                 "ACOS filled missing task acceptance_criteria from the PRD.",
             ],
         )
+
+    @staticmethod
+    def _unique_task_id(base: str, used_task_ids: set[str]) -> str:
+        candidate = re.sub(r"[^a-zA-Z0-9_-]+", "-", base).strip("-") or "task"
+        if candidate not in used_task_ids:
+            return candidate
+        index = 2
+        while f"{candidate}-{index}" in used_task_ids:
+            index += 1
+        return f"{candidate}-{index}"
 
     @classmethod
     def _assign_missing_prd_implementation_artifacts(

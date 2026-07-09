@@ -2472,9 +2472,18 @@ def test_task_graph_enrichment_matches_prd_artifacts_to_multi_tasks(
     assert tasks["auth"].required_artifacts == ["backend/auth.py"]
     assert tasks["word-sets"].target_files == ["backend/words.py"]
     assert tasks["word-sets"].required_artifacts == ["backend/words.py"]
+    assert tasks["auth-tests"].target_files == ["tests/test_vocab_app.py"]
+    assert tasks["auth-tests"].required_artifacts == ["tests/test_vocab_app.py"]
+    assert tasks["auth-tests"].depends_on == ["auth"]
+    assert tasks["word-sets-tests"].target_files == ["tests/test_vocab_app.py"]
+    assert tasks["word-sets-tests"].required_artifacts == ["tests/test_vocab_app.py"]
+    assert tasks["word-sets-tests"].depends_on == ["word-sets"]
+    assert record.outputs["task_graph_acceptance_enrichment"][
+        "synthesized_test_writer_task_ids"
+    ] == ["auth-tests", "word-sets-tests"]
     assert record.outputs["task_graph_acceptance_enrichment"][
         "artifact_updated_task_ids"
-    ] == ["auth", "word-sets"]
+    ] == ["auth", "auth-tests", "word-sets", "word-sets-tests"]
 
     validation = JobRunner._build_task_graph_validation(
         refined,
@@ -2485,7 +2494,80 @@ def test_task_graph_enrichment_matches_prd_artifacts_to_multi_tasks(
 
     assert validation["valid"] is False
     assert "backend/main.py" in validation["unassigned_required_artifacts"]
-    assert "tests/test_vocab_app.py" in validation["unassigned_required_artifacts"]
+    assert "tests/test_vocab_app.py" not in validation["unassigned_required_artifacts"]
+
+
+def test_task_graph_enrichment_synthesizes_missing_test_writer_task(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    registry = ModelRegistry.from_paths(
+        provider_path=config_dir() / "model_providers.yaml",
+        agents_path=config_dir() / "agents.yaml",
+        routing_path=config_dir() / "model_routing.yaml",
+    )
+    policy = PolicyEngine.from_path(config_dir() / "policies.yaml")
+    environment = FakeMCPEnvironment(
+        workspace_root=workspace,
+        memory_db_path=workspace / ".memory.sqlite3",
+    )
+    runner = JobRunner(registry=registry, policy=policy, router=environment.build_router())
+    record = runner.store.create(
+        JobSpec(
+            request_text="Create feature with tests",
+            repo_path=str(workspace),
+            target_branch="acos/synthesize-test-writer",
+        )
+    )
+    prd = PRD(
+        title="Feature",
+        problem_statement="Need feature",
+        smallest_working_core=["Expose VALUE"],
+        small_parts=["Create feature module"],
+        incremental_milestones=["Module exists"],
+        acceptance_tests=["VALUE equals 1"],
+        definition_of_done=["All generated tests pass"],
+        required_artifacts=["feature.py", "tests/test_feature.py"],
+    )
+    task_graph = TaskGraph(
+        goal="Build feature",
+        tasks=[
+            PlannedTask(
+                id="core",
+                title="Build core",
+                description="Create feature module exposing VALUE.",
+                role="implementer",
+                acceptance_criteria=["VALUE equals 1"],
+                target_files=["feature.py"],
+                required_artifacts=["feature.py"],
+            )
+        ],
+    )
+
+    refined = runner._enrich_task_graph_acceptance_criteria(record, prd, task_graph)
+
+    tasks = {task.id: task for task in refined.tasks}
+    assert list(tasks) == ["core", "core-tests"]
+    assert tasks["core-tests"].role == "test_writer"
+    assert tasks["core-tests"].depends_on == ["core"]
+    assert tasks["core-tests"].acceptance_criteria == ["VALUE equals 1"]
+    assert tasks["core-tests"].target_files == ["tests/test_feature.py"]
+    assert tasks["core-tests"].required_artifacts == ["tests/test_feature.py"]
+    assert record.outputs["task_graph_acceptance_enrichment"][
+        "synthesized_test_writer_task_ids"
+    ] == ["core-tests"]
+
+    validation = JobRunner._build_task_graph_validation(
+        refined,
+        prd=prd,
+        require_acceptance_criteria=True,
+        require_task_artifacts=True,
+    )
+
+    assert validation["valid"] is True
+    assert validation["missing_test_writer_tasks"] is False
+    assert validation["unassigned_required_artifacts"] == []
 
 
 def test_task_graph_enrichment_fills_test_writer_prd_artifacts(
