@@ -661,6 +661,9 @@ def _python_assert_expr_is_vacuous(
     literal_value = _literal_value(expression, literal_bindings)
     if literal_value is not _MISSING_LITERAL and not isinstance(expression, ast.Compare):
         return bool(literal_value) is True
+    call_value = _python_literal_call_value(expression, literal_bindings)
+    if isinstance(call_value, bool):
+        return call_value is True
     if not isinstance(expression, ast.Compare):
         return False
     values = [_literal_value(expression.left, literal_bindings)]
@@ -671,6 +674,30 @@ def _python_assert_expr_is_vacuous(
     if any(value is _MISSING_LITERAL for value in values):
         return False
     return _python_literal_compare_chain_is_true(values, expression.ops)
+
+
+def _python_literal_call_value(
+    expression: ast.expr,
+    literal_bindings: dict[str, object] | None = None,
+) -> object:
+    if not isinstance(expression, ast.Call):
+        return _MISSING_LITERAL
+    function = expression.func
+    if not isinstance(function, ast.Attribute):
+        return _MISSING_LITERAL
+    receiver = _literal_value(function.value, literal_bindings)
+    if not isinstance(receiver, str):
+        return _MISSING_LITERAL
+    args = [_literal_value(argument, literal_bindings) for argument in expression.args]
+    if any(argument is _MISSING_LITERAL for argument in args):
+        return _MISSING_LITERAL
+    if expression.keywords:
+        return _MISSING_LITERAL
+    if function.attr in {"startswith", "endswith"}:
+        if len(args) != 1 or not isinstance(args[0], (str, tuple)):
+            return _MISSING_LITERAL
+        return getattr(receiver, function.attr)(args[0])
+    return _MISSING_LITERAL
 
 
 def _python_literal_compare_chain_is_true(
@@ -738,8 +765,10 @@ _JS_LITERAL = (
     r"(?:true|false|null|undefined|-?\d+(?:\.\d+)?|"
     r"\"(?:\\.|[^\"\\])*\"|'(?:\\.|[^'\\])*'|`(?:\\.|[^`\\])*`)"
 )
+_JS_REGEX_LITERAL = r"/(?:\\.|[^/\\])+/[dgimsuvy]*"
 _JS_IDENTIFIER = r"[A-Za-z_$][\w$]*"
 _JS_EXPECTATION_VALUE = rf"(?:{_JS_LITERAL}|{_JS_IDENTIFIER})"
+_JS_EXPECTATION_ARGUMENT = rf"(?:{_JS_EXPECTATION_VALUE}|{_JS_REGEX_LITERAL})"
 
 
 def _javascript_payload_has_vacuous_expectation(payload: str) -> bool:
@@ -750,8 +779,8 @@ def _javascript_payload_has_vacuous_expectation(payload: str) -> bool:
         rf"(?P<matcher>"
         rf"toBeGreaterThanOrEqual|toBeLessThanOrEqual|toBeGreaterThan|"
         rf"toBeLessThan|toBe|toEqual|toStrictEqual|toContain"
-        rf")\s*"
-        rf"\(\s*(?P<expected>{_JS_EXPECTATION_VALUE})\s*\)",
+        rf"|toMatch)\s*"
+        rf"\(\s*(?P<expected>{_JS_EXPECTATION_ARGUMENT})\s*\)",
         re.MULTILINE,
     )
     expectation_without_argument = re.compile(
@@ -828,6 +857,8 @@ def _javascript_expression_value(
     stripped = expression.strip()
     if stripped in literal_bindings:
         return literal_bindings[stripped]
+    if re.fullmatch(_JS_REGEX_LITERAL, stripped):
+        return _javascript_regex_value(stripped)
     return _javascript_literal_value(stripped)
 
 
@@ -841,6 +872,12 @@ def _javascript_matcher_passes(
     if matcher == "toContain":
         if isinstance(actual, str) and isinstance(expected, str):
             return expected in actual
+        return None
+    if matcher == "toMatch":
+        if isinstance(actual, str) and isinstance(expected, str):
+            return expected in actual
+        if isinstance(actual, str) and _javascript_is_regex_value(expected):
+            return _javascript_regex_matches(expected, actual)
         return None
     if matcher == "toBeTruthy":
         return _javascript_truthy(actual)
@@ -864,6 +901,42 @@ def _javascript_matcher_passes(
     except TypeError:
         return None
     return None
+
+
+def _javascript_regex_value(raw_regex: str) -> tuple[str, str, str] | object:
+    match = re.fullmatch(
+        r"/(?P<pattern>(?:\\.|[^/\\])*)/(?P<flags>[dgimsuvy]*)",
+        raw_regex,
+    )
+    if not match:
+        return _MISSING_LITERAL
+    pattern = match.group("pattern").replace("\\/", "/")
+    return ("regex", pattern, match.group("flags"))
+
+
+def _javascript_is_regex_value(value: object) -> bool:
+    return (
+        isinstance(value, tuple)
+        and len(value) == 3
+        and value[0] == "regex"
+        and isinstance(value[1], str)
+        and isinstance(value[2], str)
+    )
+
+
+def _javascript_regex_matches(regex_value: object, actual: str) -> bool | None:
+    if not _javascript_is_regex_value(regex_value):
+        return None
+    _kind, pattern, flags = regex_value
+    re_flags = 0
+    if "i" in flags:
+        re_flags |= re.IGNORECASE
+    if "m" in flags:
+        re_flags |= re.MULTILINE
+    try:
+        return re.search(pattern, actual, re_flags) is not None
+    except re.error:
+        return None
 
 
 def _javascript_truthy(value: object) -> bool:

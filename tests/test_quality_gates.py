@@ -177,6 +177,23 @@ def test_test_patch_quality_rejects_vacuous_frontend_literal_alias_expectations(
         ensure_test_patch_quality([patch], role="test_writer")
 
 
+def test_test_patch_quality_rejects_vacuous_frontend_literal_regex_match() -> None:
+    patch = FilePatch(
+        path="src/App.spec.tsx",
+        operation="create",
+        content=(
+            "import { expect, test } from 'vitest'\n\n"
+            "test('placeholder', () => {\n"
+            "  const label = 'project scaffold'\n"
+            "  expect(label).toMatch(/scaffold/)\n"
+            "})\n"
+        ),
+    )
+
+    with pytest.raises(QualityGateError, match="test_writer attempted to weaken tests"):
+        ensure_test_patch_quality([patch], role="test_writer")
+
+
 def test_test_patch_quality_allows_frontend_reassigned_runtime_value() -> None:
     patch = FilePatch(
         path="src/App.spec.tsx",
@@ -741,6 +758,22 @@ def test_test_patch_quality_rejects_vacuous_python_literal_alias_assertions() ->
             "    label = 'project scaffold'\n"
             "    actual = label\n"
             "    assert 'scaffold' in actual\n"
+        ),
+    )
+
+    with pytest.raises(QualityGateError, match="test_writer attempted to weaken tests"):
+        ensure_test_patch_quality([patch], role="test_writer")
+
+
+def test_test_patch_quality_rejects_vacuous_python_literal_method_assertions() -> None:
+    patch = FilePatch(
+        path="tests/test_project_setup.py",
+        operation="create",
+        content=(
+            "def test_project_setup_placeholder() -> None:\n"
+            "    label = 'project scaffold'\n"
+            "    actual = label\n"
+            "    assert actual.endswith('scaffold')\n"
         ),
     )
 
