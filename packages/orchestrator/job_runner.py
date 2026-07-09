@@ -1640,6 +1640,12 @@ class JobRunner:
             )
         for patch in patches:
             self.policy.assert_patch_target_allowed(role, patch.path)
+            if role not in {"fixer", "test_writer"}:
+                ensure_test_patch_quality(
+                    [patch],
+                    role=role,
+                    workspace_root=self._workspace_root(record),
+                )
             patch = self._patch_for_missing_target_operation(record, role, patch)
             if patch is None:
                 return

@@ -695,6 +695,76 @@ def test_job_runner_blocks_weak_frontend_test_writer_patch(tmp_path: Path) -> No
         )
 
 
+def test_job_runner_blocks_weak_scaffold_test_patch(tmp_path: Path) -> None:
+    registry = load_registry()
+    policy = PolicyEngine.from_path(config_dir() / "policies.yaml")
+    environment = FakeMCPEnvironment(
+        workspace_root=tmp_path,
+        memory_db_path=tmp_path / ".memory.sqlite3",
+    )
+    runner = JobRunner(registry=registry, policy=policy, router=environment.build_router())
+    record = JobRecord(
+        job_id="job-weak-scaffold-test",
+        spec=JobSpec(
+            request_text="test",
+            repo_path=str(tmp_path),
+            workspace_root=str(tmp_path),
+            target_branch="acos/security-check",
+        ),
+    )
+
+    with pytest.raises(QualityGateError, match="scaffold attempted to weaken tests"):
+        runner._apply_patches(
+            record,
+            "scaffold",
+            [
+                FilePatch(
+                    path="frontend/test/project_scaffold.test.tsx",
+                    operation="create",
+                    content=(
+                        "import { it } from 'vitest'\n\n"
+                        "it('placeholder', () => {\n"
+                        "})\n"
+                    ),
+                )
+            ],
+        )
+
+
+def test_job_runner_keeps_policy_deny_for_implementer_test_patch(
+    tmp_path: Path,
+) -> None:
+    registry = load_registry()
+    policy = PolicyEngine.from_path(config_dir() / "policies.yaml")
+    environment = FakeMCPEnvironment(
+        workspace_root=tmp_path,
+        memory_db_path=tmp_path / ".memory.sqlite3",
+    )
+    runner = JobRunner(registry=registry, policy=policy, router=environment.build_router())
+    record = JobRecord(
+        job_id="job-implementer-test-deny",
+        spec=JobSpec(
+            request_text="test",
+            repo_path=str(tmp_path),
+            workspace_root=str(tmp_path),
+            target_branch="acos/security-check",
+        ),
+    )
+
+    with pytest.raises(PermissionError, match="implementer.*test files"):
+        runner._apply_patches(
+            record,
+            "implementer",
+            [
+                FilePatch(
+                    path="tests/test_feature.py",
+                    operation="create",
+                    content="def test_placeholder() -> None:\n    pass\n",
+                )
+            ],
+        )
+
+
 def test_job_runner_blocks_test_writer_test_delete_patch(tmp_path: Path) -> None:
     registry = load_registry()
     policy = PolicyEngine.from_path(config_dir() / "policies.yaml")
