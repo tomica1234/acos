@@ -241,6 +241,7 @@ def _test_patch_is_suspicious(patch: FilePatch) -> bool:
         r"\bxfail\s*\(",
         r"\bmark\s*\.\s*(?:skip|xfail)\b",
         r"\b(?:describe|it|test)(?:\s*\.\s*[A-Za-z_$][\w$]*)*\s*\.\s*(?:skip|only|todo)\s*\(",
+        r"\.\s*(?:skip|only|todo)\s*\.",
         r"\.\s*(?:skip|only)\s*\(",
     )
     return any(re.search(pattern, payload) for pattern in suspicious_patterns)

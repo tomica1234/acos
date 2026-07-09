@@ -75,6 +75,40 @@ def test_test_patch_quality_rejects_frontend_todo_tests() -> None:
         ensure_test_patch_quality([patch], role="test_writer")
 
 
+def test_test_patch_quality_rejects_frontend_skip_each_tests() -> None:
+    patch = FilePatch(
+        path="frontend/test/project_scaffold.test.tsx",
+        operation="create",
+        content=(
+            "import { expect, test } from 'vitest'\n\n"
+            "test.skip.each([['project scaffold']])('loads %s', (label) => {\n"
+            "  expect(label).toContain('project')\n"
+            "})\n"
+        ),
+    )
+
+    with pytest.raises(QualityGateError, match="test_writer attempted to weaken tests"):
+        ensure_test_patch_quality([patch], role="test_writer")
+
+
+def test_test_patch_quality_rejects_frontend_only_each_tests() -> None:
+    patch = FilePatch(
+        path="frontend/test/project_scaffold.test.tsx",
+        operation="create",
+        content=(
+            "import { describe, expect, it } from 'vitest'\n\n"
+            "describe.only.each([['project scaffold']])('suite %s', (label) => {\n"
+            "  it('loads', () => {\n"
+            "    expect(label).toContain('project')\n"
+            "  })\n"
+            "})\n"
+        ),
+    )
+
+    with pytest.raises(QualityGateError, match="test_writer attempted to weaken tests"):
+        ensure_test_patch_quality([patch], role="test_writer")
+
+
 def test_test_patch_quality_rejects_vacuous_frontend_assertions() -> None:
     patch = FilePatch(
         path="src/App.spec.tsx",
