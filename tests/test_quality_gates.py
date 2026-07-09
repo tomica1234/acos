@@ -255,6 +255,23 @@ def test_test_patch_quality_rejects_frontend_test_without_assertion() -> None:
         ensure_test_patch_quality([patch], role="test_writer")
 
 
+def test_test_patch_quality_rejects_frontend_comment_only_expectation() -> None:
+    patch = FilePatch(
+        path="frontend/test/project_scaffold.test.tsx",
+        operation="create",
+        content=(
+            "import { test } from 'vitest'\n\n"
+            "test('loads project scaffold', () => {\n"
+            "  // expect(renderProjectScaffold()).toContain('project')\n"
+            "  renderProjectScaffold()\n"
+            "})\n"
+        ),
+    )
+
+    with pytest.raises(QualityGateError, match="test_writer attempted to weaken tests"):
+        ensure_test_patch_quality([patch], role="test_writer")
+
+
 def test_test_patch_quality_rejects_one_frontend_test_without_assertion() -> None:
     patch = FilePatch(
         path="frontend/test/project_scaffold.test.tsx",
@@ -450,6 +467,21 @@ def test_test_patch_quality_rejects_python_test_without_assertion() -> None:
         path="tests/test_feature.py",
         operation="create",
         content="def test_feature() -> None:\n    build_feature()\n",
+    )
+
+    with pytest.raises(QualityGateError, match="test_writer attempted to weaken tests"):
+        ensure_test_patch_quality([patch], role="test_writer")
+
+
+def test_test_patch_quality_rejects_python_comment_only_assertion() -> None:
+    patch = FilePatch(
+        path="tests/test_feature.py",
+        operation="create",
+        content=(
+            "def test_feature() -> None:\n"
+            "    # assert build_feature().status == 'ready'\n"
+            "    build_feature()\n"
+        ),
     )
 
     with pytest.raises(QualityGateError, match="test_writer attempted to weaken tests"):

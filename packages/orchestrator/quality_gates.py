@@ -366,8 +366,11 @@ def _payload_introduces_test_case(payload: str) -> bool:
 
 
 def _line_has_test_assertion(line: str) -> bool:
+    stripped = line.strip()
+    if stripped.startswith(("#", "//", "/*", "*")):
+        return False
     return any(
-        re.search(pattern, line)
+        re.search(pattern, stripped)
         for pattern in (
             r"\bassert\b",
             r"\bexpect\s*\(",
