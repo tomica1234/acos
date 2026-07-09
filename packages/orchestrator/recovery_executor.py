@@ -16,6 +16,23 @@ from packages.schemas.models import JobStatus
 class RecoveryExecutor:
     """Consume RecoveryGovernor plans and make them actionable."""
 
+    PROJECT_SETUP_TARGET_PATHS = frozenset(
+        {
+            "backend/main.py",
+            "backend/requirements.txt",
+            "backend/tests/test_project_setup.py",
+            "frontend/package.json",
+            "frontend/vite.config.js",
+            "frontend/src/main.tsx",
+            "frontend/src/App.tsx",
+            "shared/.gitkeep",
+            ".gitignore",
+            "package.json",
+            "README.md",
+            ".env.example",
+        }
+    )
+
     STALE_RECOVERY_CONSTRAINT_KEYS = {
         "deterministic_creation_attempted",
         "deterministically_created_files",
@@ -289,13 +306,7 @@ class RecoveryExecutor:
     @staticmethod
     def _looks_like_project_setup_path(path: str) -> bool:
         normalized = path.replace("\\", "/")
-        return (
-            normalized in {".gitignore", "package.json", "README.md", ".env.example"}
-            or normalized.startswith("backend/")
-            or normalized.startswith("frontend/src/")
-            or normalized.startswith("frontend/")
-            or normalized.startswith("shared/")
-        )
+        return normalized in RecoveryExecutor.PROJECT_SETUP_TARGET_PATHS
 
     def _attempt_deterministic_creation(
         self,
