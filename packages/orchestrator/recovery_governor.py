@@ -645,6 +645,13 @@ class RecoveryGovernor:
         uncovered_core = runtime_state.get("uncovered_smallest_working_core")
         if isinstance(uncovered_core, list) and uncovered_core:
             constraints["uncovered_smallest_working_core"] = uncovered_core
+        uncovered_milestones = runtime_state.get(
+            "uncovered_incremental_milestone_small_parts"
+        )
+        if isinstance(uncovered_milestones, list) and uncovered_milestones:
+            constraints["uncovered_incremental_milestone_small_parts"] = (
+                uncovered_milestones
+            )
         uncovered_implementation = runtime_state.get(
             "uncovered_implementation_artifact_small_parts"
         )

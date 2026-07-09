@@ -8156,6 +8156,26 @@ def test_job_runner_blocks_prd_quality_when_acceptance_tests_do_not_cover_small_
         "uncovered_smallest_working_core": [],
         "incremental_milestone_count": 2,
         "incremental_milestones_cover_small_parts": True,
+        "incremental_milestones_semantically_cover_small_parts": True,
+        "incremental_milestone_small_part_coverage": [
+            {
+                "small_part_index": 1,
+                "small_part": "Create feature module",
+                "required_anchor_tokens": [],
+                "covered_anchor_tokens": [],
+                "missing_anchor_tokens": [],
+                "covered": True,
+            },
+            {
+                "small_part_index": 2,
+                "small_part": "Add focused tests",
+                "required_anchor_tokens": [],
+                "covered_anchor_tokens": [],
+                "missing_anchor_tokens": [],
+                "covered": True,
+            },
+        ],
+        "uncovered_incremental_milestone_small_parts": [],
         "missing_incremental_milestone_count": 0,
         "required_incremental_milestone_count": 2,
         "acceptance_test_count": 1,
@@ -8617,6 +8637,82 @@ def test_prd_quality_requires_incremental_milestones_for_each_small_part() -> No
     assert report["required_incremental_milestone_count"] == 2
 
 
+def test_prd_quality_rejects_incremental_milestones_missing_domain_anchors() -> None:
+    prd = PRD(
+        title="English Vocab App",
+        problem_statement="Teachers need account-based vocabulary practice.",
+        smallest_working_core=["Serve an authenticated vocabulary shell"],
+        small_parts=[
+            "User authentication and roles",
+            "Word set CRUD operations",
+        ],
+        incremental_milestones=[
+            "Users can sign in",
+            "Backend module exists",
+        ],
+        acceptance_tests=[
+            "Student can register and login",
+            "Teacher can perform CRUD for word sets",
+        ],
+        definition_of_done=["All tests pass"],
+        required_artifacts=[
+            "backend/main.py",
+            "tests/test_english_vocab.py",
+        ],
+    )
+
+    report = JobRunner._build_prd_quality_report(prd)
+
+    assert report["passed"] is False
+    assert report["missing"] == [
+        "incremental_milestones_semantically_cover_small_parts"
+    ]
+    assert report["incremental_milestones_cover_small_parts"] is True
+    assert report["incremental_milestones_semantically_cover_small_parts"] is False
+    assert report["uncovered_incremental_milestone_small_parts"] == [
+        {
+            "small_part_index": 2,
+            "small_part": "Word set CRUD operations",
+            "required_anchor_tokens": ["crud"],
+            "covered_anchor_tokens": [],
+            "missing_anchor_tokens": ["crud"],
+            "covered": False,
+        }
+    ]
+
+
+def test_prd_quality_accepts_incremental_milestones_with_domain_anchors() -> None:
+    prd = PRD(
+        title="English Vocab App",
+        problem_statement="Teachers need account-based vocabulary practice.",
+        smallest_working_core=["Serve an authenticated vocabulary shell"],
+        small_parts=[
+            "User authentication and roles",
+            "Word set CRUD operations",
+        ],
+        incremental_milestones=[
+            "Users can sign in with roles",
+            "Word set CRUD operations work",
+        ],
+        acceptance_tests=[
+            "Student can register and login",
+            "Teacher can perform CRUD for word sets",
+        ],
+        definition_of_done=["All tests pass"],
+        required_artifacts=[
+            "backend/main.py",
+            "tests/test_english_vocab.py",
+        ],
+    )
+
+    report = JobRunner._build_prd_quality_report(prd)
+
+    assert report["passed"] is True
+    assert report["missing"] == []
+    assert report["incremental_milestones_semantically_cover_small_parts"] is True
+    assert report["uncovered_incremental_milestone_small_parts"] == []
+
+
 def test_prd_quality_allows_docs_artifact_for_docs_only_work() -> None:
     prd = PRD(
         title="Docs",
@@ -8936,6 +9032,70 @@ def test_prd_quality_deterministically_repairs_missing_incremental_milestones(
     ]
 
 
+def test_prd_quality_deterministically_repairs_semantic_incremental_milestones(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    registry = ModelRegistry.from_paths(
+        provider_path=config_dir() / "model_providers.yaml",
+        agents_path=config_dir() / "agents.yaml",
+        routing_path=config_dir() / "model_routing.yaml",
+    )
+    policy = PolicyEngine.from_path(config_dir() / "policies.yaml")
+    environment = FakeMCPEnvironment(
+        workspace_root=workspace,
+        memory_db_path=workspace / ".memory.sqlite3",
+    )
+    runner = JobRunner(registry=registry, policy=policy, router=environment.build_router())
+    record = runner.store.create(
+        JobSpec(
+            request_text="Build vocabulary app incrementally",
+            repo_path=str(workspace),
+            metadata={"constraints": {"require_prd_quality": True}},
+        )
+    )
+    prd = PRD(
+        title="English Vocab App",
+        problem_statement="Teachers need vocabulary management.",
+        smallest_working_core=["Serve a vocabulary app shell"],
+        small_parts=[
+            "User authentication and roles",
+            "Word set CRUD operations",
+        ],
+        incremental_milestones=[
+            "Users can sign in with roles",
+            "Backend module exists",
+        ],
+        acceptance_tests=[
+            "Student can register and login",
+            "Teacher can perform CRUD for word sets",
+        ],
+        definition_of_done=["All tests pass"],
+        required_artifacts=[
+            "backend/main.py",
+            "tests/test_english_vocab.py",
+        ],
+    )
+
+    repaired = runner._refine_prd_quality_for_autonomy(record, prd)
+
+    assert repaired is not None
+    assert record.outputs["prd_quality"]["passed"] is True
+    assert [
+        attempt["action"] for attempt in record.outputs["prd_quality_attempts"]
+    ] == ["initial", "deterministic_repair"]
+    assert record.outputs["prd_quality_deterministic_repair"] == {
+        "applied": True,
+        "added_incremental_milestones": [
+            "Word set CRUD operations works and is ready for focused tests"
+        ],
+    }
+    assert repaired.incremental_milestones[-1] == (
+        "Word set CRUD operations works and is ready for focused tests"
+    )
+
+
 def test_semantic_tokens_split_camel_case_domain_terms() -> None:
     tokens = JobRunner._semantic_tokens("WordSet QuizQuestion UserProgress quizzes")
 
@@ -8953,7 +9113,7 @@ def test_prd_quality_accepts_semantically_covered_acceptance_tests() -> None:
         ],
         incremental_milestones=[
             "Students can sign in",
-            "Teachers can manage word sets",
+            "Teachers can perform CRUD for word sets",
         ],
         acceptance_tests=[
             "Student can register and login",
@@ -8997,7 +9157,7 @@ def test_prd_quality_does_not_treat_word_list_as_crud_acceptance() -> None:
         problem_statement="Students need vocabulary practice.",
         smallest_working_core=["Serve a vocabulary app shell"],
         small_parts=["Backend word set CRUD API"],
-        incremental_milestones=["Word set API works"],
+        incremental_milestones=["Backend word set CRUD API works"],
         acceptance_tests=["React word list component renders vocabulary words"],
         definition_of_done=["All tests pass"],
         required_artifacts=[
@@ -9029,7 +9189,9 @@ def test_prd_quality_accepts_crud_operations_without_crud_acronym() -> None:
         problem_statement="Students need vocabulary practice.",
         smallest_working_core=["Serve a vocabulary app shell"],
         small_parts=["Backend word set CRUD API"],
-        incremental_milestones=["Word set API works"],
+        incremental_milestones=[
+            "Backend word set API supports create, read, update, and delete operations"
+        ],
         acceptance_tests=[
             "Backend word set API supports create, read, update, and delete operations"
         ],
@@ -9100,7 +9262,7 @@ def test_job_runner_blocks_prd_quality_when_acceptance_tests_semantically_mismat
                 ],
                 incremental_milestones=[
                     "Students can sign in",
-                    "Teachers can manage word sets",
+                    "Teachers can perform CRUD for word sets",
                 ],
                 acceptance_tests=[
                     "Health endpoint returns 200",

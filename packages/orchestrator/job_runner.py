@@ -1298,6 +1298,7 @@ class JobRunner:
             "prd_open_questions",
             "uncovered_acceptance_small_parts",
             "uncovered_smallest_working_core",
+            "uncovered_incremental_milestone_small_parts",
             "uncovered_implementation_artifact_small_parts",
             "non_observable_acceptance_tests",
             "invalid_required_artifacts",
@@ -2639,6 +2640,8 @@ class JobRunner:
             "prd_quality_warnings",
             "prd_open_questions",
             "uncovered_acceptance_small_parts",
+            "uncovered_smallest_working_core",
+            "uncovered_incremental_milestone_small_parts",
             "uncovered_implementation_artifact_small_parts",
             "non_observable_acceptance_tests",
             "invalid_required_artifacts",
@@ -2678,6 +2681,7 @@ class JobRunner:
         )
         uncovered = report.get("uncovered_acceptance_small_parts")
         uncovered_core = report.get("uncovered_smallest_working_core")
+        uncovered_milestones = report.get("uncovered_incremental_milestone_small_parts")
         uncovered_implementation_artifacts = report.get(
             "uncovered_implementation_artifact_small_parts"
         )
@@ -2692,6 +2696,10 @@ class JobRunner:
             runtime_state["uncovered_acceptance_small_parts"] = uncovered
         if isinstance(uncovered_core, list) and uncovered_core:
             runtime_state["uncovered_smallest_working_core"] = uncovered_core
+        if isinstance(uncovered_milestones, list) and uncovered_milestones:
+            runtime_state["uncovered_incremental_milestone_small_parts"] = (
+                uncovered_milestones
+            )
         if (
             isinstance(uncovered_implementation_artifacts, list)
             and uncovered_implementation_artifacts
@@ -2737,6 +2745,7 @@ class JobRunner:
             "acceptance_tests_observable",
             "incremental_milestones",
             "incremental_milestones_cover_small_parts",
+            "incremental_milestones_semantically_cover_small_parts",
         }
         missing = set(report.get("missing") or [])
         if not missing or not missing.issubset(repairable_missing):
@@ -2758,6 +2767,19 @@ class JobRunner:
                 incremental_milestones.append(milestone)
                 added_milestones.append(milestone)
                 changed = True
+        milestone_coverage = report.get("incremental_milestone_small_part_coverage")
+        if isinstance(milestone_coverage, list):
+            for item in milestone_coverage:
+                if not isinstance(item, dict) or item.get("covered") is True:
+                    continue
+                part = item.get("small_part")
+                if not isinstance(part, str) or not part.strip():
+                    continue
+                milestone = cls._incremental_milestone_for_small_part(part)
+                if milestone not in incremental_milestones:
+                    incremental_milestones.append(milestone)
+                    added_milestones.append(milestone)
+                    changed = True
         coverage = report.get("acceptance_test_small_part_coverage")
         small_part_by_acceptance_index: dict[int, str] = {}
         if isinstance(coverage, list):
@@ -2971,6 +2993,54 @@ class JobRunner:
             )
         return coverage
 
+    @classmethod
+    def _incremental_milestone_small_part_coverage(
+        cls,
+        small_parts: list[str],
+        incremental_milestones: list[str],
+    ) -> list[dict[str, Any]]:
+        milestone_tokens: set[str] = set()
+        for milestone in incremental_milestones:
+            milestone_tokens.update(
+                cls._semantic_tokens(milestone, include_action_tokens=True)
+            )
+        coverage: list[dict[str, Any]] = []
+        for index, part in enumerate(small_parts, start=1):
+            part_tokens = cls._semantic_tokens(part)
+            anchor_tokens = cls._semantic_anchor_tokens(part_tokens)
+            if not part_tokens or not anchor_tokens:
+                coverage.append(
+                    {
+                        "small_part_index": index,
+                        "small_part": part,
+                        "required_anchor_tokens": sorted(anchor_tokens),
+                        "covered_anchor_tokens": [],
+                        "missing_anchor_tokens": [],
+                        "covered": True,
+                    }
+                )
+                continue
+            covered = cls._semantic_anchor_satisfied(anchor_tokens, milestone_tokens)
+            covered_anchor_tokens = (
+                sorted(anchor_tokens)
+                if covered
+                else sorted(anchor_tokens & milestone_tokens)
+            )
+            missing_anchor_tokens = (
+                [] if covered else sorted(anchor_tokens - milestone_tokens)
+            )
+            coverage.append(
+                {
+                    "small_part_index": index,
+                    "small_part": part,
+                    "required_anchor_tokens": sorted(anchor_tokens),
+                    "covered_anchor_tokens": covered_anchor_tokens,
+                    "missing_anchor_tokens": missing_anchor_tokens,
+                    "covered": covered,
+                }
+            )
+        return coverage
+
     @staticmethod
     def _prd_quality_repair_logs(prd: PRD, report: dict[str, Any]) -> list[str]:
         logs = [
@@ -3105,6 +3175,37 @@ class JobRunner:
                 "Add at least "
                 f"{required_text} incremental_milestones so the milestone sequence covers every small_part."
             )
+        if "incremental_milestones_semantically_cover_small_parts" in missing:
+            uncovered_milestones = report.get(
+                "uncovered_incremental_milestone_small_parts"
+            )
+            if isinstance(uncovered_milestones, list) and uncovered_milestones:
+                summaries = []
+                for item in uncovered_milestones:
+                    if not isinstance(item, dict):
+                        continue
+                    index = item.get("small_part_index")
+                    part = item.get("small_part")
+                    missing_anchors = item.get("missing_anchor_tokens")
+                    if not isinstance(part, str) or not part.strip():
+                        continue
+                    suffix = ""
+                    if isinstance(missing_anchors, list) and missing_anchors:
+                        suffix = " missing anchors " + ", ".join(
+                            str(token) for token in missing_anchors
+                        )
+                    summaries.append(
+                        f"{index}: {part}{suffix}" if index else f"{part}{suffix}"
+                    )
+                if summaries:
+                    logs.append(
+                        "Incremental milestones not tied to small_parts: "
+                        + " | ".join(summaries)
+                    )
+            logs.append(
+                "Rewrite incremental_milestones so each domain-specific small_part "
+                "has a milestone carrying the same distinctive anchors."
+            )
         if "small_parts_split_for_autonomy" in missing:
             required_count = report.get("required_small_part_count")
             required_text = (
@@ -3209,6 +3310,24 @@ class JobRunner:
             missing.append("incremental_milestones")
         elif small_parts and len(incremental_milestones) < len(small_parts):
             missing.append("incremental_milestones_cover_small_parts")
+        incremental_milestone_small_part_coverage = (
+            JobRunner._incremental_milestone_small_part_coverage(
+                small_parts,
+                incremental_milestones,
+            )
+        )
+        uncovered_incremental_milestone_small_parts = [
+            item
+            for item in incremental_milestone_small_part_coverage
+            if not item["covered"]
+        ]
+        if (
+            small_parts
+            and incremental_milestones
+            and len(incremental_milestones) >= len(small_parts)
+            and uncovered_incremental_milestone_small_parts
+        ):
+            missing.append("incremental_milestones_semantically_cover_small_parts")
         acceptance_tests = JobRunner._non_empty_items(prd.acceptance_tests)
         acceptance_test_small_part_coverage = JobRunner._semantic_item_coverage(
             small_parts,
@@ -3313,6 +3432,15 @@ class JobRunner:
             "incremental_milestone_count": len(incremental_milestones),
             "incremental_milestones_cover_small_parts": (
                 missing_incremental_milestone_count == 0
+            ),
+            "incremental_milestones_semantically_cover_small_parts": (
+                not uncovered_incremental_milestone_small_parts
+            ),
+            "incremental_milestone_small_part_coverage": (
+                incremental_milestone_small_part_coverage
+            ),
+            "uncovered_incremental_milestone_small_parts": (
+                uncovered_incremental_milestone_small_parts
             ),
             "missing_incremental_milestone_count": missing_incremental_milestone_count,
             "required_incremental_milestone_count": len(small_parts),
