@@ -3300,7 +3300,7 @@ def test_task_graph_validation_requires_owner_target_files_for_prd_artifacts() -
     assert validation["assigned_required_artifact_count"] == 2
     assert validation["unassigned_required_artifacts"] == []
     assert validation["unowned_required_artifacts"] == [
-        {"path": "feature.py", "expected_roles": ["implementer", "scaffold"]},
+        {"path": "feature.py", "expected_roles": ["implementer"]},
         {"path": "tests/test_feature.py", "expected_roles": ["test_writer"]},
     ]
     error_types = {item["type"] for item in validation["errors"]}
@@ -3362,12 +3362,78 @@ def test_task_graph_validation_rejects_role_mismatched_target_files() -> None:
             "task_id": "tests",
             "role": "test_writer",
             "path": "feature.py",
-            "expected_roles": ["implementer", "scaffold"],
+            "expected_roles": ["implementer"],
         },
     ]
     error_types = {item["type"] for item in validation["errors"]}
     assert "role_mismatched_target_files" in error_types
     assert "unowned_required_artifacts" in error_types
+
+
+def test_task_graph_validation_rejects_scaffold_for_app_source_artifacts() -> None:
+    prd = PRD(
+        title="Auth API",
+        problem_statement="Need authentication endpoints",
+        smallest_working_core=["Expose login endpoint"],
+        small_parts=["Create auth backend module"],
+        incremental_milestones=["Auth module exists"],
+        acceptance_tests=["Auth login endpoint validates credentials"],
+        definition_of_done=["All tests pass"],
+        required_artifacts=["backend/auth.py", "tests/test_auth.py"],
+    )
+    task_graph = TaskGraph(
+        goal="Build auth API",
+        tasks=[
+            PlannedTask(
+                id="auth-scaffold",
+                title="Auth backend scaffold",
+                description="Create the auth backend module.",
+                role="scaffold",
+                acceptance_criteria=["Auth login endpoint validates credentials"],
+                target_files=["backend/auth.py"],
+                required_artifacts=["backend/auth.py"],
+            ),
+            PlannedTask(
+                id="auth-tests",
+                title="Test auth backend",
+                description="Add focused auth backend tests.",
+                role="test_writer",
+                depends_on=["auth-scaffold"],
+                acceptance_criteria=["Auth login endpoint is covered"],
+                target_files=["tests/test_auth.py"],
+                required_artifacts=["tests/test_auth.py"],
+            ),
+        ],
+    )
+
+    validation = JobRunner._build_task_graph_validation(
+        task_graph,
+        prd=prd,
+        require_acceptance_criteria=True,
+        require_task_artifacts=True,
+    )
+
+    assert validation["valid"] is False
+    assert validation["role_mismatched_target_files"] == [
+        {
+            "task_id": "auth-scaffold",
+            "role": "scaffold",
+            "path": "backend/auth.py",
+            "expected_roles": ["implementer"],
+        }
+    ]
+    assert validation["role_mismatched_required_artifacts"] == [
+        {
+            "task_id": "auth-scaffold",
+            "role": "scaffold",
+            "path": "backend/auth.py",
+            "expected_roles": ["implementer"],
+        }
+    ]
+    assert {
+        "role_mismatched_target_files",
+        "role_mismatched_required_artifacts",
+    }.issubset({item["type"] for item in validation["errors"]})
 
 
 def test_task_graph_validation_attempt_preserves_artifact_role_details(
@@ -3449,11 +3515,11 @@ def test_task_graph_validation_attempt_preserves_artifact_role_details(
             "task_id": "tests",
             "role": "test_writer",
             "path": "feature.py",
-            "expected_roles": ["implementer", "scaffold"],
+            "expected_roles": ["implementer"],
         },
     ]
     assert attempt["unowned_required_artifacts"] == [
-        {"path": "feature.py", "expected_roles": ["implementer", "scaffold"]},
+        {"path": "feature.py", "expected_roles": ["implementer"]},
         {"path": "tests/test_feature.py", "expected_roles": ["test_writer"]},
     ]
     assert (
@@ -3506,7 +3572,7 @@ def test_task_graph_validation_rejects_role_mismatched_required_artifacts() -> N
             "task_id": "tests",
             "role": "test_writer",
             "path": "feature.py",
-            "expected_roles": ["implementer", "scaffold"],
+            "expected_roles": ["implementer"],
         },
     ]
     assert "role_mismatched_required_artifacts" in {

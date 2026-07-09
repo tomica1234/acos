@@ -4263,7 +4263,9 @@ class JobRunner:
             if path in JobRunner.PROJECT_SETUP_REQUIRED_ARTIFACTS:
                 return {"scaffold", "test_writer"}
             return set(JobRunner.TEST_TASK_ROLES)
-        return set(JobRunner.IMPLEMENTATION_TASK_ROLES)
+        if path in JobRunner.PROJECT_SETUP_REQUIRED_ARTIFACTS:
+            return set(JobRunner.IMPLEMENTATION_TASK_ROLES)
+        return {"implementer"}
 
     @classmethod
     def _semantic_item_coverage(
