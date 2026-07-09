@@ -8464,6 +8464,60 @@ def test_prd_quality_rejects_acceptance_tests_that_restate_work_items() -> None:
     ]
 
 
+def test_prd_quality_rejects_generic_tests_pass_acceptance_tests() -> None:
+    prd = PRD(
+        title="Feature",
+        problem_statement="Need feature",
+        smallest_working_core=["Expose a feature module"],
+        small_parts=["Create backend feature module"],
+        incremental_milestones=["Module exists"],
+        acceptance_tests=["All tests pass"],
+        definition_of_done=["All tests pass"],
+        required_artifacts=["backend/main.py", "tests/test_feature.py"],
+    )
+
+    report = JobRunner._build_prd_quality_report(prd)
+
+    assert report["passed"] is False
+    assert report["missing"] == [
+        "acceptance_tests_semantically_cover_small_parts",
+        "acceptance_tests_observable",
+    ]
+    assert report["acceptance_tests_observable"] is False
+    assert report["non_observable_acceptance_tests"] == [
+        {
+            "acceptance_test_index": 1,
+            "acceptance_test": "All tests pass",
+        }
+    ]
+
+
+def test_prd_quality_rejects_generic_feature_works_acceptance_tests() -> None:
+    prd = PRD(
+        title="Feature",
+        problem_statement="Need feature",
+        smallest_working_core=["Expose a feature module"],
+        small_parts=["Create feature module"],
+        incremental_milestones=["Module exists"],
+        acceptance_tests=["Feature works"],
+        definition_of_done=["All tests pass"],
+        required_artifacts=["backend/main.py", "tests/test_feature.py"],
+    )
+
+    report = JobRunner._build_prd_quality_report(prd)
+
+    assert report["passed"] is False
+    assert report["missing"] == ["acceptance_tests_observable"]
+    assert report["acceptance_tests_semantically_cover_small_parts"] is True
+    assert report["acceptance_tests_observable"] is False
+    assert report["non_observable_acceptance_tests"] == [
+        {
+            "acceptance_test_index": 1,
+            "acceptance_test": "Feature works",
+        }
+    ]
+
+
 def test_prd_quality_requires_incremental_milestones_for_each_small_part() -> None:
     prd = PRD(
         title="Feature",

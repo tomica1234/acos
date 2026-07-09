@@ -2837,6 +2837,8 @@ class JobRunner:
         if re.search(r"\b(get|post|put|patch|delete)\s+/", lowered):
             return True
         tokens = set(re.findall(r"[a-z0-9_]+", lowered))
+        if JobRunner._looks_like_generic_acceptance_test(tokens):
+            return False
         observable_tokens = {
             "accepts",
             "assert",
@@ -2888,6 +2890,41 @@ class JobRunner:
         if tokens & observable_tokens:
             return True
         return False
+
+    @staticmethod
+    def _looks_like_generic_acceptance_test(tokens: set[str]) -> bool:
+        if not tokens:
+            return True
+        generic_tokens = {
+            "all",
+            "app",
+            "application",
+            "as",
+            "automated",
+            "behavior",
+            "behaviour",
+            "check",
+            "checks",
+            "correctly",
+            "expected",
+            "feature",
+            "generated",
+            "it",
+            "module",
+            "pass",
+            "passes",
+            "passing",
+            "properly",
+            "screen",
+            "service",
+            "system",
+            "test",
+            "tests",
+            "work",
+            "working",
+            "works",
+        }
+        return tokens <= generic_tokens
 
     @staticmethod
     def _prd_quality_repair_logs(prd: PRD, report: dict[str, Any]) -> list[str]:
