@@ -272,6 +272,22 @@ def test_test_patch_quality_rejects_frontend_comment_only_expectation() -> None:
         ensure_test_patch_quality([patch], role="test_writer")
 
 
+def test_test_patch_quality_rejects_frontend_inline_comment_only_expectation() -> None:
+    patch = FilePatch(
+        path="frontend/test/project_scaffold.test.tsx",
+        operation="create",
+        content=(
+            "import { test } from 'vitest'\n\n"
+            "test('loads project scaffold', () => {\n"
+            "  renderProjectScaffold() // expect(label).toContain('project')\n"
+            "})\n"
+        ),
+    )
+
+    with pytest.raises(QualityGateError, match="test_writer attempted to weaken tests"):
+        ensure_test_patch_quality([patch], role="test_writer")
+
+
 def test_test_patch_quality_rejects_one_frontend_test_without_assertion() -> None:
     patch = FilePatch(
         path="frontend/test/project_scaffold.test.tsx",
@@ -486,6 +502,33 @@ def test_test_patch_quality_rejects_python_comment_only_assertion() -> None:
 
     with pytest.raises(QualityGateError, match="test_writer attempted to weaken tests"):
         ensure_test_patch_quality([patch], role="test_writer")
+
+
+def test_test_patch_quality_rejects_python_inline_comment_only_assertion() -> None:
+    patch = FilePatch(
+        path="tests/test_feature.py",
+        operation="create",
+        content=(
+            "def test_feature() -> None:\n"
+            "    build_feature()  # assert build_feature().status == 'ready'\n"
+        ),
+    )
+
+    with pytest.raises(QualityGateError, match="test_writer attempted to weaken tests"):
+        ensure_test_patch_quality([patch], role="test_writer")
+
+
+def test_test_patch_quality_allows_assertions_with_trailing_comments() -> None:
+    patch = FilePatch(
+        path="tests/test_feature.py",
+        operation="create",
+        content=(
+            "def test_feature() -> None:\n"
+            "    assert build_feature().status == 'ready'  # verifies status\n"
+        ),
+    )
+
+    ensure_test_patch_quality([patch], role="test_writer")
 
 
 def test_test_patch_quality_rejects_one_python_test_without_assertion() -> None:

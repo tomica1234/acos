@@ -366,8 +366,8 @@ def _payload_introduces_test_case(payload: str) -> bool:
 
 
 def _line_has_test_assertion(line: str) -> bool:
-    stripped = line.strip()
-    if stripped.startswith(("#", "//", "/*", "*")):
+    stripped = _line_code_before_comment(line)
+    if not stripped:
         return False
     return any(
         re.search(pattern, stripped)
@@ -378,6 +378,28 @@ def _line_has_test_assertion(line: str) -> bool:
             r"\.\s*assert[A-Za-z_]*\s*\(",
         )
     )
+
+
+def _line_code_before_comment(line: str) -> str:
+    stripped = line.strip()
+    if stripped.startswith(("#", "//", "/*", "*")):
+        return ""
+    comment_start: int | None = None
+    for marker in ("#", "//", "/*"):
+        search_from = 0
+        while True:
+            index = stripped.find(marker, search_from)
+            if index == -1:
+                break
+            if index == 0 or stripped[index - 1].isspace():
+                comment_start = (
+                    index if comment_start is None else min(comment_start, index)
+                )
+                break
+            search_from = index + len(marker)
+    if comment_start is None:
+        return stripped
+    return stripped[:comment_start].rstrip()
 
 
 def _python_payload_has_vacuous_assertion(payload: str) -> bool:
