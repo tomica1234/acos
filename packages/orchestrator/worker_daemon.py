@@ -5,6 +5,7 @@ from __future__ import annotations
 import time
 from dataclasses import dataclass, field
 
+from packages.orchestrator.job_constraints import apply_strict_job_constraints
 from packages.orchestrator.job_runner import JobRunner
 from packages.orchestrator.job_store import InMemoryJobStore
 from packages.orchestrator.leases import LeaseManager
@@ -60,6 +61,7 @@ class WorkerDaemon:
         return not self.is_settled_status(record.status)
 
     def normalize_before_processing(self, record: JobRecord) -> JobRecord:
+        apply_strict_job_constraints(record)
         if is_recoverable_status(record.status):
             record.status = JobStatus.RECOVERING
             record.history.append(JobStatus.RECOVERING)
