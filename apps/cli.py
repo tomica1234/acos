@@ -441,6 +441,10 @@ def build_demo_runner(config_dir: str | Path, workspace: str | Path) -> tuple[Jo
         agents_path=config_path / "agents.yaml",
         routing_path=config_path / "model_routing.yaml",
     )
+    demo_acceptance = (
+        "Running pytest confirms the feature.add sum helper in feature.py returns "
+        "two integers added together."
+    )
     scenario = {
         "pm": PRD(
             title="Demo Feature",
@@ -449,6 +453,12 @@ def build_demo_runner(config_dir: str | Path, workspace: str | Path) -> tuple[Jo
             goals=["Provide a correct add helper"],
             constraints=["Use deterministic tests"],
             success_criteria=["pytest passes"],
+            smallest_working_core=["Implement feature.add and validate it with pytest"],
+            small_parts=["Implement feature.add sum helper in feature.py"],
+            incremental_milestones=["feature.py add helper is implemented"],
+            acceptance_tests=[demo_acceptance],
+            definition_of_done=["The generated pytest suite passes"],
+            required_artifacts=["feature.py", "tests/test_feature.py"],
         ).model_dump(),
         "architect": ArchitecturePlan(
             summary="Use a single module plus pytest coverage.",
@@ -463,9 +473,22 @@ def build_demo_runner(config_dir: str | Path, workspace: str | Path) -> tuple[Jo
                 PlannedTask(
                     id="task-1",
                     title="Implement add helper",
-                    description="Create a tiny function and test.",
+                    description="Create feature.add with correct integer addition.",
                     role="implementer",
-                )
+                    acceptance_criteria=[demo_acceptance],
+                    target_files=["feature.py"],
+                    required_artifacts=["feature.py"],
+                ),
+                PlannedTask(
+                    id="task-1-tests",
+                    title="Test add helper",
+                    description="Add pytest coverage for feature.add.",
+                    role="test_writer",
+                    depends_on=["task-1"],
+                    acceptance_criteria=[demo_acceptance],
+                    target_files=["tests/test_feature.py"],
+                    required_artifacts=["tests/test_feature.py"],
+                ),
             ],
             notes=["This is a local demo path"],
         ).model_dump(),
@@ -493,16 +516,40 @@ def build_demo_runner(config_dir: str | Path, workspace: str | Path) -> tuple[Jo
             ],
             test_strategy=["Validate positive integer addition"],
         ).model_dump(),
-        "reviewer": ReviewResult(
-            decision=ReviewDecision.APPROVE,
-            summary="Implementation is acceptable for demo purposes.",
-            findings=[],
-        ).model_dump(),
-        "security_reviewer": SecurityReviewResult(
-            decision=ReviewDecision.APPROVE,
-            summary="No security-sensitive behavior in demo scope.",
-            findings=[],
-        ).model_dump(),
+        "reviewer": [
+            ReviewResult(
+                decision=ReviewDecision.APPROVE,
+                summary="Implementation is acceptable for demo purposes.",
+                findings=[],
+            ).model_dump(),
+            ReviewResult(
+                decision=ReviewDecision.APPROVE,
+                summary="Tests are acceptable for demo purposes.",
+                findings=[],
+            ).model_dump(),
+            ReviewResult(
+                decision=ReviewDecision.APPROVE,
+                summary="Final demo changes are acceptable.",
+                findings=[],
+            ).model_dump(),
+        ],
+        "security_reviewer": [
+            SecurityReviewResult(
+                decision=ReviewDecision.APPROVE,
+                summary="No security-sensitive behavior in demo scope.",
+                findings=[],
+            ).model_dump(),
+            SecurityReviewResult(
+                decision=ReviewDecision.APPROVE,
+                summary="No security-sensitive behavior in demo tests.",
+                findings=[],
+            ).model_dump(),
+            SecurityReviewResult(
+                decision=ReviewDecision.APPROVE,
+                summary="No security-sensitive behavior in final demo changes.",
+                findings=[],
+            ).model_dump(),
+        ],
         "fixer": FixResult(
             status=FixStatus.FIXED,
             summary="Correct the arithmetic bug.",
@@ -2519,6 +2566,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         runner = load_runner_for_workspace(config_dir=args.config_dir, workspace=args.workspace)
         if args.jobs_command == "submit":
             spec = load_job_spec_from_file(args.file)
+            apply_strict_job_constraints(spec)
             record = runner.submit(spec)
             dump_yaml({"job": serialize_job(record)})
             return 0
@@ -2689,6 +2737,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             repo_path=str(Path(args.workspace).resolve()),
             target_branch="acos/demo",
         )
+        apply_strict_job_constraints(spec)
         record = runner.run_job(spec)
         print(record.model_dump_json(indent=2))
         print(environment.notify_server.notifications)

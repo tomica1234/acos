@@ -853,6 +853,88 @@ def test_large_autonomous_overrides_disabled_quality_gates() -> None:
     assert constraints["test_timeout_seconds"] == 1200
 
 
+def test_jobs_submit_applies_strict_quality_gates(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    workspace = tmp_path / "workspace"
+    job_file = tmp_path / "job.yaml"
+    job_file.write_text(
+        yaml.safe_dump(
+            {
+                "requester_input": "Queue a normal job.",
+                "repo_path": str(workspace),
+                "target_branch": "acos/queued-job",
+                "metadata": {
+                    "constraints": {
+                        key: False for key in STRICT_JOB_CONSTRAINTS
+                    }
+                },
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+
+    class DummyRunner:
+        def submit(self, spec: JobSpec) -> JobRecord:
+            return JobRecord(job_id=spec.job_id, spec=spec, status=JobStatus.QUEUED)
+
+    def fake_build_default_runner(config_dir: str | Path, workspace_root: str | Path):
+        return DummyRunner(), None
+
+    monkeypatch.setattr("apps.cli.build_default_runner", fake_build_default_runner)
+
+    exit_code = main(
+        [
+            "jobs",
+            "submit",
+            "--config-dir",
+            str(config_dir()),
+            "--workspace",
+            str(workspace),
+            "--file",
+            str(job_file),
+        ]
+    )
+
+    assert exit_code == 0
+    payload = yaml.safe_load(capsys.readouterr().out)
+    constraints = payload["job"]["spec"]["metadata"]["constraints"]
+    for key, value in STRICT_JOB_CONSTRAINTS.items():
+        assert constraints[key] is value
+    assert constraints["test_timeout_seconds"] == 1200
+
+
+def test_run_demo_uses_strict_ready_planning_outputs(
+    tmp_path: Path,
+    capsys,
+) -> None:
+    workspace = tmp_path / "demo-workspace"
+
+    exit_code = main(
+        [
+            "run-demo",
+            "--config-dir",
+            str(config_dir()),
+            "--workspace",
+            str(workspace),
+        ]
+    )
+
+    assert exit_code == 0
+    payload, _end_index = json.JSONDecoder().raw_decode(capsys.readouterr().out)
+    assert payload["status"] == JobStatus.DONE.value
+    constraints = payload["spec"]["metadata"]["constraints"]
+    for key, value in STRICT_JOB_CONSTRAINTS.items():
+        assert constraints[key] is value
+    assert constraints["test_timeout_seconds"] == 1200
+    assert payload["outputs"]["prd_quality"]["passed"] is True
+    assert payload["outputs"]["task_graph_validation"]["valid"] is True
+    assert payload["outputs"]["completion_integrity"]["passed"] is True
+
+
 def test_run_autonomous_starts_large_job_and_continues(
     tmp_path: Path,
     monkeypatch,
