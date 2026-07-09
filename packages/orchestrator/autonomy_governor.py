@@ -46,6 +46,13 @@ class RecoveryDecision:
 class AutonomyGovernor:
     """Choose recovery strategy without returning to a human by default."""
 
+    STRICT_PLANNING_CONSTRAINTS = {
+        "require_prd_quality": True,
+        "require_task_acceptance_criteria": True,
+        "require_task_artifacts": True,
+        "require_completion_integrity": True,
+    }
+
     def decide(self, record: JobRecord, summary: dict[str, Any]) -> RecoveryDecision:
         last_error = str(record.last_error or summary.get("last_error") or "")
         if self.is_policy_hard_stop(last_error):
@@ -64,6 +71,9 @@ class AutonomyGovernor:
             if isinstance(recovery, dict):
                 constraints = dict(recovery.get("constraints") or {})
                 strategy = str(recovery.get("strategy") or constraints.get("recovery_strategy"))
+                next_actor = recovery.get("next_actor")
+                if not isinstance(next_actor, str) or not next_actor.strip():
+                    next_actor = self._next_actor_for_strategy(strategy)
                 return RecoveryDecision(
                     action="continue",
                     strategy=strategy,
@@ -71,7 +81,7 @@ class AutonomyGovernor:
                     can_apply_automatically=True,
                     constraints=constraints,
                     summary="Recoverable failure; ACOS will change strategy and continue.",
-                    next_actor=self._next_actor_for_strategy(strategy),
+                    next_actor=next_actor,
                 )
 
         resume = summary.get("resume")
@@ -103,12 +113,11 @@ class AutonomyGovernor:
                     reason=str(resume.get("reason") or "planning_quality_repair"),
                     can_apply_automatically=True,
                     constraints={
+                        **self.STRICT_PLANNING_CONSTRAINTS,
                         "recovery_mode": "planning_repair",
                         "recovery_strategy": "planning_repair_strategy_change",
                         "pm_strategy_change": True,
                         "pm_strategy": "planning_repair_strategy_change",
-                        "require_prd_quality": True,
-                        "require_task_acceptance_criteria": True,
                     },
                     summary="Planning quality is recoverable; ACOS will revise assumptions and continue.",
                     next_actor="pm",

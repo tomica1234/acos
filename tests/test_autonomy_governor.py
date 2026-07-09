@@ -74,6 +74,67 @@ def test_governor_continues_completion_integrity_failure(tmp_path: Path) -> None
     assert decision.strategy == "completion_audit"
 
 
+def test_governor_enables_strict_gates_for_prd_quality_recovery(
+    tmp_path: Path,
+) -> None:
+    record = _record(
+        tmp_path,
+        status=JobStatus.BLOCKED,
+        last_error="prd_quality_gate_failed:acceptance_tests",
+    )
+    record.outputs["prd_quality"] = {
+        "passed": False,
+        "missing": ["acceptance_tests"],
+        "warnings": [],
+    }
+
+    summary = summarize_job_progress(record)
+    decision = AutonomyGovernor().decide(record, summary)
+    plan = apply_recovery_plan(record, decision)
+
+    assert decision.strategy == "planning_repair_strategy_change"
+    assert decision.next_actor == "pm"
+    assert decision.constraints.items() >= {
+        "require_prd_quality": True,
+        "require_task_acceptance_criteria": True,
+        "require_task_artifacts": True,
+        "require_completion_integrity": True,
+    }.items()
+    assert plan["next_actor"] == "pm"
+    assert record.spec.metadata["constraints"].items() >= {
+        "require_prd_quality": True,
+        "require_task_acceptance_criteria": True,
+        "require_task_artifacts": True,
+        "require_completion_integrity": True,
+    }.items()
+
+
+def test_governor_enables_strict_gates_for_task_graph_recovery(
+    tmp_path: Path,
+) -> None:
+    record = _record(
+        tmp_path,
+        status=JobStatus.BLOCKED,
+        last_error="invalid_task_graph",
+    )
+    record.outputs["task_graph_validation"] = {
+        "valid": False,
+        "errors": [{"type": "missing_task_artifacts"}],
+    }
+
+    summary = summarize_job_progress(record)
+    decision = AutonomyGovernor().decide(record, summary)
+
+    assert decision.strategy == "task_graph_replanning"
+    assert decision.next_actor == "planner"
+    assert decision.constraints.items() >= {
+        "require_prd_quality": True,
+        "require_task_acceptance_criteria": True,
+        "require_task_artifacts": True,
+        "require_completion_integrity": True,
+    }.items()
+
+
 def test_policy_hard_stop_is_the_only_human_inspection_path(tmp_path: Path) -> None:
     record = _record(
         tmp_path,

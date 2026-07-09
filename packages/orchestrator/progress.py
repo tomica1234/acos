@@ -854,6 +854,12 @@ def _recommended_recovery(
     failed_task_id: str | None,
     failed_stage: Any,
 ) -> dict[str, Any] | None:
+    strict_planning_constraints = {
+        "require_prd_quality": True,
+        "require_task_acceptance_criteria": True,
+        "require_task_artifacts": True,
+        "require_completion_integrity": True,
+    }
     recovery_by_classification: dict[str, dict[str, Any]] = {
         "recurring_stage_failure": {
             "strategy": "split_or_clarify_task",
@@ -862,9 +868,9 @@ def _recommended_recovery(
             ),
             "preserve_failure_counts_for_model_escalation": True,
             "constraints": {
+                **strict_planning_constraints,
                 "recovery_mode": "recurring_failure",
                 "recovery_strategy": "split_or_clarify_task",
-                "require_task_acceptance_criteria": True,
                 "stage_review": True,
             },
         },
@@ -917,9 +923,9 @@ def _recommended_recovery(
             "reason": "the implementer failed before producing a safe completed change",
             "preserve_failure_counts_for_model_escalation": True,
             "constraints": {
+                **strict_planning_constraints,
                 "recovery_mode": "implementation_failure",
                 "recovery_strategy": "replan_current_task",
-                "require_task_acceptance_criteria": True,
                 "stage_review": True,
             },
         },
@@ -928,10 +934,9 @@ def _recommended_recovery(
             "reason": "the implementer reported the task is blocked",
             "preserve_failure_counts_for_model_escalation": False,
             "constraints": {
+                **strict_planning_constraints,
                 "recovery_mode": "implementation_blocked",
                 "recovery_strategy": "split_or_clarify_task",
-                "require_prd_quality": True,
-                "require_task_acceptance_criteria": True,
             },
         },
         "test_writer_failed": {
@@ -949,6 +954,8 @@ def _recommended_recovery(
             "reason": "the test writer reported the test task is blocked",
             "preserve_failure_counts_for_model_escalation": False,
             "constraints": {
+                "require_task_artifacts": True,
+                "require_completion_integrity": True,
                 "recovery_mode": "test_generation_blocked",
                 "recovery_strategy": "split_or_clarify_tests",
                 "require_task_acceptance_criteria": True,
@@ -972,20 +979,22 @@ def _recommended_recovery(
             "reason": "PRD quality gate failed and needs autonomous PM refinement",
             "preserve_failure_counts_for_model_escalation": False,
             "constraints": {
+                **strict_planning_constraints,
                 "recovery_mode": "prd_quality_repair",
                 "recovery_strategy": "planning_repair_strategy_change",
-                "require_prd_quality": True,
             },
+            "next_actor": "pm",
         },
         "invalid_task_graph": {
             "strategy": "task_graph_replanning",
             "reason": "task graph validation failed and needs autonomous replanning",
             "preserve_failure_counts_for_model_escalation": False,
             "constraints": {
+                **strict_planning_constraints,
                 "recovery_mode": "task_graph_replanning",
                 "recovery_strategy": "task_graph_replanning",
-                "require_task_acceptance_criteria": True,
             },
+            "next_actor": "planner",
         },
         "autonomous_stage_limit_reached": {
             "strategy": "raise_stage_limit",

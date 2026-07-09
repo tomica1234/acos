@@ -3926,7 +3926,10 @@ def test_continue_job_can_force_recurring_failure_recovery_with_blocked_alias(
     assert captured["constraints_before_resume"] == {
         "recovery_mode": "recurring_failure",
         "recovery_strategy": "split_or_clarify_task",
+        "require_prd_quality": True,
         "require_task_acceptance_criteria": True,
+        "require_task_artifacts": True,
+        "require_completion_integrity": True,
         "stage_review": True,
         "recovery_reason": "the same task failed again after a previous autonomous recovery",
         "recovery_failed_task_id": "core",
@@ -4002,7 +4005,10 @@ def test_continue_job_applies_recovery_recommendation_for_auto_continue_failure(
     assert captured["constraints_before_resume"] == {
         "recovery_mode": "implementation_failure",
         "recovery_strategy": "replan_current_task",
+        "require_prd_quality": True,
         "require_task_acceptance_criteria": True,
+        "require_task_artifacts": True,
+        "require_completion_integrity": True,
         "stage_review": True,
         "recovery_reason": "the implementer failed before producing a safe completed change",
         "recovery_failed_task_id": "core",

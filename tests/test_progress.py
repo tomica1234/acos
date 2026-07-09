@@ -1112,9 +1112,12 @@ def test_summarize_job_progress_detects_recurring_failure_after_recovery(tmp_pat
         "split_or_clarify_task"
     )
     assert payload["failure_analysis"]["recommended_recovery"]["constraints"] == {
+        "require_prd_quality": True,
+        "require_task_acceptance_criteria": True,
+        "require_task_artifacts": True,
+        "require_completion_integrity": True,
         "recovery_mode": "recurring_failure",
         "recovery_strategy": "split_or_clarify_task",
-        "require_task_acceptance_criteria": True,
         "stage_review": True,
     }
     assert payload["resume"]["action"] == "split_or_clarify_task"
@@ -1129,9 +1132,12 @@ def test_summarize_job_progress_recommends_recovery_by_failure_type(tmp_path) ->
             "core",
             "replan_current_task",
             {
+                "require_prd_quality": True,
+                "require_task_acceptance_criteria": True,
+                "require_task_artifacts": True,
+                "require_completion_integrity": True,
                 "recovery_mode": "implementation_failure",
                 "recovery_strategy": "replan_current_task",
-                "require_task_acceptance_criteria": True,
                 "stage_review": True,
             },
         ),
