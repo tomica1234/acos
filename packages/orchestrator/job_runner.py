@@ -6769,18 +6769,57 @@ class JobRunner:
         if not isinstance(stages, list):
             return []
         failed: list[dict[str, Any]] = []
-        for stage in stages:
-            if not isinstance(stage, dict) or stage.get("status") != "failed_for_recovery":
+        later_passed_task_ids: set[str] = set()
+        for stage in reversed(stages):
+            if not isinstance(stage, dict):
                 continue
             task = stage.get("task")
+            task_id = task.get("id") if isinstance(task, dict) else None
+            status = str(stage.get("status") or "").strip().lower()
+            test_run = stage.get("test_run")
+            test_success = test_run.get("success") if isinstance(test_run, dict) else None
+            post_review_test_run = stage.get("post_review_test_run")
+            post_review_success = (
+                post_review_test_run.get("success")
+                if isinstance(post_review_test_run, dict)
+                else None
+            )
+            failed_status = status in {"failed", "failed_for_recovery"}
+            if (
+                not failed_status
+                and (
+                    status == "passed"
+                    or (test_success is True and post_review_success is not False)
+                )
+            ):
+                if isinstance(task_id, str):
+                    later_passed_task_ids.add(task_id)
+                continue
+            stage_failed = (
+                failed_status
+                or test_success is False
+                or post_review_success is False
+            )
+            if not stage_failed:
+                continue
+            if isinstance(task_id, str) and task_id in later_passed_task_ids:
+                continue
+            failure_reason = stage.get("failure_reason")
+            if not isinstance(failure_reason, str) or not failure_reason.strip():
+                if post_review_success is False:
+                    failure_reason = "post_review_tests_failed"
+                elif test_success is False:
+                    failure_reason = "tests_failed"
+                else:
+                    failure_reason = "stage_failed"
             failed.append(
                 {
                     "stage": stage.get("stage"),
-                    "task_id": task.get("id") if isinstance(task, dict) else None,
-                    "failure_reason": stage.get("failure_reason"),
+                    "task_id": task_id,
+                    "failure_reason": failure_reason,
                 }
             )
-        return failed
+        return list(reversed(failed))
 
     @staticmethod
     def _stages_missing_test_patches(record: JobRecord) -> list[dict[str, Any]]:

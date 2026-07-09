@@ -4160,6 +4160,7 @@ def test_completion_integrity_fails_when_autonomous_stage_failed(
             "status": "failed_for_recovery",
             "failure_reason": "implementation_produced_no_changes",
             "task": {"id": "core", "role": "implementer"},
+            "test_run": {"success": True},
         }
     ]
     task_graph = TaskGraph(
@@ -4192,6 +4193,105 @@ def test_completion_integrity_fails_when_autonomous_stage_failed(
             "failure_reason": "implementation_produced_no_changes",
         }
     ]
+
+
+def test_completion_integrity_fails_when_stage_test_run_failed_without_status(
+    tmp_path: Path,
+) -> None:
+    store = InMemoryJobStore()
+    spec = JobSpec(
+        request_text="Create feature with tests",
+        repo_path=str(tmp_path),
+        target_branch="acos/completion-integrity-legacy-failed-stage",
+    )
+    record = store.create(spec)
+    record.completed_task_ids = ["core"]
+    record.outputs["autonomous_stages"] = [
+        {
+            "stage": 1,
+            "task": {"id": "core", "role": "implementer"},
+            "test_run": {"success": False},
+        }
+    ]
+    task_graph = TaskGraph(
+        goal="Build feature",
+        tasks=[
+            PlannedTask(
+                id="core",
+                title="Core",
+                description="Build core",
+                role="implementer",
+            )
+        ],
+    )
+
+    report = JobRunner._build_completion_integrity_report(
+        record,
+        task_graph,
+        TestRunResult(success=True, executed_test_count=1),
+        require_completion_integrity=True,
+        require_test_evidence=False,
+        require_stage_test_patches=False,
+    )
+
+    assert report["passed"] is False
+    assert report["failure_reasons"] == ["failed_stages:1"]
+    assert report["failed_stages"] == [
+        {
+            "stage": 1,
+            "task_id": "core",
+            "failure_reason": "tests_failed",
+        }
+    ]
+
+
+def test_completion_integrity_allows_superseded_failed_stage_after_later_pass(
+    tmp_path: Path,
+) -> None:
+    store = InMemoryJobStore()
+    spec = JobSpec(
+        request_text="Create feature with tests",
+        repo_path=str(tmp_path),
+        target_branch="acos/completion-integrity-superseded-stage",
+    )
+    record = store.create(spec)
+    record.completed_task_ids = ["core"]
+    record.outputs["autonomous_stages"] = [
+        {
+            "stage": 1,
+            "task": {"id": "core", "role": "implementer"},
+            "test_run": {"success": False},
+        },
+        {
+            "stage": 2,
+            "task": {"id": "core", "role": "implementer"},
+            "test_run": {"success": True},
+        },
+    ]
+    task_graph = TaskGraph(
+        goal="Build feature",
+        tasks=[
+            PlannedTask(
+                id="core",
+                title="Core",
+                description="Build core",
+                role="implementer",
+            )
+        ],
+    )
+
+    report = JobRunner._build_completion_integrity_report(
+        record,
+        task_graph,
+        TestRunResult(success=True, executed_test_count=1),
+        require_completion_integrity=True,
+        require_test_evidence=False,
+        require_stage_test_patches=False,
+    )
+
+    assert report["passed"] is True
+    assert report["failure_reasons"] == []
+    assert report["failed_stages"] == []
 
 
 def test_completion_integrity_report_records_failed_test_reason(
