@@ -338,17 +338,22 @@ def _python_call_is_assertion(node: ast.AST) -> bool:
 
 
 def _javascript_payload_has_test_case_without_assertion(payload: str) -> bool:
-    test_block = re.compile(
+    test_blocks = (
         r"\b(?:it|test)(?:\s*\.\s*[A-Za-z_$][\w$]*)*\s*"
         r"\([^,{]*,\s*(?:async\s*)?(?:\([^)]*\)|[A-Za-z_$][\w$]*)\s*=>\s*\{"
         r"(?P<body>.*?)"
         r"^\s*\}\s*\)",
-        re.MULTILINE | re.DOTALL,
+        r"\b(?:it|test)(?:\s*\.\s*[A-Za-z_$][\w$]*)*\s*"
+        r"\([^,{]*,\s*(?:async\s*)?function(?:\s+[A-Za-z_$][\w$]*)?\s*\([^)]*\)\s*\{"
+        r"(?P<body>.*?)"
+        r"^\s*\}\s*\)",
     )
-    for match in test_block.finditer(payload):
-        body = match.group("body")
-        if not any(_line_has_test_assertion(line) for line in body.splitlines()):
-            return True
+    for pattern in test_blocks:
+        test_block = re.compile(pattern, re.MULTILINE | re.DOTALL)
+        for match in test_block.finditer(payload):
+            body = match.group("body")
+            if not any(_line_has_test_assertion(line) for line in body.splitlines()):
+                return True
     return False
 
 

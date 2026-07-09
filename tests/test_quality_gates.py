@@ -275,6 +275,42 @@ def test_test_patch_quality_rejects_one_frontend_test_without_assertion() -> Non
         ensure_test_patch_quality([patch], role="test_writer")
 
 
+def test_test_patch_quality_rejects_frontend_function_test_without_assertion() -> None:
+    patch = FilePatch(
+        path="frontend/test/project_scaffold.test.tsx",
+        operation="create",
+        content=(
+            "import { expect, test } from 'vitest'\n\n"
+            "test('checks scaffold label', () => {\n"
+            "  const label = renderProjectScaffold()\n"
+            "  expect(label).toContain('project')\n"
+            "})\n\n"
+            "test('loads project scaffold', function () {\n"
+            "  renderProjectScaffold()\n"
+            "})\n"
+        ),
+    )
+
+    with pytest.raises(QualityGateError, match="test_writer attempted to weaken tests"):
+        ensure_test_patch_quality([patch], role="test_writer")
+
+
+def test_test_patch_quality_allows_frontend_function_test_with_expectation() -> None:
+    patch = FilePatch(
+        path="frontend/test/project_scaffold.test.tsx",
+        operation="create",
+        content=(
+            "import { expect, test } from 'vitest'\n\n"
+            "test('loads project scaffold', function () {\n"
+            "  const label = renderProjectScaffold()\n"
+            "  expect(label).toContain('project')\n"
+            "})\n"
+        ),
+    )
+
+    ensure_test_patch_quality([patch], role="test_writer")
+
+
 def test_test_patch_quality_rejects_empty_test_file_create() -> None:
     patch = FilePatch(
         path="tests/test_project_setup.py",
