@@ -6619,6 +6619,8 @@ class JobRunner:
         task_graph: TaskGraph,
         test_result: TestRunResult,
     ) -> bool:
+        record.outputs["task_graph"] = task_graph.model_dump()
+        record.outputs["test_run"] = test_result.model_dump()
         if (
             not self._constraint_flag(record, "require_completion_integrity")
             and not self._constraint_flag(record, "require_test_evidence")

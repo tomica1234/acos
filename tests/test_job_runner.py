@@ -6,6 +6,7 @@ import pytest
 from packages.llm.errors import AdapterError, StructuredOutputError
 from packages.llm.registry import ModelRegistry
 from packages.mcp_client.fake import FakeMCPEnvironment
+from packages.orchestrator.completion_verifier import DefinitionOfDoneVerifier
 from packages.orchestrator.job_runner import JobRunner
 from packages.orchestrator.job_store import InMemoryJobStore
 from packages.orchestrator.policy import PolicyEngine
@@ -4261,6 +4262,78 @@ def test_completion_integrity_fails_when_autonomous_stage_failed(
             "failure_reason": "implementation_produced_no_changes",
         }
     ]
+
+
+def test_completion_integrity_uses_passed_task_graph_for_artifact_evidence(
+    tmp_path: Path,
+) -> None:
+    class SpyDefinitionOfDoneVerifier(DefinitionOfDoneVerifier):
+        seen_task_graph: dict | None = None
+        seen_test_run: dict | None = None
+
+        def verify(self, record: JobRecord):
+            self.seen_task_graph = record.outputs.get("task_graph")
+            self.seen_test_run = record.outputs.get("test_run")
+            return super().verify(record)
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    registry = ModelRegistry.from_paths(
+        provider_path=config_dir() / "model_providers.yaml",
+        agents_path=config_dir() / "agents.yaml",
+        routing_path=config_dir() / "model_routing.yaml",
+    )
+    policy = PolicyEngine.from_path(config_dir() / "policies.yaml")
+    environment = FakeMCPEnvironment(
+        workspace_root=workspace,
+        memory_db_path=workspace / ".memory.sqlite3",
+    )
+    runner = JobRunner(registry=registry, policy=policy, router=environment.build_router())
+    verifier = SpyDefinitionOfDoneVerifier()
+    runner.completion_verifier = verifier
+    record = runner.store.create(
+        JobSpec(
+            request_text="Create feature with required artifact",
+            repo_path=str(workspace),
+            target_branch="acos/completion-integrity-sync-task-graph",
+            metadata={
+                "constraints": {
+                    "require_completion_integrity": True,
+                    "require_test_evidence": True,
+                }
+            },
+        )
+    )
+    task_graph = TaskGraph(
+        goal="Build feature",
+        tasks=[
+            PlannedTask(
+                id="core",
+                title="Core",
+                description="Build core",
+                role="implementer",
+                target_files=["missing.py"],
+                required_artifacts=["missing.py"],
+            )
+        ],
+    )
+    test_result = TestRunResult(success=True, executed_test_count=1)
+    record.completed_task_ids = ["core"]
+    record.audit_events.append({"event": "verified"})
+    record.checkpoints.append({"kind": "stage"})
+
+    passed = runner._validate_completion_integrity(record, task_graph, test_result)
+
+    assert passed is False
+    assert verifier.seen_task_graph == task_graph.model_dump()
+    assert verifier.seen_test_run == test_result.model_dump()
+    report = record.outputs["completion_integrity"]
+    assert "required_artifact_missing:missing.py" in report["failure_reasons"]
+    assert "target_file_missing:missing.py" in report["failure_reasons"]
+    constraints = record.runtime_state["recovery_plan"]["constraints"]
+    assert constraints["required_artifacts"] == ["missing.py"]
+    assert constraints["target_files"] == ["missing.py"]
+    assert constraints["missing_artifacts"] == ["missing.py"]
 
 
 def test_completion_integrity_fails_when_stage_test_run_failed_without_status(
