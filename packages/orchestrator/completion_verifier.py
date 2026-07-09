@@ -33,14 +33,14 @@ class DefinitionOfDoneVerifier:
         for task_id in sorted(planned_ids - completed_ids):
             missing.append(f"planned_task_not_done:{task_id}")
 
-        for artifact in self._required_artifacts(outputs):
+        for artifact in self._required_artifacts(record):
             if invalid_artifact_paths([artifact]):
                 missing.append(f"required_artifact_invalid:{artifact}")
             elif self._artifact_is_non_file(record, artifact):
                 missing.append(f"required_artifact_non_file:{artifact}")
             elif not self._artifact_exists(record, artifact):
                 missing.append(f"required_artifact_missing:{artifact}")
-        for target in self._target_files(outputs):
+        for target in self._target_files(record):
             if invalid_artifact_paths([target]):
                 missing.append(f"target_file_invalid:{target}")
             elif self._artifact_is_non_file(record, target):
@@ -117,12 +117,32 @@ class DefinitionOfDoneVerifier:
         return False
 
     @staticmethod
-    def _required_artifacts(outputs: dict[str, Any]) -> set[str]:
-        return DefinitionOfDoneVerifier._collect_task_paths(outputs, "required_artifacts")
+    def _required_artifacts(record: JobRecord) -> set[str]:
+        paths = DefinitionOfDoneVerifier._collect_task_paths(
+            record.outputs,
+            "required_artifacts",
+        )
+        paths.update(
+            DefinitionOfDoneVerifier._collect_metadata_paths(
+                record,
+                "required_artifacts",
+                "source_required_artifacts",
+                "implementation_required_artifacts",
+                "test_required_artifacts",
+            )
+        )
+        return paths
 
     @staticmethod
-    def _target_files(outputs: dict[str, Any]) -> set[str]:
-        return DefinitionOfDoneVerifier._collect_task_paths(outputs, "target_files")
+    def _target_files(record: JobRecord) -> set[str]:
+        paths = DefinitionOfDoneVerifier._collect_task_paths(
+            record.outputs,
+            "target_files",
+        )
+        paths.update(
+            DefinitionOfDoneVerifier._collect_metadata_paths(record, "target_files")
+        )
+        return paths
 
     @staticmethod
     def _collect_task_paths(outputs: dict[str, Any], key: str) -> set[str]:
@@ -135,6 +155,27 @@ class DefinitionOfDoneVerifier:
             for path in task.get(key, []) or []:
                 if isinstance(path, str) and path.strip():
                     paths.add(path)
+        return paths
+
+    @staticmethod
+    def _collect_metadata_paths(record: JobRecord, *keys: str) -> set[str]:
+        metadata = record.spec.metadata if isinstance(record.spec.metadata, dict) else {}
+        candidates: list[Any] = []
+        for key in keys:
+            candidates.append(metadata.get(key))
+        constraints = metadata.get("constraints")
+        if isinstance(constraints, dict):
+            for key in keys:
+                candidates.append(constraints.get(key))
+
+        paths: set[str] = set()
+        for candidate in candidates:
+            if isinstance(candidate, str) and candidate.strip():
+                paths.add(candidate)
+            elif isinstance(candidate, list):
+                paths.update(
+                    item for item in candidate if isinstance(item, str) and item.strip()
+                )
         return paths
 
     @staticmethod

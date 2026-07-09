@@ -205,6 +205,67 @@ def test_completion_verifier_requires_requested_runtime_and_acceptance_evidence(
     assert "acceptance_checks_success" in result.missing_evidence
 
 
+def test_completion_verifier_requires_metadata_required_artifacts(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "app.py").write_text("VALUE = 1\n", encoding="utf-8")
+    record = _record(tmp_path, status=JobStatus.FINALIZING, error="")
+    record.spec.metadata["required_artifacts"] = ["src/app.py", "tests/test_app.py"]
+    record.spec.metadata["constraints"] = {"required_artifacts": ["README.md"]}
+    record.outputs["task_graph"] = {
+        "goal": "Build it",
+        "tasks": [
+            {
+                "id": "core",
+                "title": "Core",
+                "description": "Core",
+                "role": "implementer",
+            }
+        ],
+    }
+    record.completed_task_ids.append("core")
+    record.outputs["test_run"] = {"success": True}
+    record.audit_events.append({"event": "verified"})
+    record.checkpoints.append({"kind": "stage"})
+
+    result = DefinitionOfDoneVerifier().verify(record)
+
+    assert not result.passed
+    assert "required_artifact_missing:README.md" in result.missing_evidence
+    assert "required_artifact_missing:tests/test_app.py" in result.missing_evidence
+    assert "required_artifact_missing:src/app.py" not in result.missing_evidence
+
+
+def test_completion_verifier_requires_metadata_target_files(
+    tmp_path: Path,
+) -> None:
+    record = _record(tmp_path, status=JobStatus.FINALIZING, error="")
+    record.spec.metadata["target_files"] = ["src/app.py"]
+    record.spec.metadata["constraints"] = {"target_files": ["tests/test_app.py"]}
+    record.outputs["task_graph"] = {
+        "goal": "Build it",
+        "tasks": [
+            {
+                "id": "core",
+                "title": "Core",
+                "description": "Core",
+                "role": "implementer",
+            }
+        ],
+    }
+    record.completed_task_ids.append("core")
+    record.outputs["test_run"] = {"success": True}
+    record.audit_events.append({"event": "verified"})
+    record.checkpoints.append({"kind": "stage"})
+
+    result = DefinitionOfDoneVerifier().verify(record)
+
+    assert not result.passed
+    assert "target_file_missing:src/app.py" in result.missing_evidence
+    assert "target_file_missing:tests/test_app.py" in result.missing_evidence
+
+
 def test_completion_verifier_rejects_invalid_and_non_file_artifacts(
     tmp_path: Path,
 ) -> None:
