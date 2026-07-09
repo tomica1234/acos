@@ -2488,6 +2488,89 @@ def test_task_graph_enrichment_matches_prd_artifacts_to_multi_tasks(
     assert "tests/test_vocab_app.py" in validation["unassigned_required_artifacts"]
 
 
+def test_task_graph_enrichment_fills_test_writer_prd_artifacts(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    registry = ModelRegistry.from_paths(
+        provider_path=config_dir() / "model_providers.yaml",
+        agents_path=config_dir() / "agents.yaml",
+        routing_path=config_dir() / "model_routing.yaml",
+    )
+    policy = PolicyEngine.from_path(config_dir() / "policies.yaml")
+    environment = FakeMCPEnvironment(
+        workspace_root=workspace,
+        memory_db_path=workspace / ".memory.sqlite3",
+    )
+    runner = JobRunner(registry=registry, policy=policy, router=environment.build_router())
+    record = runner.store.create(
+        JobSpec(
+            request_text="Create feature with tests",
+            repo_path=str(workspace),
+            target_branch="acos/test-writer-artifact-enrichment",
+        )
+    )
+    prd = PRD(
+        title="Feature",
+        problem_statement="Need feature",
+        smallest_working_core=["Expose VALUE"],
+        small_parts=["Create feature module"],
+        incremental_milestones=["Module exists"],
+        acceptance_tests=["VALUE equals 1"],
+        definition_of_done=["All generated tests pass"],
+        required_artifacts=["feature.py", "tests/test_feature.py"],
+    )
+    task_graph = TaskGraph(
+        goal="Build feature",
+        tasks=[
+            PlannedTask(
+                id="core",
+                title="Build core",
+                description="Create feature module",
+                role="implementer",
+                acceptance_criteria=["VALUE equals 1"],
+                target_files=["feature.py"],
+                required_artifacts=["feature.py"],
+            ),
+            PlannedTask(
+                id="tests",
+                title="Test core",
+                description="Add focused regression tests for VALUE.",
+                role="test_writer",
+                depends_on=["core"],
+            ),
+        ],
+    )
+
+    refined = runner._enrich_task_graph_acceptance_criteria(record, prd, task_graph)
+
+    tasks = {task.id: task for task in refined.tasks}
+    assert tasks["tests"].acceptance_criteria == ["VALUE equals 1"]
+    assert tasks["tests"].target_files == ["tests/test_feature.py"]
+    assert tasks["tests"].required_artifacts == ["tests/test_feature.py"]
+    assert record.outputs["task_graph_acceptance_enrichment"][
+        "updated_task_ids"
+    ] == ["tests"]
+    assert record.outputs["task_graph_acceptance_enrichment"][
+        "artifact_updated_task_ids"
+    ] == ["tests"]
+    assert record.outputs["task_graph_acceptance_enrichment"][
+        "inherited_test_artifacts"
+    ] == ["tests/test_feature.py"]
+
+    validation = JobRunner._build_task_graph_validation(
+        refined,
+        prd=prd,
+        require_acceptance_criteria=True,
+        require_task_artifacts=True,
+    )
+
+    assert validation["valid"] is True
+    assert validation["test_writer_tasks_missing_target_files"] == []
+    assert validation["unassigned_required_artifacts"] == []
+
+
 def test_job_runner_strict_task_acceptance_criteria_uses_prd_sources(
     tmp_path: Path,
 ) -> None:

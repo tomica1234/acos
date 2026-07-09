@@ -3980,6 +3980,11 @@ class JobRunner:
             for path in source_required_artifacts
             if not self._looks_like_test_path(path)
         ]
+        source_test_artifacts = [
+            path
+            for path in source_required_artifacts
+            if self._looks_like_test_path(path)
+        ]
         implementation_task_count = len(
             [
                 task
@@ -3987,10 +3992,18 @@ class JobRunner:
                 if task.role in self.IMPLEMENTATION_TASK_ROLES
             ]
         )
+        test_writer_task_count = len(
+            [
+                task
+                for task in task_graph.tasks
+                if task.role in self.TEST_TASK_ROLES
+            ]
+        )
         if (
             not acceptance_tests
             and not definition_of_done
             and not source_implementation_artifacts
+            and not source_test_artifacts
         ):
             record.outputs["task_graph_acceptance_enrichment"] = {
                 "applied": False,
@@ -4002,31 +4015,41 @@ class JobRunner:
         updated_task_ids: list[str] = []
         artifact_updated_task_ids: list[str] = []
         implementation_index = 0
+        test_writer_index = 0
         tasks: list[PlannedTask] = []
         for task in task_graph.tasks:
-            if task.role not in self.IMPLEMENTATION_TASK_ROLES:
+            if task.role in self.IMPLEMENTATION_TASK_ROLES:
+                task_artifacts = self._prd_artifacts_for_task(
+                    task,
+                    source_implementation_artifacts,
+                    task_count=implementation_task_count,
+                )
+                criteria_index = implementation_index
+                implementation_index += 1
+            elif task.role in self.TEST_TASK_ROLES:
+                task_artifacts = self._prd_artifacts_for_task(
+                    task,
+                    source_test_artifacts,
+                    task_count=test_writer_task_count,
+                )
+                criteria_index = test_writer_index
+                test_writer_index += 1
+            else:
                 tasks.append(task)
                 continue
             updates: dict[str, Any] = {}
-            if self._non_empty_items(task.acceptance_criteria):
-                implementation_index += 1
-            elif acceptance_tests or definition_of_done:
+            if (
+                not self._non_empty_items(task.acceptance_criteria)
+                and (acceptance_tests or definition_of_done)
+            ):
                 criteria = self._criteria_for_task_from_prd(
                     task,
                     acceptance_tests,
                     definition_of_done,
-                    implementation_index,
+                    criteria_index,
                 )
                 updates["acceptance_criteria"] = criteria
                 updated_task_ids.append(task.id)
-                implementation_index += 1
-            else:
-                implementation_index += 1
-            task_artifacts = self._prd_artifacts_for_task(
-                task,
-                source_implementation_artifacts,
-                implementation_task_count=implementation_task_count,
-            )
             if task_artifacts:
                 target_files = self._unique_paths([*task.target_files, *task_artifacts])
                 required_artifacts = self._unique_paths(
@@ -4054,7 +4077,7 @@ class JobRunner:
         if not updated_task_ids and not artifact_updated_task_ids:
             record.outputs["task_graph_acceptance_enrichment"] = {
                 "applied": False,
-                "reason": "all_implementation_tasks_already_have_criteria",
+                "reason": "all_executable_tasks_already_have_prd_criteria_and_artifacts",
                 "updated_task_ids": [],
             }
             return task_graph
@@ -4068,7 +4091,12 @@ class JobRunner:
             enrichment["artifact_updated_task_ids"] = self._unique_paths(
                 artifact_updated_task_ids
             )
-            enrichment["inherited_required_artifacts"] = source_implementation_artifacts
+            if source_implementation_artifacts:
+                enrichment["inherited_required_artifacts"] = (
+                    source_implementation_artifacts
+                )
+            if source_test_artifacts:
+                enrichment["inherited_test_artifacts"] = source_test_artifacts
         if supplemental_artifact_assignments:
             enrichment["supplemental_artifact_assignments"] = (
                 supplemental_artifact_assignments
@@ -4639,11 +4667,11 @@ class JobRunner:
         task: PlannedTask,
         artifacts: list[str],
         *,
-        implementation_task_count: int,
+        task_count: int,
     ) -> list[str]:
         if not artifacts:
             return []
-        if implementation_task_count <= 1:
+        if task_count <= 1:
             return list(artifacts)
         task_tokens = cls._semantic_tokens(cls._task_semantic_text(task))
         matched: list[str] = []
