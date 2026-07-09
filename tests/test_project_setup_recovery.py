@@ -144,6 +144,43 @@ def test_project_setup_normalization_uses_canonical_artifacts_only(
     } == {"ignored_project_setup_artifacts"}
 
 
+def test_architect_role_normalization_does_not_advertise_project_setup_artifacts(
+    tmp_path: Path,
+) -> None:
+    runner, _environment, record = _runner(tmp_path)
+    task_graph = TaskGraph(
+        goal="Build feature",
+        tasks=[
+            PlannedTask(
+                id="feature-design",
+                title="Feature design handoff",
+                description="Implement the feature from the architecture handoff.",
+                role="architect",
+                target_files=["feature.py"],
+                required_artifacts=["feature.py"],
+            )
+        ],
+    )
+
+    normalized = runner._normalize_project_setup_task_graph(record, task_graph)
+    task = normalized.tasks[0]
+    normalization = record.outputs["task_graph_normalization"]
+    validation = runner._build_task_graph_validation(
+        normalized,
+        require_task_artifacts=True,
+    )
+
+    assert task.role == "implementer"
+    assert task.target_files == ["feature.py"]
+    assert normalization["normalized_task_ids"] == ["feature-design"]
+    assert normalization["project_setup_task_ids"] == []
+    assert normalization["role_normalized_task_ids"] == ["feature-design"]
+    assert normalization["required_artifacts"] == []
+    assert normalization["ignored_project_setup_artifacts"] == []
+    assert validation["valid"] is True
+    assert validation["ignored_project_setup_artifacts"] == []
+
+
 def test_project_setup_ignored_artifacts_are_recovered_as_invalid_task_graph(
     tmp_path: Path,
 ) -> None:

@@ -2785,6 +2785,8 @@ class JobRunner:
     ) -> TaskGraph:
         tasks: list[PlannedTask] = []
         normalized_task_ids: list[str] = []
+        project_setup_task_ids: list[str] = []
+        role_normalized_task_ids: list[str] = []
         ignored_project_setup_artifacts: list[dict[str, Any]] = []
         for task in task_graph.tasks:
             if self._is_project_setup_task(task):
@@ -2818,10 +2820,12 @@ class JobRunner:
                     )
                 )
                 normalized_task_ids.append(task.id)
+                project_setup_task_ids.append(task.id)
                 continue
             if task.role == "architect":
                 tasks.append(task.model_copy(update={"role": "implementer"}))
                 normalized_task_ids.append(task.id)
+                role_normalized_task_ids.append(task.id)
                 continue
             tasks.append(task)
 
@@ -2843,7 +2847,13 @@ class JobRunner:
         record.outputs["task_graph_normalization"] = {
             "applied": True,
             "normalized_task_ids": normalized_task_ids,
-            "required_artifacts": list(self.PROJECT_SETUP_REQUIRED_ARTIFACTS),
+            "project_setup_task_ids": project_setup_task_ids,
+            "role_normalized_task_ids": role_normalized_task_ids,
+            "required_artifacts": (
+                list(self.PROJECT_SETUP_REQUIRED_ARTIFACTS)
+                if project_setup_task_ids
+                else []
+            ),
             "ignored_project_setup_artifacts": ignored_project_setup_artifacts,
         }
         self.store.update(record)
