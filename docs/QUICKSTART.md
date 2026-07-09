@@ -35,6 +35,10 @@ python -m apps.cli run-demo --workspace /tmp/acos-demo
 acos run-job --file job.yaml
 ```
 
+`run-job` applies strict quality gates by default: PRD quality, task acceptance
+criteria, required artifacts, completion integrity, test evidence, test patch
+evidence, and stage review.
+
 For an end-to-end autonomous run that should keep changing strategy until the
 job is complete or a policy hard stop occurs:
 

@@ -19,6 +19,7 @@ from packages.llm.adapters.mock import MockAdapter
 from packages.llm.errors import ConfigValidationError
 from packages.llm.registry import ModelRegistry
 from packages.llm.routing import ModelRouter, RoutingContext
+from packages.orchestrator.job_constraints import apply_strict_job_constraints
 from packages.orchestrator.job_runner import JobRunner, build_default_runner
 from packages.orchestrator.job_store import FileJobStore
 from packages.orchestrator.autonomy_governor import (
@@ -948,6 +949,7 @@ def apply_resume_overrides(
     model_timeout_seconds: float | None = None,
     model_timeout_deadline_epoch: float | None = 0.0,
 ) -> None:
+    apply_strict_job_constraints(record)
     if max_autonomous_stages is None and bump_stage_limit:
         max_autonomous_stages = suggested_next_stage_limit(record)
     apply_constraint_overrides(
@@ -1001,6 +1003,8 @@ def continue_persisted_job(
     step_events: list[dict[str, Any]] = []
     for _ in range(max_steps):
         record = store.get(job_id)
+        apply_strict_job_constraints(record)
+        store.update(record)
         summary = summarize_job_progress(record)
         resume = summary.get("resume", {})
         action = resume.get("action") if isinstance(resume, dict) else None
@@ -2693,6 +2697,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0 if record.status.value == "done" else 1
     if args.command == "run-job":
         spec = load_job_spec_from_file(args.file)
+        apply_strict_job_constraints(spec)
         apply_constraint_overrides(
             spec,
             max_autonomous_stages=args.max_autonomous_stages,
@@ -2971,6 +2976,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.command == "resume-job":
         store = FileJobStore(args.jobs_dir)
         record = store.get(args.job_id)
+        apply_strict_job_constraints(record)
+        store.update(record)
         summary = summarize_job_progress(record)
         apply_planning_repair_overrides(record, summary)
         apply_resume_overrides(

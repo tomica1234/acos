@@ -27,6 +27,64 @@ from packages.schemas.tasks import PlannedTask, TaskGraph
 from tests.conftest import config_dir
 
 
+def _strict_ready_task_graph() -> TaskGraph:
+    return TaskGraph(
+        goal="Build it",
+        tasks=[
+            PlannedTask(
+                id="core",
+                title="Core",
+                description="Build core",
+                role="implementer",
+                acceptance_criteria=["Core behavior works"],
+                target_files=["src/core.py"],
+                required_artifacts=["src/core.py"],
+            ),
+        ],
+    )
+
+
+def _mark_strict_planning_ready(record: JobRecord, task_graph: TaskGraph) -> None:
+    record.outputs["task_graph"] = task_graph.model_dump()
+    record.outputs["prd_quality"] = {
+        "passed": True,
+        "missing": [],
+        "warnings": [],
+    }
+    record.outputs["task_graph_validation"] = {
+        "valid": True,
+        "errors": [],
+        "task_count": len(task_graph.tasks),
+        "implementation_task_count": 1,
+        "implementation_task_acceptance_criteria_count": 1,
+        "implementation_task_artifact_count": 1,
+        "require_acceptance_criteria": True,
+        "require_task_artifacts": True,
+        "require_executable_task_roles": True,
+        "unsupported_task_role_count": 0,
+        "small_part_count": 1,
+        "small_part_coverage": [
+            {
+                "small_part_index": 1,
+                "small_part": "Build core",
+                "task_id": "core",
+                "covered": True,
+            }
+        ],
+        "uncovered_small_parts": [],
+        "acceptance_test_count": 1,
+        "acceptance_test_coverage": [
+            {
+                "acceptance_test_index": 1,
+                "acceptance_test": "Core behavior works",
+                "task_id": "core",
+                "covered": True,
+            }
+        ],
+        "uncovered_acceptance_tests": [],
+    }
+
+
 def _copy_configs(tmp_path: Path) -> Path:
     target = tmp_path / "configs"
     target.mkdir()
@@ -254,6 +312,7 @@ def test_run_job_uses_workspace_root_from_job_file(tmp_path: Path, monkeypatch, 
 
     class DummyRunner:
         def run_job(self, spec: JobSpec) -> JobRecord:
+            captured["constraints"] = dict(spec.metadata["constraints"])
             return JobRecord(job_id=spec.job_id, spec=spec, status=JobStatus.DONE)
 
     def fake_build_default_runner(config_dir: str | Path, workspace_root: str | Path, store=None):
@@ -268,6 +327,16 @@ def test_run_job_uses_workspace_root_from_job_file(tmp_path: Path, monkeypatch, 
 
     assert exit_code == 0
     assert captured["workspace_root"] == str(workspace.resolve())
+    assert captured["constraints"] == {
+        "require_prd_quality": True,
+        "require_task_acceptance_criteria": True,
+        "require_task_artifacts": True,
+        "require_completion_integrity": True,
+        "require_test_evidence": True,
+        "require_stage_test_patches": True,
+        "stage_review": True,
+        "test_timeout_seconds": 1200,
+    }
     assert captured["store"] is not None
     payload = yaml.safe_load(capsys.readouterr().out)
     assert payload["status"] == "done"
@@ -1637,12 +1706,7 @@ def test_job_status_can_print_next_resume_command(tmp_path: Path, capsys) -> Non
     store = FileJobStore(jobs_dir)
     record = store.create(spec)
     record.status = JobStatus.TESTING
-    record.outputs["task_graph"] = TaskGraph(
-        goal="Build it",
-        tasks=[
-            PlannedTask(id="core", title="Core", description="Build core", role="implementer"),
-        ],
-    ).model_dump()
+    _mark_strict_planning_ready(record, _strict_ready_task_graph())
     store.update(record)
 
     exit_code = main(
@@ -1675,12 +1739,7 @@ def test_job_status_can_print_next_continue_command(tmp_path: Path, capsys) -> N
     store = FileJobStore(jobs_dir)
     record = store.create(spec)
     record.status = JobStatus.TESTING
-    record.outputs["task_graph"] = TaskGraph(
-        goal="Build it",
-        tasks=[
-            PlannedTask(id="core", title="Core", description="Build core", role="implementer"),
-        ],
-    ).model_dump()
+    _mark_strict_planning_ready(record, _strict_ready_task_graph())
     store.update(record)
 
     exit_code = main(
@@ -1712,12 +1771,7 @@ def test_job_status_next_continue_command_uses_blocked_recovery_for_repeated_fai
     from packages.orchestrator.job_store import FileJobStore
 
     jobs_dir = tmp_path / "jobs"
-    task_graph = TaskGraph(
-        goal="Build it",
-        tasks=[
-            PlannedTask(id="core", title="Core", description="Build core", role="implementer"),
-        ],
-    )
+    task_graph = _strict_ready_task_graph()
     spec = JobSpec(
         job_id="job-status-blocked-recovery-command",
         request_text="Build something useful.",
@@ -1729,7 +1783,7 @@ def test_job_status_next_continue_command_uses_blocked_recovery_for_repeated_fai
     record.last_error = "same_failure_threshold_reached"
     record.failure_count = 2
     record.same_test_failure_count = 2
-    record.outputs["task_graph"] = task_graph.model_dump()
+    _mark_strict_planning_ready(record, task_graph)
     record.outputs["autonomous_stages"] = [
         {
             "stage": 1,
@@ -1768,12 +1822,7 @@ def test_job_status_next_command_falls_back_to_blocked_recovery(
     from packages.orchestrator.job_store import FileJobStore
 
     jobs_dir = tmp_path / "jobs"
-    task_graph = TaskGraph(
-        goal="Build it",
-        tasks=[
-            PlannedTask(id="core", title="Core", description="Build core", role="implementer"),
-        ],
-    )
+    task_graph = _strict_ready_task_graph()
     spec = JobSpec(
         job_id="job-status-next-command-blocked-recovery",
         request_text="Build something useful.",
@@ -1783,7 +1832,7 @@ def test_job_status_next_command_falls_back_to_blocked_recovery(
     record = store.create(spec)
     record.status = JobStatus.STUCK
     record.last_error = "same_failure_threshold_reached"
-    record.outputs["task_graph"] = task_graph.model_dump()
+    _mark_strict_planning_ready(record, task_graph)
     record.outputs["autonomous_stages"] = [
         {
             "stage": 1,
@@ -1827,12 +1876,7 @@ def test_job_status_can_print_next_operator_command_for_normal_continue(
     store = FileJobStore(jobs_dir)
     record = store.create(spec)
     record.status = JobStatus.TESTING
-    record.outputs["task_graph"] = TaskGraph(
-        goal="Build it",
-        tasks=[
-            PlannedTask(id="core", title="Core", description="Build core", role="implementer"),
-        ],
-    ).model_dump()
+    _mark_strict_planning_ready(record, _strict_ready_task_graph())
     store.update(record)
 
     exit_code = main(
@@ -2205,12 +2249,7 @@ def test_job_status_can_print_json_summary(tmp_path: Path, capsys) -> None:
     store = FileJobStore(jobs_dir)
     record = store.create(spec)
     record.status = JobStatus.TESTING
-    record.outputs["task_graph"] = TaskGraph(
-        goal="Build it",
-        tasks=[
-            PlannedTask(id="core", title="Core", description="Build core", role="implementer"),
-        ],
-    ).model_dump()
+    _mark_strict_planning_ready(record, _strict_ready_task_graph())
     store.update(record)
 
     exit_code = main(
@@ -2665,7 +2704,7 @@ def test_job_status_json_marks_done_job_as_not_supervisable(tmp_path: Path, caps
         "autonomy_ready": False,
         "planning_strategy_change_recommended": False,
         "command_source": None,
-        "blocking_items": [{"type": "task_graph_missing"}],
+            "blocking_items": [{"type": "task_graph_missing"}],
     }
 
 
@@ -2772,6 +2811,11 @@ def test_resume_job_can_raise_autonomous_stage_limit(
     assert captured["workspace_root"] == str(workspace)
     assert captured["constraints"]["max_autonomous_stages"] == 3
     assert captured["constraints"]["require_prd_quality"] is True
+    assert captured["constraints"]["require_task_acceptance_criteria"] is True
+    assert captured["constraints"]["require_task_artifacts"] is True
+    assert captured["constraints"]["require_completion_integrity"] is True
+    assert captured["constraints"]["require_test_evidence"] is True
+    assert captured["constraints"]["require_stage_test_patches"] is True
     assert captured["constraints"]["stage_review"] is True
     assert captured["constraints"]["test_timeout_seconds"] == 900
     assert captured["status_before_resume"] == JobStatus.TESTING
@@ -2988,6 +3032,14 @@ def test_continue_job_auto_bumps_stage_limit_and_resumes(
     assert exit_code == 0
     assert captured["workspace_root"] == str(workspace)
     assert captured["constraints"]["max_autonomous_stages"] == 2
+    assert captured["constraints"]["require_prd_quality"] is True
+    assert captured["constraints"]["require_task_acceptance_criteria"] is True
+    assert captured["constraints"]["require_task_artifacts"] is True
+    assert captured["constraints"]["require_completion_integrity"] is True
+    assert captured["constraints"]["require_test_evidence"] is True
+    assert captured["constraints"]["require_stage_test_patches"] is True
+    assert captured["constraints"]["stage_review"] is True
+    assert captured["constraints"]["test_timeout_seconds"] == 1200
     assert captured["status_before_resume"] == JobStatus.TESTING
     assert captured["last_error_before_resume"] is None
     payload = json.loads(capsys.readouterr().out)
@@ -3542,7 +3594,7 @@ def test_continue_job_stops_before_repeated_failure_recovery_by_default(
     assert exit_code == 0
     assert captured["status_before_resume"] == JobStatus.STUCK
     assert captured["last_error_before_resume"] == "same_failure_threshold_reached"
-    assert captured["constraints_before_resume"] == {
+    assert captured["constraints_before_resume"].items() >= {
         "recovery_mode": "repeated_failure",
         "recovery_strategy": "escalated_retry",
         "recovery_reason": (
@@ -3551,7 +3603,7 @@ def test_continue_job_stops_before_repeated_failure_recovery_by_default(
         "recovery_failed_task_id": "core",
         "recovery_failed_stage": 1,
         "recovery_attempt": 1,
-    }
+    }.items()
     payload = json.loads(capsys.readouterr().out)
     assert payload["continued"] is True
     assert payload["steps_run"] == 1
@@ -3640,7 +3692,7 @@ def test_continue_job_stops_before_completion_integrity_recovery_by_default(
     assert exit_code == 0
     assert captured["status_before_resume"] == JobStatus.TESTING
     assert captured["last_error_before_resume"] is None
-    assert captured["constraints_before_resume"] == {
+    assert captured["constraints_before_resume"].items() >= {
         "recovery_mode": "completion_integrity",
         "recovery_strategy": "completion_audit",
         "require_completion_integrity": True,
@@ -3650,7 +3702,7 @@ def test_continue_job_stops_before_completion_integrity_recovery_by_default(
             "the completion integrity gate found missing work or missing evidence"
         ),
         "recovery_attempt": 1,
-    }
+    }.items()
     payload = json.loads(capsys.readouterr().out)
     assert payload["continued"] is True
     assert payload["steps_run"] == 1
@@ -3733,7 +3785,7 @@ def test_continue_job_can_force_repeated_failure_recovery(
     assert captured["status_before_resume"] == JobStatus.STUCK
     assert captured["last_error_before_resume"] == "same_failure_threshold_reached"
     assert captured["failure_count_before_resume"] == 2
-    assert captured["constraints_before_resume"] == {
+    assert captured["constraints_before_resume"].items() >= {
         "recovery_mode": "repeated_failure",
         "recovery_strategy": "escalated_retry",
         "recovery_reason": (
@@ -3742,7 +3794,7 @@ def test_continue_job_can_force_repeated_failure_recovery(
         "recovery_failed_task_id": "core",
         "recovery_failed_stage": 1,
         "recovery_attempt": 1,
-    }
+    }.items()
     payload = json.loads(capsys.readouterr().out)
     assert payload["continued"] is True
     assert payload["steps_run"] == 1
@@ -3829,7 +3881,7 @@ def test_continue_job_can_force_completion_integrity_recovery(
     assert exit_code == 0
     assert captured["status_before_resume"] == JobStatus.TESTING
     assert captured["last_error_before_resume"] is None
-    assert captured["constraints_before_resume"] == {
+    assert captured["constraints_before_resume"].items() >= {
         "recovery_mode": "completion_integrity",
         "recovery_strategy": "completion_audit",
         "require_completion_integrity": True,
@@ -3839,7 +3891,7 @@ def test_continue_job_can_force_completion_integrity_recovery(
             "the completion integrity gate found missing work or missing evidence"
         ),
         "recovery_attempt": 1,
-    }
+    }.items()
     payload = json.loads(capsys.readouterr().out)
     assert payload["continued"] is True
     assert payload["step_events"][0]["action"] == "completion_audit_recovery"
@@ -3923,7 +3975,7 @@ def test_continue_job_can_force_recurring_failure_recovery_with_blocked_alias(
     )
 
     assert exit_code == 0
-    assert captured["constraints_before_resume"] == {
+    assert captured["constraints_before_resume"].items() >= {
         "recovery_mode": "recurring_failure",
         "recovery_strategy": "split_or_clarify_task",
         "require_prd_quality": True,
@@ -3935,7 +3987,7 @@ def test_continue_job_can_force_recurring_failure_recovery_with_blocked_alias(
         "recovery_failed_task_id": "core",
         "recovery_failed_stage": 3,
         "recovery_attempt": 1,
-    }
+    }.items()
     payload = json.loads(capsys.readouterr().out)
     assert payload["continued"] is True
     assert payload["step_events"][0]["action"] == "split_or_clarify_task"
@@ -3954,12 +4006,6 @@ def test_continue_job_applies_recovery_recommendation_for_auto_continue_failure(
     jobs_dir = tmp_path / "jobs"
     workspace = tmp_path / "workspace"
     workspace.mkdir()
-    task_graph = TaskGraph(
-        goal="Build it",
-        tasks=[
-            PlannedTask(id="core", title="Core", description="Build core", role="implementer"),
-        ],
-    )
     spec = JobSpec(
         job_id="continue-implementation-failure",
         request_text="Build something useful.",
@@ -3970,7 +4016,8 @@ def test_continue_job_applies_recovery_recommendation_for_auto_continue_failure(
     record.status = JobStatus.FAILED
     record.last_error = "implementation_failed:core"
     record.failure_count = 1
-    record.outputs["task_graph"] = task_graph.model_dump()
+    task_graph = _strict_ready_task_graph()
+    _mark_strict_planning_ready(record, task_graph)
     store.update(record)
     captured: dict[str, object] = {}
 
@@ -4002,7 +4049,7 @@ def test_continue_job_applies_recovery_recommendation_for_auto_continue_failure(
     )
 
     assert exit_code == 0
-    assert captured["constraints_before_resume"] == {
+    assert captured["constraints_before_resume"].items() >= {
         "recovery_mode": "implementation_failure",
         "recovery_strategy": "replan_current_task",
         "require_prd_quality": True,
@@ -4013,7 +4060,7 @@ def test_continue_job_applies_recovery_recommendation_for_auto_continue_failure(
         "recovery_reason": "the implementer failed before producing a safe completed change",
         "recovery_failed_task_id": "core",
         "recovery_attempt": 1,
-    }
+    }.items()
     payload = json.loads(capsys.readouterr().out)
     assert payload["continued"] is True
     assert payload["steps_run"] == 1
@@ -4114,7 +4161,10 @@ def test_supervise_job_runs_cycles_until_done_and_writes_summaries(
         "reason": None,
         "requires_explicit_override": False,
         "autonomy_ready": False,
-        "blocking_items": [{"type": "task_graph_missing"}],
+        "blocking_items": [
+            {"type": "task_graph_missing"},
+            {"type": "prd_quality_not_passed", "missing": []},
+        ],
         "planning_strategy_change_recommended": False,
     }
     assert [event["step"] for event in payload["step_events"]] == [1, 2, 3]
@@ -4147,12 +4197,7 @@ def test_supervise_job_stops_after_repeated_stalled_cycles(
     store = FileJobStore(jobs_dir)
     record = store.create(spec)
     record.status = JobStatus.TESTING
-    record.outputs["task_graph"] = TaskGraph(
-        goal="Build it",
-        tasks=[
-            PlannedTask(id="core", title="Core", description="Build core", role="implementer"),
-        ],
-    ).model_dump()
+    _mark_strict_planning_ready(record, _strict_ready_task_graph())
     store.update(record)
     captured: dict[str, object] = {"resume_count": 0}
 
@@ -4275,12 +4320,7 @@ def test_supervise_job_pm_recovery_changes_strategy_after_stall(
     store = FileJobStore(jobs_dir)
     record = store.create(spec)
     record.status = JobStatus.TESTING
-    record.outputs["task_graph"] = TaskGraph(
-        goal="Build it",
-        tasks=[
-            PlannedTask(id="core", title="Core", description="Build core", role="implementer"),
-        ],
-    ).model_dump()
+    _mark_strict_planning_ready(record, _strict_ready_task_graph())
     store.update(record)
     captured: dict[str, object] = {"resume_count": 0}
 
@@ -4660,7 +4700,10 @@ def test_supervise_job_stops_after_runtime_limit(
         "autonomy_ready": False,
         "planning_strategy_change_recommended": False,
     }.items()
-    assert payload["operator_decision"]["blocking_items"] == [{"type": "task_graph_missing"}]
+    assert payload["operator_decision"]["blocking_items"] == [
+        {"type": "task_graph_missing"},
+        {"type": "prd_quality_not_passed", "missing": []},
+    ]
     assert payload["operator_decision"]["runtime_analysis"] == {
         "runtime_limited": True,
         "elapsed_seconds": 1.5,

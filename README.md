@@ -132,6 +132,10 @@ Run a job from YAML:
 acos run-job --file job.yaml
 ```
 
+`run-job` applies the same strict quality gates used by the API and worker
+entrypoints: PRD quality, task acceptance criteria, required artifacts,
+completion integrity, test evidence, test patch evidence, and stage review.
+
 Run a larger autonomous job in guarded stages:
 
 ```bash
@@ -156,11 +160,8 @@ acos job-status --job-id <job-id> --jobs-dir .acos/jobs --next-command
 acos resume-job --job-id <job-id> --jobs-dir .acos/jobs --bump-stage-limit
 ```
 
-`--large-autonomous` enables stricter requirements refinement, required
-acceptance criteria on implementation tasks, completion integrity checks before
-`done`, validation that planned tasks use autonomous-executable roles, required
-test execution evidence, required test patches for implementation stages, stage
-review, a longer test timeout, and a conservative one-stage execution limit.
+`--large-autonomous` keeps those strict gates enabled and adds a conservative
+one-stage execution limit for larger autonomous jobs.
 The PRD quality gate also requires enough acceptance tests to cover every
 declared `small_parts` item, so large requests are decomposed into verifiable
 units before coding begins. Task graph validation records `small_part_coverage`
