@@ -70,6 +70,18 @@ def assert_recoverable_error(
 
 
 def test_clear_active_recovery_state_removes_stale_done_markers(tmp_path: Path) -> None:
+    file_recovery_constraints = {
+        key: f"stale-{key}" for key in JobRunner.FILE_RECOVERY_CONSTRAINT_KEYS
+    }
+    stage_recovery_constraints = {
+        "failed_stage_ids": ["1"],
+        "failed_stages": [{"stage": 1, "task_id": "core"}],
+        "failed_task_id": "core-tests",
+        "missing_stage_test_patch_stage_ids": ["1"],
+        "missing_task_ids": ["core-tests"],
+        "stages_missing_test_patches": [{"stage": 1, "task_id": "core"}],
+        "unmet_dependencies": ["core"],
+    }
     spec = JobSpec(
         job_id="clear-active-recovery",
         request_text="Build it",
@@ -84,11 +96,8 @@ def test_clear_active_recovery_state_removes_stale_done_markers(tmp_path: Path) 
                 "recovery_failed_task_id": "old-task",
                 "recovery_failed_stage": 2,
                 "recovery_attempt": 3,
-                "patch_operation_hint": "create",
-                "failed_task_id": "core-tests",
-                "missing_task_ids": ["core-tests"],
-                "unmet_dependencies": ["core"],
-                "missing_target_file": "frontend/test/project_scaffold.test.tsx",
+                **file_recovery_constraints,
+                **stage_recovery_constraints,
                 "max_autonomous_stages": 12,
             }
         },
@@ -99,18 +108,8 @@ def test_clear_active_recovery_state_removes_stale_done_markers(tmp_path: Path) 
             "current_recovery_event": {"error": "invalid_task_graph"},
             "last_recoverable_error": "invalid_task_graph",
             "recovery_plan": {"strategy": "task_graph_replanning"},
-            "missing_target_file": "frontend/test/project_scaffold.test.tsx",
-            "patch_operation_hint": "create",
-            "failed_patch_role": "test_writer",
-            "failed_patch_path": "frontend/test/project_scaffold.test.tsx",
-            "failed_patch_operation": "update",
-            "return_to_role": "test_writer",
-            "failed_stage_ids": ["1"],
-            "failed_stages": [{"stage": 1, "task_id": "core"}],
-            "missing_stage_test_patch_stage_ids": ["1"],
-            "missing_task_ids": ["core-tests"],
-            "stages_missing_test_patches": [{"stage": 1, "task_id": "core"}],
-            "unmet_dependencies": ["core"],
+            **file_recovery_constraints,
+            **stage_recovery_constraints,
         }
     )
     record.outputs["last_recoverable_error"] = "invalid_task_graph"
@@ -122,14 +121,10 @@ def test_clear_active_recovery_state_removes_stale_done_markers(tmp_path: Path) 
     assert "last_recoverable_error" not in record.runtime_state
     assert "recovery_plan" not in record.runtime_state
     for stale_key in (
-        "missing_target_file",
-        "patch_operation_hint",
-        "failed_patch_role",
-        "failed_patch_path",
-        "failed_patch_operation",
-        "return_to_role",
+        *JobRunner.FILE_RECOVERY_CONSTRAINT_KEYS,
         "failed_stage_ids",
         "failed_stages",
+        "failed_task_id",
         "missing_stage_test_patch_stage_ids",
         "missing_task_ids",
         "stages_missing_test_patches",
@@ -9614,6 +9609,72 @@ def test_prd_quality_requires_required_artifacts() -> None:
     assert report["source_required_artifacts"] == []
     assert report["test_required_artifact_count"] == 0
     assert report["test_required_artifacts"] == []
+
+
+def test_prd_quality_rejects_placeholder_prd_sections() -> None:
+    prd = PRD(
+        title="TBD",
+        problem_statement="TODO",
+        smallest_working_core=["..."],
+        small_parts=["placeholder"],
+        incremental_milestones=["to be determined"],
+        acceptance_tests=["n/a"],
+        definition_of_done=["none"],
+        required_artifacts=["TBD"],
+        open_questions=["No open questions"],
+    )
+
+    report = JobRunner._build_prd_quality_report(prd)
+
+    assert report["passed"] is False
+    assert report["missing"] == [
+        "title",
+        "problem_statement",
+        "smallest_working_core",
+        "small_parts",
+        "incremental_milestones",
+        "acceptance_tests",
+        "definition_of_done",
+        "required_artifacts",
+    ]
+    assert report["warnings"] == []
+    assert report["small_part_count"] == 0
+    assert report["acceptance_test_count"] == 0
+    assert report["definition_of_done_count"] == 0
+    assert report["required_artifact_count"] == 0
+
+
+def test_prd_quality_ignores_placeholder_open_questions() -> None:
+    prd = PRD(
+        title="English Vocab App",
+        problem_statement="Students need quizzes and tracked progress.",
+        smallest_working_core=["Generate quizzes and track progress"],
+        small_parts=[
+            "Create quiz generator",
+            "Track user progress",
+        ],
+        incremental_milestones=[
+            "Quiz generator exists",
+            "Progress tracking exists",
+        ],
+        acceptance_tests=[
+            "Quiz generator returns questions",
+            "Progress tracker stores user progress",
+        ],
+        definition_of_done=["All tests pass"],
+        required_artifacts=[
+            "backend/src/routes/quiz.js",
+            "backend/src/routes/progress.js",
+            "tests/quiz_progress.test.js",
+        ],
+        open_questions=["None"],
+    )
+
+    report = JobRunner._build_prd_quality_report(prd)
+
+    assert report["passed"] is True
+    assert "open_questions_resolved" not in report["missing"]
+    assert report["warnings"] == []
 
 
 def test_prd_quality_blocks_unresolved_open_questions() -> None:

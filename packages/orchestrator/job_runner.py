@@ -1544,9 +1544,11 @@ class JobRunner:
         logs = [
             "The previous task graph failed autonomy validation.",
             f"Validation errors: {validation['errors']}",
-            f"PRD small_parts: {cls._non_empty_items(prd.small_parts)}",
+            f"PRD small_parts: {cls._meaningful_prd_items(prd.small_parts)}",
         ]
-        prd_required_artifacts = cls._valid_unique_artifact_paths(prd.required_artifacts)
+        prd_required_artifacts = cls._valid_unique_artifact_paths(
+            cls._meaningful_prd_items(prd.required_artifacts)
+        )
         if prd_required_artifacts:
             logs.append(f"PRD required_artifacts: {prd_required_artifacts}")
         logs.extend(
@@ -2761,12 +2763,12 @@ class JobRunner:
         )
         if deterministic_prd is not None:
             previous_acceptance_tests = set(
-                self._non_empty_items(current_prd.acceptance_tests)
+                self._meaningful_prd_items(current_prd.acceptance_tests)
             )
             current_prd = deterministic_prd
             added_acceptance_tests = [
                 item
-                for item in self._non_empty_items(current_prd.acceptance_tests)
+                for item in self._meaningful_prd_items(current_prd.acceptance_tests)
                 if item not in previous_acceptance_tests
             ]
             record.outputs["prd_quality_deterministic_repair"] = {
@@ -2776,10 +2778,15 @@ class JobRunner:
                 record.outputs["prd_quality_deterministic_repair"][
                     "added_acceptance_tests"
                 ] = added_acceptance_tests
+            previous_milestones = set(
+                self._meaningful_prd_items(prd.incremental_milestones)
+            )
             added_milestones = [
                 item
-                for item in self._non_empty_items(current_prd.incremental_milestones)
-                if item not in self._non_empty_items(prd.incremental_milestones)
+                for item in self._meaningful_prd_items(
+                    current_prd.incremental_milestones
+                )
+                if item not in previous_milestones
             ]
             if added_milestones:
                 record.outputs["prd_quality_deterministic_repair"][
@@ -2891,7 +2898,7 @@ class JobRunner:
         warnings = JobRunner._non_empty_items(
             [str(item) for item in report.get("warnings", [])]
         )
-        open_questions = JobRunner._non_empty_items(prd.open_questions)
+        open_questions = JobRunner._meaningful_prd_items(prd.open_questions)
         invalid_required_artifacts = JobRunner._non_empty_items(
             [str(item) for item in report.get("invalid_required_artifacts", [])]
         )
@@ -3002,9 +3009,9 @@ class JobRunner:
         missing = set(report.get("missing") or [])
         if not missing or not missing.issubset(repairable_missing):
             return None
-        acceptance_tests = cls._non_empty_items(prd.acceptance_tests)
-        incremental_milestones = cls._non_empty_items(prd.incremental_milestones)
-        small_parts = cls._non_empty_items(prd.small_parts)
+        acceptance_tests = cls._meaningful_prd_items(prd.acceptance_tests)
+        incremental_milestones = cls._meaningful_prd_items(prd.incremental_milestones)
+        small_parts = cls._meaningful_prd_items(prd.small_parts)
         changed = False
         added_tests: list[str] = []
         added_milestones: list[str] = []
@@ -3549,7 +3556,7 @@ class JobRunner:
                 "Rewrite test required_artifacts to include domain-specific test files "
                 "for each app behavior, not only generic project setup tests."
             )
-        open_questions = JobRunner._non_empty_items(prd.open_questions)
+        open_questions = JobRunner._meaningful_prd_items(prd.open_questions)
         if open_questions:
             logs.append("Open questions blocking autonomy: " + " | ".join(open_questions))
             logs.append(
@@ -3589,14 +3596,22 @@ class JobRunner:
     ) -> dict[str, Any]:
         missing: list[str] = []
         warnings: list[str] = []
-        if not prd.title.strip():
+        if (
+            not prd.title.strip()
+            or JobRunner._looks_like_placeholder_prd_item(prd.title)
+        ):
             missing.append("title")
-        if not prd.problem_statement.strip():
+        if (
+            not prd.problem_statement.strip()
+            or JobRunner._looks_like_placeholder_prd_item(prd.problem_statement)
+        ):
             missing.append("problem_statement")
-        smallest_working_core = JobRunner._non_empty_items(prd.smallest_working_core)
+        smallest_working_core = JobRunner._meaningful_prd_items(
+            prd.smallest_working_core
+        )
         if not smallest_working_core:
             missing.append("smallest_working_core")
-        small_parts = JobRunner._non_empty_items(prd.small_parts)
+        small_parts = JobRunner._meaningful_prd_items(prd.small_parts)
         if not small_parts:
             missing.append("small_parts")
         elif len(small_parts) == 1:
@@ -3616,7 +3631,9 @@ class JobRunner:
             missing.append("smallest_working_core_covered_by_small_parts")
         if min_small_parts > 0 and small_parts and len(small_parts) < min_small_parts:
             missing.append("small_parts_split_for_autonomy")
-        incremental_milestones = JobRunner._non_empty_items(prd.incremental_milestones)
+        incremental_milestones = JobRunner._meaningful_prd_items(
+            prd.incremental_milestones
+        )
         if not incremental_milestones:
             missing.append("incremental_milestones")
         elif small_parts and len(incremental_milestones) < len(small_parts):
@@ -3639,7 +3656,7 @@ class JobRunner:
             and uncovered_incremental_milestone_small_parts
         ):
             missing.append("incremental_milestones_semantically_cover_small_parts")
-        acceptance_tests = JobRunner._non_empty_items(prd.acceptance_tests)
+        acceptance_tests = JobRunner._meaningful_prd_items(prd.acceptance_tests)
         acceptance_test_small_part_coverage = JobRunner._semantic_item_coverage(
             small_parts,
             acceptance_tests,
@@ -3667,11 +3684,14 @@ class JobRunner:
             missing.append("acceptance_tests_semantically_cover_small_parts")
         if acceptance_tests and non_observable_acceptance_tests:
             missing.append("acceptance_tests_observable")
-        if not JobRunner._non_empty_items(prd.definition_of_done):
+        if not JobRunner._meaningful_prd_items(prd.definition_of_done):
             missing.append("definition_of_done")
-        required_artifacts = valid_artifact_paths(prd.required_artifacts)
-        invalid_required_artifacts = invalid_artifact_paths(prd.required_artifacts)
-        if not required_artifacts and not invalid_required_artifacts:
+        required_artifact_items = JobRunner._meaningful_prd_items(
+            prd.required_artifacts
+        )
+        required_artifacts = valid_artifact_paths(required_artifact_items)
+        invalid_required_artifacts = invalid_artifact_paths(required_artifact_items)
+        if not required_artifacts:
             missing.append("required_artifacts")
         if invalid_required_artifacts:
             missing.append("required_artifacts_valid_paths")
@@ -3754,7 +3774,7 @@ class JobRunner:
             and uncovered_test_artifact_domain_small_parts
         ):
             missing.append("test_artifacts_semantically_cover_small_parts")
-        if JobRunner._non_empty_items(prd.open_questions):
+        if JobRunner._meaningful_prd_items(prd.open_questions):
             missing.append("open_questions_resolved")
             warnings.append("open_questions_present")
         missing_acceptance_test_count = max(0, len(small_parts) - len(acceptance_tests))
@@ -3797,7 +3817,9 @@ class JobRunner:
             "acceptance_test_small_part_coverage": acceptance_test_small_part_coverage,
             "uncovered_acceptance_small_parts": uncovered_acceptance_small_parts,
             "non_observable_acceptance_tests": non_observable_acceptance_tests,
-            "definition_of_done_count": len(JobRunner._non_empty_items(prd.definition_of_done)),
+            "definition_of_done_count": len(
+                JobRunner._meaningful_prd_items(prd.definition_of_done)
+            ),
             "required_artifact_count": len(required_artifacts),
             "required_artifacts": sorted(required_artifacts),
             "source_required_artifact_count": len(source_required_artifacts),
@@ -3843,6 +3865,67 @@ class JobRunner:
     @staticmethod
     def _non_empty_items(items: list[str]) -> list[str]:
         return [item.strip() for item in items if item.strip()]
+
+    @classmethod
+    def _meaningful_prd_items(cls, items: list[str]) -> list[str]:
+        return [
+            item
+            for item in cls._non_empty_items(items)
+            if not cls._looks_like_placeholder_prd_item(item)
+        ]
+
+    @staticmethod
+    def _looks_like_placeholder_prd_item(item: str) -> bool:
+        value = " ".join(str(item).split())
+        if not value:
+            return True
+        lowered = value.lower().strip(" .:-_[]()")
+        compact = re.sub(r"[^a-z0-9]+", "", lowered)
+        if not compact:
+            return True
+        exact_placeholders = {
+            "coming soon",
+            "fill in later",
+            "fill me in",
+            "fixme",
+            "n/a",
+            "na",
+            "none",
+            "none known",
+            "no open questions",
+            "not applicable",
+            "not specified",
+            "placeholder",
+            "tbd",
+            "to be decided",
+            "to be defined",
+            "to be determined",
+            "todo",
+            "unknown",
+            "unspecified",
+        }
+        compact_placeholders = {
+            "comingsoon",
+            "fillinlater",
+            "fillmein",
+            "fixme",
+            "loremipsum",
+            "na",
+            "none",
+            "noneknown",
+            "noopenquestions",
+            "notapplicable",
+            "notspecified",
+            "placeholder",
+            "tbd",
+            "tobedecided",
+            "tobedefined",
+            "tobedetermined",
+            "todo",
+            "unknown",
+            "unspecified",
+        }
+        return lowered in exact_placeholders or compact in compact_placeholders
 
     def _refine_task_graph_for_autonomy(
         self,
@@ -3997,10 +4080,10 @@ class JobRunner:
         prd: PRD,
         task_graph: TaskGraph,
     ) -> TaskGraph:
-        acceptance_tests = self._non_empty_items(prd.acceptance_tests)
-        definition_of_done = self._non_empty_items(prd.definition_of_done)
+        acceptance_tests = self._meaningful_prd_items(prd.acceptance_tests)
+        definition_of_done = self._meaningful_prd_items(prd.definition_of_done)
         source_required_artifacts = self._valid_unique_artifact_paths(
-            prd.required_artifacts
+            self._meaningful_prd_items(prd.required_artifacts)
         )
         source_implementation_artifacts = [
             path
@@ -5130,7 +5213,9 @@ class JobRunner:
         executable_task_ids = [
             task.id for task in task_graph.tasks if task.role in executable_roles
         ]
-        small_parts = JobRunner._non_empty_items(prd.small_parts) if prd is not None else []
+        small_parts = (
+            JobRunner._meaningful_prd_items(prd.small_parts) if prd is not None else []
+        )
         implementation_small_parts = [
             part for part in small_parts if not JobRunner._looks_like_test_work_item(part)
         ]
@@ -5140,7 +5225,9 @@ class JobRunner:
             if JobRunner._looks_like_test_work_item(part)
         ]
         acceptance_tests = (
-            JobRunner._non_empty_items(prd.acceptance_tests) if prd is not None else []
+            JobRunner._meaningful_prd_items(prd.acceptance_tests)
+            if prd is not None
+            else []
         )
         implementation_tasks = [
             task for task in task_graph.tasks if task.role in JobRunner.IMPLEMENTATION_TASK_ROLES
