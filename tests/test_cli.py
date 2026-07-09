@@ -4646,6 +4646,113 @@ def test_supervise_job_treats_planning_quality_attempts_as_progress(
     ] == 2
 
 
+def test_supervise_job_stalls_after_repeated_planning_strategy_change(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    from packages.orchestrator.job_store import FileJobStore
+
+    jobs_dir = tmp_path / "jobs"
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    spec = JobSpec(
+        job_id="supervise-planning-strategy-stall-job",
+        request_text="Build something useful.",
+        repo_path=str(workspace),
+        metadata={"constraints": {"require_prd_quality": True}},
+    )
+    store = FileJobStore(jobs_dir)
+    record = store.create(spec)
+    record.status = JobStatus.BLOCKED
+    record.last_error = "prd_quality_gate_failed:acceptance_tests"
+    record.outputs["prd_quality"] = {
+        "passed": False,
+        "missing": ["acceptance_tests"],
+        "warnings": [],
+    }
+    record.outputs["prd_quality_attempts"] = [
+        {
+            "attempt": 1,
+            "action": "refine",
+            "passed": False,
+            "missing": ["acceptance_tests"],
+            "warnings": [],
+        },
+        {
+            "attempt": 2,
+            "action": "refine",
+            "passed": False,
+            "missing": ["acceptance_tests"],
+            "warnings": [],
+        },
+    ]
+    store.update(record)
+    captured: dict[str, object] = {"resume_count": 0}
+
+    class DummyRunner:
+        def resume_job(self, job_id: str) -> JobRecord:
+            captured["resume_count"] += 1
+            resumed = captured["store"].get(job_id)
+            attempts = resumed.outputs.setdefault("prd_quality_attempts", [])
+            attempts.append(
+                {
+                    "attempt": len(attempts) + 1,
+                    "action": "refine",
+                    "passed": False,
+                    "missing": ["acceptance_tests"],
+                    "warnings": [],
+                }
+            )
+            resumed.status = JobStatus.BLOCKED
+            resumed.last_error = "prd_quality_gate_failed:acceptance_tests"
+            captured["store"].update(resumed)
+            return resumed
+
+    def fake_build_default_runner(config_dir: str | Path, workspace_root: str | Path, store=None):
+        captured["store"] = store
+        return DummyRunner(), None
+
+    monkeypatch.setattr("apps.cli.build_default_runner", fake_build_default_runner)
+
+    exit_code = main(
+        [
+            "supervise-job",
+            "--config-dir",
+            str(config_dir()),
+            "--jobs-dir",
+            str(jobs_dir),
+            "--job-id",
+            "supervise-planning-strategy-stall-job",
+            "--max-cycles",
+            "4",
+            "--steps-per-cycle",
+            "1",
+            "--max-stalled-cycles",
+            "1",
+        ]
+    )
+
+    assert exit_code == 1
+    assert captured["resume_count"] == 2
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["terminal_reason"] == "stalled"
+    assert payload["stalled"] is True
+    assert payload["stalled_cycle_count"] == 1
+    assert [cycle["stalled_cycle_count"] for cycle in payload["cycle_summaries"]] == [0, 1]
+    assert [
+        cycle["progress_marker"]["prd_quality_attempt_count"]
+        for cycle in payload["cycle_summaries"]
+    ] == [3, 4]
+    assert [
+        cycle["progress_marker"]["planning_strategy_change_recommended"]
+        for cycle in payload["cycle_summaries"]
+    ] == [True, True]
+    assert payload["stall_analysis"]["reason"] == "same_progress_marker_repeated"
+    updated = FileJobStore(jobs_dir).get("supervise-planning-strategy-stall-job")
+    assert updated.spec.metadata["constraints"]["planning_repair_strategy_change"] is True
+
+
 def test_supervise_job_stops_after_runtime_limit(
     tmp_path: Path,
     monkeypatch,

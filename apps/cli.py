@@ -2000,6 +2000,9 @@ def _supervision_progress_marker_detail(cycle_payload: dict[str, Any]) -> dict[s
     planning_quality = summary.get("planning_quality")
     if not isinstance(planning_quality, dict):
         planning_quality = {}
+    planning_repair = planning_quality.get("planning_repair")
+    if not isinstance(planning_repair, dict):
+        planning_repair = {}
     autonomy_readiness = summary.get("autonomy_readiness")
     if not isinstance(autonomy_readiness, dict):
         autonomy_readiness = {}
@@ -2024,6 +2027,21 @@ def _supervision_progress_marker_detail(cycle_payload: dict[str, Any]) -> dict[s
         "task_graph_validation_attempt_count": planning_quality.get(
             "task_graph_validation_attempt_count"
         ),
+        "planning_strategy_change_recommended": bool(
+            planning_repair.get("strategy_change_recommended")
+        ),
+        "planning_repair_last_prd_missing": _string_list(
+            planning_repair.get("last_prd_missing")
+        ),
+        "planning_repair_last_task_graph_error_types": _string_list(
+            planning_repair.get("last_task_graph_error_types")
+        ),
+        "planning_repair_repeated_prd_missing": _string_list(
+            planning_repair.get("repeated_prd_missing")
+        ),
+        "planning_repair_repeated_task_graph_error_types": _string_list(
+            planning_repair.get("repeated_task_graph_error_types")
+        ),
         "autonomy_ready": autonomy_readiness.get("ready"),
         "blocking_item_types": [
             item.get("type") for item in blocking_items if isinstance(item, dict)
@@ -2045,11 +2063,29 @@ def _supervision_progress_marker(detail: dict[str, Any]) -> tuple[Any, ...]:
         detail.get("last_error"),
         detail.get("resume_action"),
         detail.get("resume_task_id"),
-        detail.get("prd_quality_attempt_count"),
-        detail.get("task_graph_validation_attempt_count"),
+        _planning_attempt_progress_marker(detail, "prd_quality_attempt_count"),
+        _planning_attempt_progress_marker(
+            detail,
+            "task_graph_validation_attempt_count",
+        ),
+        detail.get("planning_strategy_change_recommended"),
+        tuple(detail.get("planning_repair_last_prd_missing", [])),
+        tuple(detail.get("planning_repair_last_task_graph_error_types", [])),
+        tuple(detail.get("planning_repair_repeated_prd_missing", [])),
+        tuple(detail.get("planning_repair_repeated_task_graph_error_types", [])),
         detail.get("autonomy_ready"),
         tuple(detail.get("blocking_item_types", [])),
     )
+
+
+def _planning_attempt_progress_marker(detail: dict[str, Any], key: str) -> Any:
+    value = detail.get(key)
+    if (
+        detail.get("planning_strategy_change_recommended") is True
+        and isinstance(value, int)
+    ):
+        return min(value, 3)
+    return value
 
 
 def _supervision_stall_analysis(
