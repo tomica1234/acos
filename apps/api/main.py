@@ -164,6 +164,12 @@ def create_app(
         except KeyError as exc:
             raise HTTPException(status_code=404, detail="approval not found") from exc
 
+    def resume_with_strict_job_constraints(runner: JobRunner, job_id: str) -> JobRecord:
+        record = runner.get(job_id)
+        apply_strict_job_constraints(record)
+        runner.store.update(record)
+        return runner.resume_job(job_id)
+
     def _now_iso() -> str:
         return datetime.now(timezone.utc).isoformat()
 
@@ -689,7 +695,7 @@ def create_app(
                 token=payload.token,
                 approver=payload.approver,
             )
-            record = runner.resume_job(approval.job_id)
+            record = resume_with_strict_job_constraints(runner, approval.job_id)
         except ApprovalError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         return {
@@ -712,7 +718,7 @@ def create_app(
                 approver=payload.approver,
                 reason=payload.reason,
             )
-            record = runner.resume_job(approval.job_id)
+            record = resume_with_strict_job_constraints(runner, approval.job_id)
         except ApprovalError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         return {

@@ -5,8 +5,16 @@ from pathlib import Path
 import yaml
 
 from apps import cli
+from packages.orchestrator.job_constraints import STRICT_JOB_CONSTRAINTS
 from packages.schemas.models import JobStatus
 from tests.fakes import build_approval_harness
+
+
+def _assert_strict_constraints(payload: dict) -> None:
+    constraints = payload["job"]["spec"]["metadata"]["constraints"]
+    for key, value in STRICT_JOB_CONSTRAINTS.items():
+        assert constraints[key] is value
+    assert constraints["test_timeout_seconds"] == 1200
 
 
 def _patch_runner(monkeypatch, harness) -> None:
@@ -73,6 +81,7 @@ def test_cli_approvals_approve_and_resume(tmp_path: Path, monkeypatch, capsys) -
     payload = yaml.safe_load(capsys.readouterr().out)
     assert payload["approval"]["status"] == "approved"
     assert payload["job"]["status"] == JobStatus.DONE.value
+    _assert_strict_constraints(payload)
 
 
 def test_cli_approvals_reject_blocks_job(tmp_path: Path, monkeypatch, capsys) -> None:
@@ -98,6 +107,7 @@ def test_cli_approvals_reject_blocks_job(tmp_path: Path, monkeypatch, capsys) ->
     payload = yaml.safe_load(capsys.readouterr().out)
     assert payload["approval"]["status"] == "rejected"
     assert payload["job"]["status"] == JobStatus.BLOCKED.value
+    _assert_strict_constraints(payload)
 
 
 def test_cli_jobs_resume(tmp_path: Path, monkeypatch, capsys) -> None:
@@ -125,3 +135,4 @@ def test_cli_jobs_resume(tmp_path: Path, monkeypatch, capsys) -> None:
     assert exit_code == 0
     payload = yaml.safe_load(capsys.readouterr().out)
     assert payload["job"]["status"] == JobStatus.DONE.value
+    _assert_strict_constraints(payload)

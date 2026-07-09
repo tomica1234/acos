@@ -2403,6 +2403,13 @@ def load_runner_for_workspace(
     return runner
 
 
+def resume_with_strict_job_constraints(runner: JobRunner, job_id: str) -> JobRecord:
+    record = runner.get(job_id)
+    apply_strict_job_constraints(record)
+    runner.store.update(record)
+    return runner.resume_job(job_id)
+
+
 def serialize_approval(approval: Any) -> dict[str, Any]:
     return approval.model_dump(mode="json")
 
@@ -2529,7 +2536,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             dump_yaml({"job": serialize_job(record)})
             return 0
         if args.jobs_command == "resume":
-            record = runner.resume_job(args.job_id)
+            record = resume_with_strict_job_constraints(runner, args.job_id)
             dump_yaml({"job": serialize_job(record)})
             return 0
     if args.command == "approvals":
@@ -2561,7 +2568,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 token=args.token,
                 approver=args.approver,
             )
-            record = runner.resume_job(approval.job_id)
+            record = resume_with_strict_job_constraints(runner, approval.job_id)
             dump_yaml(
                 {
                     "approval": serialize_approval(approval),
@@ -2576,7 +2583,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 approver=args.approver,
                 reason=args.reason,
             )
-            record = runner.resume_job(approval.job_id)
+            record = resume_with_strict_job_constraints(runner, approval.job_id)
             dump_yaml(
                 {
                     "approval": serialize_approval(approval),
