@@ -77,6 +77,32 @@ def test_test_patch_quality_rejects_vacuous_frontend_assertions() -> None:
         ensure_test_patch_quality([patch], role="test_writer")
 
 
+def test_test_patch_quality_rejects_empty_frontend_tests() -> None:
+    patch = FilePatch(
+        path="backend/test/scaffold.test.js",
+        operation="create",
+        content=(
+            "describe('scaffold backend', () => {\n"
+            "  it('exists', () => {})\n"
+            "})\n"
+        ),
+    )
+
+    with pytest.raises(QualityGateError, match="test_writer attempted to weaken tests"):
+        ensure_test_patch_quality([patch], role="test_writer")
+
+
+def test_test_patch_quality_rejects_python_pass_tests() -> None:
+    patch = FilePatch(
+        path="tests/test_feature.py",
+        operation="create",
+        content="def test_placeholder() -> None:\n    pass\n",
+    )
+
+    with pytest.raises(QualityGateError, match="test_writer attempted to weaken tests"):
+        ensure_test_patch_quality([patch], role="test_writer")
+
+
 def test_test_patch_quality_allows_non_test_files_with_skip_text() -> None:
     patch = FilePatch(
         path="frontend/src/App.tsx",

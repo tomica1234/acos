@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 from pathlib import Path, PurePosixPath
 import re
 from typing import Iterable, Sequence
@@ -216,6 +217,10 @@ def _test_patch_is_suspicious(patch: FilePatch) -> bool:
     )
     if any(snippet in compact for snippet in vacuous_assertions):
         return True
+    if _python_test_has_empty_body(payload):
+        return True
+    if _javascript_test_has_empty_body(compact):
+        return True
 
     suspicious_patterns = (
         r"\bassert\s+True\b",
@@ -227,6 +232,54 @@ def _test_patch_is_suspicious(patch: FilePatch) -> bool:
         r"\.\s*(?:skip|only)\s*\(",
     )
     return any(re.search(pattern, payload) for pattern in suspicious_patterns)
+
+
+def _python_test_has_empty_body(payload: str) -> bool:
+    try:
+        tree = ast.parse(payload)
+    except SyntaxError:
+        return bool(
+            re.search(
+                r"(?ms)^\s*def\s+test_[A-Za-z0-9_]+\s*\([^)]*\)\s*(?:->\s*[^:]+)?\s*:\s*pass\s*$",
+                payload,
+            )
+        )
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        if not node.name.startswith("test_"):
+            continue
+        body = [
+            statement
+            for statement in node.body
+            if not (
+                isinstance(statement, ast.Expr)
+                and isinstance(statement.value, ast.Constant)
+                and isinstance(statement.value.value, str)
+            )
+        ]
+        if len(body) == 1 and _is_empty_test_statement(body[0]):
+            return True
+    return False
+
+
+def _is_empty_test_statement(statement: ast.stmt) -> bool:
+    return (
+        isinstance(statement, ast.Pass)
+        or (
+            isinstance(statement, ast.Expr)
+            and isinstance(statement.value, ast.Constant)
+            and statement.value.value is Ellipsis
+        )
+    )
+
+
+def _javascript_test_has_empty_body(compact_payload: str) -> bool:
+    empty_test_patterns = (
+        r"\b(?:describe|it|test)\([^;{}]*(?:async)?\(\)=>\{\}\)",
+        r"\b(?:describe|it|test)\([^;{}]*function\(\)\{\}\)",
+    )
+    return any(re.search(pattern, compact_payload) for pattern in empty_test_patterns)
 
 
 def _test_patch_payload(patch: FilePatch) -> str:

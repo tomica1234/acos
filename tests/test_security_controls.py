@@ -673,9 +673,8 @@ def test_job_runner_blocks_weak_frontend_test_writer_patch(tmp_path: Path) -> No
                     path="frontend/test/project_scaffold.test.tsx",
                     operation="create",
                     content=(
-                        "import { expect, it } from 'vitest'\n\n"
+                        "import { it } from 'vitest'\n\n"
                         "it('placeholder', () => {\n"
-                        "  expect(true).toBe(true)\n"
                         "})\n"
                     ),
                 )
