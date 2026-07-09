@@ -1138,6 +1138,98 @@ def test_recovery_executor_sync_drops_stale_file_recovery_metadata(
         assert stale_key not in constraints
 
 
+def test_consumed_file_recovery_clears_runtime_file_recovery_context(
+    tmp_path: Path,
+) -> None:
+    recovered_path = "frontend/test/project_scaffold.test.tsx"
+    target = tmp_path / recovered_path
+    target.parent.mkdir(parents=True)
+    target.write_text(
+        "import { expect, test } from 'vitest'\n\n"
+        "test('runtime label', () => {\n"
+        "  const label = renderProjectScaffoldLabel()\n"
+        "  expect(label).toContain('project scaffold')\n"
+        "})\n",
+        encoding="utf-8",
+    )
+    spec = JobSpec(
+        request_text="Build it",
+        repo_path=str(tmp_path),
+        workspace_root=str(tmp_path),
+        target_branch="acos/recovery-runtime-stale-file-context",
+        metadata={
+            "constraints": {
+                "recovery_mode": "target_files_missing",
+                "recovery_strategy": "RETURN_TO_TEST_WRITER",
+                "recovery_next_actor": "test_writer",
+                "recovery_next_status": JobStatus.WRITING_TESTS.value,
+                "return_to_role": "test_writer",
+                "patch_operation_hint": "create",
+                "missing_target_file": recovered_path,
+                "missing_artifacts": [],
+                "failed_patch_role": "test_writer",
+                "failed_patch_path": recovered_path,
+                "failed_patch_operation": "update",
+                "max_autonomous_stages": 12,
+            }
+        },
+    )
+    record = JobRecord(job_id=spec.job_id, spec=spec, status=JobStatus.WRITING_TESTS)
+    record.runtime_state.update(
+        {
+            "recovery_plan": {
+                "id": "plan-resolved-file",
+                "trigger": "target_files_missing",
+                "strategy": "RETURN_TO_TEST_WRITER",
+                "next_status": JobStatus.WRITING_TESTS.value,
+                "next_actor": "test_writer",
+                "status": "completed",
+                "constraints": {
+                    "missing_target_file": recovered_path,
+                    "missing_artifacts": [],
+                    "patch_operation_hint": "create",
+                    "return_to_role": "test_writer",
+                    "failed_patch_role": "test_writer",
+                    "failed_patch_path": recovered_path,
+                    "failed_patch_operation": "update",
+                    "deterministic_creation_attempted": True,
+                    "deterministically_created_files": [recovered_path],
+                    "recreate_target_files_attempt": 2,
+                },
+            },
+            "missing_target_file": recovered_path,
+            "missing_artifacts": [],
+            "patch_operation_hint": "create",
+            "return_to_role": "test_writer",
+            "failed_patch_role": "test_writer",
+            "failed_patch_path": recovered_path,
+            "failed_patch_operation": "update",
+            "deterministic_creation_attempted": True,
+            "deterministically_created_files": [recovered_path],
+            "recreate_target_files_attempt": 2,
+        }
+    )
+
+    JobRunner._consume_completed_recovery_plan(record)
+
+    assert record.runtime_state["recovery_plan"]["consumed_by_runner"] is True
+    for stale_key in (
+        "missing_target_file",
+        "missing_artifacts",
+        "patch_operation_hint",
+        "return_to_role",
+        "failed_patch_role",
+        "failed_patch_path",
+        "failed_patch_operation",
+        "deterministic_creation_attempted",
+        "deterministically_created_files",
+        "recreate_target_files_attempt",
+    ):
+        assert stale_key not in record.runtime_state
+        assert stale_key not in record.spec.metadata["constraints"]
+    assert record.spec.metadata["constraints"]["max_autonomous_stages"] == 12
+
+
 def test_recreate_target_files_treats_directory_target_as_missing(
     tmp_path: Path,
 ) -> None:

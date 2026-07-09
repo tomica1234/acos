@@ -137,6 +137,18 @@ class JobRunner:
         "recovery_attempt",
         "recovery_step_count",
     }
+    FILE_RECOVERY_CONSTRAINT_KEYS = {
+        "deterministic_creation_attempted",
+        "deterministically_created_files",
+        "failed_patch_operation",
+        "failed_patch_path",
+        "failed_patch_role",
+        "missing_artifacts",
+        "missing_target_file",
+        "patch_operation_hint",
+        "recreate_target_files_attempt",
+        "return_to_role",
+    }
     SEMANTIC_ANCHOR_TOKENS = {
         "auth",
         "billing",
@@ -671,24 +683,14 @@ class JobRunner:
 
     @staticmethod
     def _clear_resolved_file_recovery_constraints(record: JobRecord) -> None:
-        for key in (
-            "missing_target_file",
-            "patch_operation_hint",
-            "missing_artifacts",
-            "failed_patch_path",
-            "failed_patch_operation",
-        ):
+        for key in JobRunner.FILE_RECOVERY_CONSTRAINT_KEYS:
             record.runtime_state.pop(key, None)
         constraints = record.spec.metadata.get("constraints")
         if not isinstance(constraints, dict):
             return
         for key in (
             *JobRunner.RECOVERY_METADATA_CONSTRAINT_KEYS,
-            "missing_target_file",
-            "patch_operation_hint",
-            "missing_artifacts",
-            "failed_patch_path",
-            "failed_patch_operation",
+            *JobRunner.FILE_RECOVERY_CONSTRAINT_KEYS,
         ):
             constraints.pop(key, None)
 
@@ -1294,6 +1296,7 @@ class JobRunner:
             return
         for key in (
             *JobRunner.RECOVERY_METADATA_CONSTRAINT_KEYS,
+            *JobRunner.FILE_RECOVERY_CONSTRAINT_KEYS,
             "failed_stage_ids",
             "failed_stages",
             "failed_task_id",
@@ -1301,8 +1304,6 @@ class JobRunner:
             "missing_task_ids",
             "stages_missing_test_patches",
             "unmet_dependencies",
-            "patch_operation_hint",
-            "missing_target_file",
         ):
             constraints.pop(key, None)
 
