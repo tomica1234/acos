@@ -697,6 +697,14 @@ def _python_literal_call_value(
         if len(args) != 1 or not isinstance(args[0], (str, tuple)):
             return _MISSING_LITERAL
         return getattr(receiver, function.attr)(args[0])
+    if function.attr in {"lower", "upper", "casefold", "strip"}:
+        if args and function.attr != "strip":
+            return _MISSING_LITERAL
+        if len(args) > 1:
+            return _MISSING_LITERAL
+        if args and not isinstance(args[0], str):
+            return _MISSING_LITERAL
+        return getattr(receiver, function.attr)(*args)
     return _MISSING_LITERAL
 
 
@@ -755,6 +763,9 @@ def _literal_value(
         and expression.id in literal_bindings
     ):
         return literal_bindings[expression.id]
+    call_value = _python_literal_call_value(expression, literal_bindings)
+    if call_value is not _MISSING_LITERAL:
+        return call_value
     try:
         return ast.literal_eval(expression)
     except (ValueError, TypeError):
@@ -767,7 +778,10 @@ _JS_LITERAL = (
 )
 _JS_REGEX_LITERAL = r"/(?:\\.|[^/\\])+/[dgimsuvy]*"
 _JS_IDENTIFIER = r"[A-Za-z_$][\w$]*"
-_JS_EXPECTATION_VALUE = rf"(?:{_JS_LITERAL}|{_JS_IDENTIFIER})"
+_JS_STRING_METHOD_CALL = (
+    rf"{_JS_IDENTIFIER}\s*\.\s*(?:toLowerCase|toUpperCase|trim)\s*\(\s*\)"
+)
+_JS_EXPECTATION_VALUE = rf"(?:{_JS_LITERAL}|{_JS_STRING_METHOD_CALL}|{_JS_IDENTIFIER})"
 _JS_EXPECTATION_ARGUMENT = rf"(?:{_JS_EXPECTATION_VALUE}|{_JS_REGEX_LITERAL})"
 
 
@@ -857,6 +871,21 @@ def _javascript_expression_value(
     stripped = expression.strip()
     if stripped in literal_bindings:
         return literal_bindings[stripped]
+    method_match = re.fullmatch(
+        rf"(?P<name>{_JS_IDENTIFIER})\s*\.\s*(?P<method>toLowerCase|toUpperCase|trim)\s*\(\s*\)",
+        stripped,
+    )
+    if method_match:
+        receiver = literal_bindings.get(method_match.group("name"), _MISSING_LITERAL)
+        if not isinstance(receiver, str):
+            return _MISSING_LITERAL
+        method = method_match.group("method")
+        if method == "toLowerCase":
+            return receiver.lower()
+        if method == "toUpperCase":
+            return receiver.upper()
+        if method == "trim":
+            return receiver.strip()
     if re.fullmatch(_JS_REGEX_LITERAL, stripped):
         return _javascript_regex_value(stripped)
     return _javascript_literal_value(stripped)
