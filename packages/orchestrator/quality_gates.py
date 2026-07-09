@@ -366,10 +366,10 @@ def _payload_introduces_test_case(payload: str) -> bool:
 
 
 def _line_has_test_assertion(line: str) -> bool:
-    stripped = _line_code_before_comment(line)
+    stripped = _mask_quoted_segments(line.strip())
+    stripped = _line_code_before_comment(stripped)
     if not stripped:
         return False
-    stripped = _mask_quoted_segments(stripped)
     return any(
         re.search(pattern, stripped)
         for pattern in (

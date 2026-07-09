@@ -305,6 +305,23 @@ def test_test_patch_quality_rejects_frontend_string_only_expectation() -> None:
         ensure_test_patch_quality([patch], role="test_writer")
 
 
+def test_test_patch_quality_allows_frontend_expectation_after_quoted_comment_marker() -> None:
+    patch = FilePatch(
+        path="frontend/test/project_scaffold.test.tsx",
+        operation="create",
+        content=(
+            "import { expect, test } from 'vitest'\n\n"
+            "test('loads project scaffold', () => {\n"
+            "  const label = renderProjectScaffold()\n"
+            "  const note = \"literal // marker\"; expect(label).toContain('project')\n"
+            "  renderProjectScaffold(note)\n"
+            "})\n"
+        ),
+    )
+
+    ensure_test_patch_quality([patch], role="test_writer")
+
+
 def test_test_patch_quality_rejects_one_frontend_test_without_assertion() -> None:
     patch = FilePatch(
         path="frontend/test/project_scaffold.test.tsx",
