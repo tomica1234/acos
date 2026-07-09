@@ -6106,7 +6106,10 @@ class JobRunner:
             self.store.update(record)
             if not self._fixer_allows_progress(record, task, fix):
                 return test_result
-            ensure_fixer_safe(fix.patches)
+            ensure_fixer_safe(
+                fix.patches,
+                workspace_root=self._workspace_root(record),
+            )
             self._apply_patches(record, "fixer", fix.patches)
             if same_failure_repeats >= self.max_same_failure_repeats:
                 self._store_failure_diagnosis(record, diagnosis)
@@ -7335,7 +7338,10 @@ class JobRunner:
                 )
                 if not self._fixer_allows_progress(record, primary_task, fix):
                     return review, security_review
-                ensure_fixer_safe(fix.patches)
+                ensure_fixer_safe(
+                    fix.patches,
+                    workspace_root=self._workspace_root(record),
+                )
                 self._apply_patches(record, "fixer", fix.patches)
 
     def _run_stage_review_gate(

@@ -26,8 +26,12 @@ def ensure_reviews_pass(
         raise QualityGateError("Security review did not approve the change set")
 
 
-def ensure_fixer_safe(patches: list[FilePatch]) -> None:
-    ensure_test_patch_quality(patches, role="fixer")
+def ensure_fixer_safe(
+    patches: list[FilePatch],
+    *,
+    workspace_root: str | Path | None = None,
+) -> None:
+    ensure_test_patch_quality(patches, role="fixer", workspace_root=workspace_root)
 
 
 def ensure_test_patch_quality(
