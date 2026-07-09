@@ -265,21 +265,36 @@ def _test_patch_removes_test_coverage(patch: FilePatch) -> bool:
 def _test_patch_removes_assertions_without_replacement(patch: FilePatch) -> bool:
     if patch.operation != "update" or patch.unified_diff is None:
         return False
-    removed = _test_patch_diff_lines(patch.unified_diff, "-")
-    if not any(_line_has_test_assertion(line) for line in removed):
-        return False
-    added = _test_patch_diff_lines(patch.unified_diff, "+")
-    return not any(_line_has_test_assertion(line) for line in added)
+    for removed, added in _test_patch_diff_hunks(patch.unified_diff):
+        if any(_line_has_test_assertion(line) for line in removed) and not any(
+            _line_has_test_assertion(line) for line in added
+        ):
+            return True
+    return False
 
 
-def _test_patch_diff_lines(unified_diff: str, prefix: str) -> list[str]:
-    lines: list[str] = []
-    header_prefix = "---" if prefix == "-" else "+++"
+def _test_patch_diff_hunks(unified_diff: str) -> list[tuple[list[str], list[str]]]:
+    hunks: list[tuple[list[str], list[str]]] = []
+    removed: list[str] | None = None
+    added: list[str] | None = None
     for line in unified_diff.splitlines():
-        if line.startswith(header_prefix) or not line.startswith(prefix):
+        if line.startswith("@@"):
+            if removed is not None and added is not None:
+                hunks.append((removed, added))
+            removed = []
+            added = []
             continue
-        lines.append(line[1:])
-    return lines
+        if removed is None or added is None:
+            continue
+        if line.startswith("---") or line.startswith("+++"):
+            continue
+        if line.startswith("-"):
+            removed.append(line[1:])
+        elif line.startswith("+"):
+            added.append(line[1:])
+    if removed is not None and added is not None:
+        hunks.append((removed, added))
+    return hunks
 
 
 def _test_patch_introduces_test_case_without_assertion(payload: str) -> bool:

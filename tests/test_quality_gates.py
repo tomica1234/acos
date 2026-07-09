@@ -424,6 +424,30 @@ def test_test_patch_quality_rejects_assertion_removal_with_non_assertion_additio
         ensure_test_patch_quality([patch], role="fixer")
 
 
+def test_test_patch_quality_rejects_assertion_removal_hidden_by_other_hunk() -> None:
+    patch = FilePatch(
+        path="tests/test_feature.py",
+        operation="update",
+        unified_diff=(
+            "--- tests/test_feature.py\n"
+            "+++ tests/test_feature.py\n"
+            "@@ -1,3 +1,3 @@\n"
+            " def test_feature_status() -> None:\n"
+            "     result = build_feature()\n"
+            "-    assert result.status == 'ready'\n"
+            "+    result.status\n"
+            "@@ -8,3 +8,4 @@\n"
+            " def test_feature_name() -> None:\n"
+            "     result = build_feature()\n"
+            "     assert result.name == 'feature'\n"
+            "+    assert result.name.startswith('f')\n"
+        ),
+    )
+
+    with pytest.raises(QualityGateError, match="fixer attempted to weaken tests"):
+        ensure_test_patch_quality([patch], role="fixer")
+
+
 def test_test_patch_quality_allows_assertion_replacement_diff() -> None:
     patch = FilePatch(
         path="tests/test_feature.py",
