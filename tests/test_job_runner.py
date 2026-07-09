@@ -103,6 +103,7 @@ def test_clear_active_recovery_state_removes_stale_done_markers(tmp_path: Path) 
         },
     )
     record = JobRecord(job_id=spec.job_id, spec=spec, status=JobStatus.FINALIZING)
+    record.last_error = "invalid_task_graph"
     record.runtime_state.update(
         {
             "current_recovery_event": {"error": "invalid_task_graph"},
@@ -117,6 +118,7 @@ def test_clear_active_recovery_state_removes_stale_done_markers(tmp_path: Path) 
 
     JobRunner._clear_active_recovery_state(record)
 
+    assert record.last_error is None
     assert "current_recovery_event" not in record.runtime_state
     assert "last_recoverable_error" not in record.runtime_state
     assert "recovery_plan" not in record.runtime_state
@@ -165,8 +167,13 @@ def test_consume_completed_recovery_plan_clears_resolved_file_recovery_constrain
         },
     )
     record = JobRecord(job_id=spec.job_id, spec=spec, status=JobStatus.WRITING_TESTS)
+    record.last_error = "target_files_missing:update target does not exist"
     record.runtime_state.update(
         {
+            "current_recovery_event": {
+                "error": "target_files_missing:update target does not exist",
+            },
+            "last_recoverable_error": "target_files_missing:update target does not exist",
             "missing_target_file": target,
             "failed_patch_path": target,
             "failed_patch_operation": "update",
@@ -181,10 +188,17 @@ def test_consume_completed_recovery_plan_clears_resolved_file_recovery_constrain
             },
         }
     )
+    record.outputs["last_recoverable_error"] = (
+        "target_files_missing:update target does not exist"
+    )
 
     JobRunner._consume_completed_recovery_plan(record)
 
+    assert record.last_error is None
     assert record.runtime_state["recovery_plan"]["consumed_by_runner"] is True
+    assert "current_recovery_event" not in record.runtime_state
+    assert "last_recoverable_error" not in record.runtime_state
+    assert "last_recoverable_error" not in record.outputs
     assert "missing_target_file" not in record.runtime_state
     assert "failed_patch_path" not in record.runtime_state
     assert record.spec.metadata["constraints"] == {"max_autonomous_stages": 12}

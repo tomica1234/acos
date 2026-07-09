@@ -683,6 +683,10 @@ class JobRunner:
 
     @staticmethod
     def _clear_resolved_file_recovery_constraints(record: JobRecord) -> None:
+        record.last_error = None
+        record.runtime_state.pop("current_recovery_event", None)
+        record.runtime_state.pop("last_recoverable_error", None)
+        record.outputs.pop("last_recoverable_error", None)
         for key in JobRunner.FILE_RECOVERY_CONSTRAINT_KEYS:
             record.runtime_state.pop(key, None)
         constraints = record.spec.metadata.get("constraints")
@@ -1284,6 +1288,7 @@ class JobRunner:
 
     @staticmethod
     def _clear_active_recovery_state(record: JobRecord) -> None:
+        record.last_error = None
         for key in (
             "current_recovery_event",
             "last_recoverable_error",
