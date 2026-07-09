@@ -575,6 +575,57 @@ def test_recreate_target_files_routes_app_backend_file_to_implementer(
     assert record.status == JobStatus.IMPLEMENTING
 
 
+def test_recreate_target_files_routes_mixed_setup_and_app_source_to_implementer(
+    tmp_path: Path,
+) -> None:
+    setup_path = "backend/main.py"
+    source_path = "backend/auth.py"
+    spec = JobSpec(
+        request_text="Build auth backend",
+        repo_path=str(tmp_path),
+        workspace_root=str(tmp_path),
+        target_branch="acos/recovery-mixed-source-owner",
+    )
+    record = JobRecord(job_id=spec.job_id, spec=spec, status=JobStatus.RECOVERING)
+    record.runtime_state["recovery_plan"] = {
+        "id": "plan-mixed-source-owner",
+        "trigger": "target_files_missing",
+        "strategy": "RETURN_TO_IMPLEMENTER",
+        "next_status": JobStatus.IMPLEMENTING.value,
+        "next_actor": "implementer",
+        "steps": ["RETURN_TO_IMPLEMENTER", "RECREATE_TARGET_FILES"],
+        "current_step_index": 0,
+        "status": "pending",
+        "constraints": {
+            "required_artifacts": [setup_path, source_path],
+            "target_files": [setup_path, source_path],
+        },
+    }
+    executor = RecoveryExecutor()
+
+    executor.execute_until_ready(record)
+    assert not (tmp_path / setup_path).exists()
+    assert not (tmp_path / source_path).exists()
+    first_plan = record.runtime_state["recovery_plan"]
+    assert first_plan["status"] == "running"
+    assert first_plan["next_actor"] == "implementer"
+    assert first_plan["constraints"]["return_to_role"] == "implementer"
+
+    executor.execute_until_ready(record)
+
+    plan = record.runtime_state["recovery_plan"]
+    assert (tmp_path / setup_path).exists()
+    assert not (tmp_path / source_path).exists()
+    assert plan["status"] == "completed"
+    assert plan["next_actor"] == "implementer"
+    assert plan["next_status"] == JobStatus.IMPLEMENTING.value
+    assert plan["constraints"]["deterministically_created_files"] == [setup_path]
+    assert plan["constraints"]["missing_artifacts"] == [source_path]
+    assert "force_project_setup_scaffold" not in plan["constraints"]
+    assert "force_project_setup_scaffold" not in record.spec.metadata["constraints"]
+    assert record.status == JobStatus.IMPLEMENTING
+
+
 def test_recreate_target_files_recovery_replans_invalid_artifact_paths(
     tmp_path: Path,
 ) -> None:

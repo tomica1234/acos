@@ -245,7 +245,17 @@ class RecoveryExecutor:
         constraints: dict[str, Any],
         missing: list[str],
     ) -> None:
-        if not any(self._looks_like_project_setup_path(path) for path in missing):
+        non_test_paths = [
+            path for path in missing if not self._looks_like_test_path(path)
+        ]
+        app_source_paths = [
+            path
+            for path in non_test_paths
+            if not self._looks_like_project_setup_path(path)
+        ]
+        if app_source_paths or not any(
+            self._looks_like_project_setup_path(path) for path in missing
+        ):
             return
         constraints["force_project_setup_scaffold"] = True
         metadata_constraints = record.spec.metadata.setdefault("constraints", {})
@@ -275,7 +285,9 @@ class RecoveryExecutor:
         non_test_paths = [
             path for path in missing if not cls._looks_like_test_path(path)
         ]
-        if any(cls._looks_like_project_setup_path(path) for path in non_test_paths):
+        if non_test_paths and all(
+            cls._looks_like_project_setup_path(path) for path in non_test_paths
+        ):
             return "scaffold"
         if non_test_paths:
             return "implementer"
