@@ -2826,6 +2826,9 @@ class JobRunner:
             tasks.append(task)
 
         if not normalized_task_ids:
+            if "task_graph_normalization" in record.outputs:
+                record.outputs.pop("task_graph_normalization", None)
+                self.store.update(record)
             return task_graph
 
         normalized = TaskGraph(

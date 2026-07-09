@@ -201,6 +201,101 @@ def test_project_setup_ignored_artifacts_are_recovered_as_invalid_task_graph(
     assert record.spec.metadata["constraints"]["ignored_project_setup_artifacts"] == ignored
 
 
+def test_project_setup_normalization_clears_stale_ignored_artifacts(
+    tmp_path: Path,
+) -> None:
+    runner, _environment, record = _runner(tmp_path)
+    bad_graph = TaskGraph(
+        goal="Build English vocabulary test app",
+        tasks=[
+            PlannedTask(
+                id="project-scaffold",
+                title="Project scaffold",
+                description="Create backend frontend shared monorepo setup",
+                role="architect",
+                target_files=["backend/auth.py"],
+                required_artifacts=["backend/main.py"],
+            )
+        ],
+    )
+    clean_graph = TaskGraph(
+        goal="Build English vocabulary test app",
+        tasks=[
+            PlannedTask(
+                id="auth-backend",
+                title="Build auth backend",
+                description="Implement backend auth endpoints.",
+                role="implementer",
+                target_files=["backend/auth.py"],
+                required_artifacts=["backend/auth.py"],
+            )
+        ],
+    )
+
+    runner._normalize_project_setup_task_graph(record, bad_graph)
+    assert runner._ignored_project_setup_artifacts(record) == [
+        {"task_id": "project-scaffold", "paths": ["backend/auth.py"]}
+    ]
+
+    normalized = runner._normalize_project_setup_task_graph(record, clean_graph)
+
+    assert normalized == clean_graph
+    assert "task_graph_normalization" not in record.outputs
+    assert runner._ignored_project_setup_artifacts(record) == []
+
+
+def test_project_setup_repair_can_clear_stale_ignored_artifacts_and_pass(
+    tmp_path: Path,
+) -> None:
+    bad_graph = TaskGraph(
+        goal="Build English vocabulary test app",
+        tasks=[
+            PlannedTask(
+                id="project-scaffold",
+                title="Project scaffold",
+                description="Create backend frontend shared monorepo setup",
+                role="architect",
+                target_files=["backend/auth.py"],
+                required_artifacts=["backend/main.py"],
+            )
+        ],
+    )
+    repaired_graph = TaskGraph(
+        goal="Build English vocabulary test app",
+        tasks=[
+            PlannedTask(
+                id="auth-backend",
+                title="Build auth backend",
+                description="Implement backend auth endpoints.",
+                role="implementer",
+                target_files=["backend/auth.py"],
+                required_artifacts=["backend/auth.py"],
+            )
+        ],
+    )
+    runner, _environment, record = _runner(
+        tmp_path,
+        scenario={"planner": [bad_graph.model_dump(), repaired_graph.model_dump()]},
+    )
+    record.spec.metadata["constraints"] = {
+        "require_task_artifacts": True,
+        "task_graph_validation_refinement_attempts": 1,
+    }
+    prd = PRD(
+        title="English vocabulary app",
+        problem_statement="Build the app.",
+    )
+
+    result = runner._load_or_repair_task_graph_for_autonomy(record, prd)
+
+    assert result == repaired_graph
+    assert record.outputs["task_graph_validation"]["valid"] is True
+    assert record.outputs["task_graph_validation"]["ignored_project_setup_artifacts"] == []
+    assert "task_graph_normalization" not in record.outputs
+    assert "recovery_plan" not in record.runtime_state
+    assert "ignored_project_setup_artifacts" not in record.spec.metadata["constraints"]
+
+
 def test_project_setup_cannot_enter_test_writer_before_required_artifacts_exist(
     tmp_path: Path,
 ) -> None:
