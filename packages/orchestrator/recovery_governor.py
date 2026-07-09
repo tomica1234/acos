@@ -669,6 +669,13 @@ class RecoveryGovernor:
             constraints["uncovered_implementation_artifact_domain_small_parts"] = (
                 uncovered_implementation_domains
             )
+        uncovered_test_domains = runtime_state.get(
+            "uncovered_test_artifact_domain_small_parts"
+        )
+        if isinstance(uncovered_test_domains, list) and uncovered_test_domains:
+            constraints["uncovered_test_artifact_domain_small_parts"] = (
+                uncovered_test_domains
+            )
         non_observable = runtime_state.get("non_observable_acceptance_tests")
         if isinstance(non_observable, list) and non_observable:
             constraints["non_observable_acceptance_tests"] = non_observable

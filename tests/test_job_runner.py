@@ -1910,7 +1910,11 @@ def test_job_runner_plan_job_stops_after_validated_task_graph(tmp_path: Path) ->
                     "double(4) returns 8",
                 ],
                 definition_of_done=["All generated tests pass"],
-                required_artifacts=["add_one.py", "double.py", "tests/test_feature.py"],
+                required_artifacts=[
+                    "add_one.py",
+                    "double.py",
+                    "tests/test_add_one_double.py",
+                ],
             ).model_dump(),
             "architect": ArchitecturePlan(summary="Simple architecture").model_dump(),
             "planner": TaskGraph(
@@ -8250,6 +8254,21 @@ def test_job_runner_blocks_prd_quality_when_acceptance_tests_do_not_cover_small_
         "uncovered_implementation_artifact_domain_small_parts": [],
         "test_required_artifact_count": 1,
         "test_required_artifacts": ["tests/test_feature.py"],
+        "test_artifacts_semantically_cover_small_parts": True,
+        "test_artifact_domain_coverage": [
+            {
+                "small_part_index": 1,
+                "small_part": "Create feature module",
+                "required_anchor_tokens": [],
+                "required_domain_tokens": [],
+                "covered_anchor_tokens": [],
+                "covered_domain_tokens": [],
+                "missing_anchor_tokens": [],
+                "test_artifacts": [],
+                "covered": True,
+            }
+        ],
+        "uncovered_test_artifact_domain_small_parts": [],
         "invalid_required_artifacts": [],
     }
     assert "architect" not in record.outputs
@@ -8424,7 +8443,8 @@ def test_prd_quality_rejects_generic_implementation_artifacts_missing_domain_tok
         definition_of_done=["All tests pass"],
         required_artifacts=[
             "backend/main.py",
-            "backend/tests/test_project_setup.py",
+            "backend/tests/test_auth.py",
+            "backend/tests/test_word_sets.py",
         ],
     )
 
@@ -8482,7 +8502,8 @@ def test_prd_quality_accepts_domain_specific_implementation_artifacts() -> None:
         required_artifacts=[
             "backend/auth.py",
             "backend/word_sets.py",
-            "backend/tests/test_project_setup.py",
+            "backend/tests/test_auth.py",
+            "backend/tests/test_word_sets.py",
         ],
     )
 
@@ -8492,6 +8513,96 @@ def test_prd_quality_accepts_domain_specific_implementation_artifacts() -> None:
     assert report["missing"] == []
     assert report["implementation_artifacts_semantically_cover_small_parts"] is True
     assert report["uncovered_implementation_artifact_domain_small_parts"] == []
+
+
+def test_prd_quality_rejects_generic_test_artifacts_missing_domain_tokens() -> None:
+    prd = PRD(
+        title="English Vocab App",
+        problem_statement="Teachers need account-based vocabulary practice.",
+        smallest_working_core=["Serve an authenticated vocabulary shell"],
+        small_parts=[
+            "User authentication and roles",
+            "Word set CRUD operations",
+        ],
+        incremental_milestones=[
+            "Users can sign in with roles",
+            "Word set CRUD operations work",
+        ],
+        acceptance_tests=[
+            "Student can register and login",
+            "Teacher can perform CRUD for word sets",
+        ],
+        definition_of_done=["All tests pass"],
+        required_artifacts=[
+            "backend/auth.py",
+            "backend/word_sets.py",
+            "backend/tests/test_project_setup.py",
+        ],
+    )
+
+    report = JobRunner._build_prd_quality_report(prd)
+
+    assert report["passed"] is False
+    assert report["missing"] == ["test_artifacts_semantically_cover_small_parts"]
+    assert report["test_artifacts_semantically_cover_small_parts"] is False
+    assert report["uncovered_test_artifact_domain_small_parts"] == [
+        {
+            "small_part_index": 1,
+            "small_part": "User authentication and roles",
+            "required_anchor_tokens": ["auth"],
+            "required_domain_tokens": ["auth", "role", "user"],
+            "covered_anchor_tokens": [],
+            "covered_domain_tokens": [],
+            "missing_anchor_tokens": ["auth"],
+            "test_artifacts": [],
+            "covered": False,
+        },
+        {
+            "small_part_index": 2,
+            "small_part": "Word set CRUD operations",
+            "required_anchor_tokens": ["crud"],
+            "required_domain_tokens": ["crud", "set", "word"],
+            "covered_anchor_tokens": [],
+            "covered_domain_tokens": [],
+            "missing_anchor_tokens": ["crud"],
+            "test_artifacts": [],
+            "covered": False,
+        },
+    ]
+
+
+def test_prd_quality_accepts_domain_specific_test_artifacts() -> None:
+    prd = PRD(
+        title="English Vocab App",
+        problem_statement="Teachers need account-based vocabulary practice.",
+        smallest_working_core=["Serve an authenticated vocabulary shell"],
+        small_parts=[
+            "User authentication and roles",
+            "Word set CRUD operations",
+        ],
+        incremental_milestones=[
+            "Users can sign in with roles",
+            "Word set CRUD operations work",
+        ],
+        acceptance_tests=[
+            "Student can register and login",
+            "Teacher can perform CRUD for word sets",
+        ],
+        definition_of_done=["All tests pass"],
+        required_artifacts=[
+            "backend/auth.py",
+            "backend/word_sets.py",
+            "backend/tests/test_auth.py",
+            "backend/tests/test_word_sets.py",
+        ],
+    )
+
+    report = JobRunner._build_prd_quality_report(prd)
+
+    assert report["passed"] is True
+    assert report["missing"] == []
+    assert report["test_artifacts_semantically_cover_small_parts"] is True
+    assert report["uncovered_test_artifact_domain_small_parts"] == []
 
 
 def test_job_runner_blocks_prd_quality_when_implementation_artifacts_miss_surface(
@@ -8767,7 +8878,7 @@ def test_prd_quality_rejects_incremental_milestones_missing_domain_anchors() -> 
         required_artifacts=[
             "backend/auth.py",
             "backend/word_sets.py",
-            "tests/test_english_vocab.py",
+            "tests/test_auth_and_word_sets.py",
         ],
     )
 
@@ -8812,7 +8923,7 @@ def test_prd_quality_accepts_incremental_milestones_with_domain_anchors() -> Non
         required_artifacts=[
             "backend/auth.py",
             "backend/word_sets.py",
-            "tests/test_english_vocab.py",
+            "tests/test_auth_and_word_sets.py",
         ],
     )
 
@@ -9006,7 +9117,7 @@ def test_prd_quality_deterministically_repairs_uncovered_acceptance_tests(
         required_artifacts=[
             "backend/src/routes/quiz.js",
             "backend/src/routes/progress.js",
-            "tests/api.test.js",
+            "tests/quiz_progress.test.js",
         ],
     )
 
@@ -9186,7 +9297,7 @@ def test_prd_quality_deterministically_repairs_semantic_incremental_milestones(
         required_artifacts=[
             "backend/auth.py",
             "backend/word_sets.py",
-            "tests/test_english_vocab.py",
+            "tests/test_auth_and_word_sets.py",
         ],
     )
 
@@ -9210,8 +9321,10 @@ def test_prd_quality_deterministically_repairs_semantic_incremental_milestones(
 
 def test_semantic_tokens_split_camel_case_domain_terms() -> None:
     tokens = JobRunner._semantic_tokens("WordSet QuizQuestion UserProgress quizzes")
+    file_tokens = JobRunner._semantic_tokens("tests/test_add_one_double.py")
 
     assert {"word", "set", "quiz", "question", "user", "progress"}.issubset(tokens)
+    assert {"add_one", "double"}.issubset(file_tokens)
 
 
 def test_prd_quality_accepts_semantically_covered_acceptance_tests() -> None:
@@ -9236,7 +9349,7 @@ def test_prd_quality_accepts_semantically_covered_acceptance_tests() -> None:
             "backend/auth.py",
             "backend/word_sets.py",
             "frontend/src/App.tsx",
-            "tests/test_auth_and_words.py",
+            "tests/test_auth_and_word_sets.py",
         ],
     )
 
@@ -9276,7 +9389,7 @@ def test_prd_quality_does_not_treat_word_list_as_crud_acceptance() -> None:
         required_artifacts=[
             "backend/word_sets.py",
             "frontend/src/App.tsx",
-            "tests/test_project_setup.py",
+            "tests/test_word_sets.py",
         ],
     )
 
@@ -9312,7 +9425,7 @@ def test_prd_quality_accepts_crud_operations_without_crud_acronym() -> None:
         required_artifacts=[
             "backend/word_sets.py",
             "frontend/src/App.tsx",
-            "tests/test_project_setup.py",
+            "tests/test_word_sets.py",
         ],
     )
 
@@ -9386,7 +9499,7 @@ def test_job_runner_blocks_prd_quality_when_acceptance_tests_semantically_mismat
                     "backend/auth.py",
                     "backend/word_sets.py",
                     "frontend/src/App.tsx",
-                    "tests/test_english_vocab.py",
+                    "tests/test_auth_and_word_sets.py",
                 ],
             ).model_dump(),
             "architect": ArchitecturePlan(summary="Should not run").model_dump(),

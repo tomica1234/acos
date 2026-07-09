@@ -1337,6 +1337,7 @@ class JobRunner:
             "uncovered_incremental_milestone_small_parts",
             "uncovered_implementation_artifact_small_parts",
             "uncovered_implementation_artifact_domain_small_parts",
+            "uncovered_test_artifact_domain_small_parts",
             "non_observable_acceptance_tests",
             "invalid_required_artifacts",
             "prd_required_artifacts",
@@ -2196,6 +2197,87 @@ class JobRunner:
             )
         return coverage
 
+    @classmethod
+    def _test_artifact_domain_coverage(
+        cls,
+        small_parts: list[str],
+        test_required_artifacts: list[str],
+    ) -> list[dict[str, Any]]:
+        artifact_token_entries = [
+            (
+                artifact,
+                cls._semantic_tokens(artifact, include_action_tokens=True),
+            )
+            for artifact in test_required_artifacts
+        ]
+        all_artifact_tokens: set[str] = set()
+        for _, tokens in artifact_token_entries:
+            all_artifact_tokens.update(tokens)
+        coverage: list[dict[str, Any]] = []
+        for index, part in enumerate(small_parts, start=1):
+            if not cls._looks_like_implementation_work_item(part):
+                continue
+            part_tokens = cls._semantic_tokens(part)
+            anchor_tokens = cls._semantic_anchor_tokens(part_tokens)
+            domain_tokens = part_tokens - cls.IMPLEMENTATION_ARTIFACT_GENERIC_TOKENS
+            if not part_tokens or (not anchor_tokens and not domain_tokens):
+                coverage.append(
+                    {
+                        "small_part_index": index,
+                        "small_part": part,
+                        "required_anchor_tokens": sorted(anchor_tokens),
+                        "required_domain_tokens": sorted(domain_tokens),
+                        "covered_anchor_tokens": [],
+                        "covered_domain_tokens": [],
+                        "missing_anchor_tokens": [],
+                        "test_artifacts": [],
+                        "covered": True,
+                    }
+                )
+                continue
+            anchor_satisfied = bool(anchor_tokens) and cls._semantic_anchor_satisfied(
+                anchor_tokens,
+                all_artifact_tokens,
+            )
+            required_domain_score = cls._semantic_overlap_required(domain_tokens)
+            covered_domain_tokens = domain_tokens & all_artifact_tokens
+            domain_satisfied = (
+                bool(domain_tokens)
+                and len(covered_domain_tokens) >= required_domain_score
+            )
+            covered = anchor_satisfied or domain_satisfied
+            matched_artifacts = [
+                artifact
+                for artifact, tokens in artifact_token_entries
+                if (
+                    bool(anchor_tokens)
+                    and cls._semantic_anchor_satisfied(anchor_tokens, tokens)
+                )
+                or bool(domain_tokens & tokens)
+            ]
+            covered_anchor_tokens = (
+                sorted(anchor_tokens)
+                if anchor_satisfied
+                else sorted(anchor_tokens & all_artifact_tokens)
+            )
+            missing_anchor_tokens = [] if covered else sorted(
+                anchor_tokens - all_artifact_tokens
+            )
+            coverage.append(
+                {
+                    "small_part_index": index,
+                    "small_part": part,
+                    "required_anchor_tokens": sorted(anchor_tokens),
+                    "required_domain_tokens": sorted(domain_tokens),
+                    "covered_anchor_tokens": covered_anchor_tokens,
+                    "covered_domain_tokens": sorted(covered_domain_tokens),
+                    "missing_anchor_tokens": missing_anchor_tokens,
+                    "test_artifacts": matched_artifacts,
+                    "covered": covered,
+                }
+            )
+        return coverage
+
     def _record_missing_target_repeat(self, record: JobRecord, path: str) -> int:
         repeats = record.runtime_state.setdefault("missing_target_file_repeats", {})
         if not isinstance(repeats, dict):
@@ -2764,6 +2846,7 @@ class JobRunner:
             "uncovered_incremental_milestone_small_parts",
             "uncovered_implementation_artifact_small_parts",
             "uncovered_implementation_artifact_domain_small_parts",
+            "uncovered_test_artifact_domain_small_parts",
             "non_observable_acceptance_tests",
             "invalid_required_artifacts",
             "prd_required_artifacts",
@@ -2809,6 +2892,9 @@ class JobRunner:
         uncovered_implementation_artifact_domains = report.get(
             "uncovered_implementation_artifact_domain_small_parts"
         )
+        uncovered_test_artifact_domains = report.get(
+            "uncovered_test_artifact_domain_small_parts"
+        )
         non_observable = report.get("non_observable_acceptance_tests")
         if missing:
             runtime_state["prd_quality_missing"] = missing
@@ -2838,6 +2924,13 @@ class JobRunner:
             runtime_state[
                 "uncovered_implementation_artifact_domain_small_parts"
             ] = uncovered_implementation_artifact_domains
+        if (
+            isinstance(uncovered_test_artifact_domains, list)
+            and uncovered_test_artifact_domains
+        ):
+            runtime_state["uncovered_test_artifact_domain_small_parts"] = (
+                uncovered_test_artifact_domains
+            )
         if isinstance(non_observable, list) and non_observable:
             runtime_state["non_observable_acceptance_tests"] = non_observable
         if invalid_required_artifacts:
@@ -3400,6 +3493,35 @@ class JobRunner:
             logs.append(
                 "Add at least one test required_artifact such as tests/test_*.py or frontend test/*.test.tsx."
             )
+        if "test_artifacts_semantically_cover_small_parts" in missing:
+            uncovered_tests = report.get("uncovered_test_artifact_domain_small_parts")
+            if isinstance(uncovered_tests, list) and uncovered_tests:
+                summaries = []
+                for item in uncovered_tests:
+                    if not isinstance(item, dict):
+                        continue
+                    index = item.get("small_part_index")
+                    part = item.get("small_part")
+                    domain_tokens = item.get("required_domain_tokens")
+                    if not isinstance(part, str) or not part.strip():
+                        continue
+                    suffix = ""
+                    if isinstance(domain_tokens, list) and domain_tokens:
+                        suffix = " required domain tokens " + ", ".join(
+                            str(token) for token in domain_tokens
+                        )
+                    summaries.append(
+                        f"{index}: {part}{suffix}" if index else f"{part}{suffix}"
+                    )
+                if summaries:
+                    logs.append(
+                        "Test artifacts are too generic for small_parts: "
+                        + " | ".join(summaries)
+                    )
+            logs.append(
+                "Rewrite test required_artifacts to include domain-specific test files "
+                "for each app behavior, not only generic project setup tests."
+            )
         open_questions = JobRunner._non_empty_items(prd.open_questions)
         if open_questions:
             logs.append("Open questions blocking autonomy: " + " | ".join(open_questions))
@@ -3568,6 +3690,13 @@ class JobRunner:
             for item in implementation_artifact_domain_coverage
             if not item["covered"]
         ]
+        test_artifact_domain_coverage = JobRunner._test_artifact_domain_coverage(
+            small_parts,
+            test_required_artifacts,
+        )
+        uncovered_test_artifact_domain_small_parts = [
+            item for item in test_artifact_domain_coverage if not item["covered"]
+        ]
         if (
             acceptance_tests
             and source_required_artifacts
@@ -3591,6 +3720,13 @@ class JobRunner:
             missing.append("implementation_artifacts_semantically_cover_small_parts")
         if acceptance_tests and required_artifacts and not test_required_artifacts:
             missing.append("required_test_artifacts")
+        if (
+            acceptance_tests
+            and implementation_small_parts
+            and test_required_artifacts
+            and uncovered_test_artifact_domain_small_parts
+        ):
+            missing.append("test_artifacts_semantically_cover_small_parts")
         if JobRunner._non_empty_items(prd.open_questions):
             missing.append("open_questions_resolved")
             warnings.append("open_questions_present")
@@ -3663,6 +3799,13 @@ class JobRunner:
             ),
             "test_required_artifact_count": len(test_required_artifacts),
             "test_required_artifacts": test_required_artifacts,
+            "test_artifacts_semantically_cover_small_parts": (
+                not uncovered_test_artifact_domain_small_parts
+            ),
+            "test_artifact_domain_coverage": test_artifact_domain_coverage,
+            "uncovered_test_artifact_domain_small_parts": (
+                uncovered_test_artifact_domain_small_parts
+            ),
             "invalid_required_artifacts": invalid_required_artifacts,
         }
         if min_small_parts > 0:
@@ -5974,9 +6117,21 @@ class JobRunner:
         for token in raw_tokens:
             pieces = [token]
             if "_" in token:
-                pieces.extend(part for part in token.split("_") if part)
+                token_parts = [part for part in token.split("_") if part]
+                pieces.extend(token_parts)
+                pieces.extend(
+                    f"{left}_{right}"
+                    for left, right in zip(token_parts, token_parts[1:])
+                    if left and right
+                )
             if "-" in token:
-                pieces.extend(part for part in token.split("-") if part)
+                token_parts = [part for part in token.split("-") if part]
+                pieces.extend(token_parts)
+                pieces.extend(
+                    f"{left}_{right}"
+                    for left, right in zip(token_parts, token_parts[1:])
+                    if left and right
+                )
             for piece in pieces:
                 raw_pieces.add(piece)
                 if len(piece) < 2 or piece.isdigit() or piece in stopwords:
