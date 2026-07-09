@@ -206,6 +206,8 @@ def _test_patch_is_suspicious(patch: FilePatch) -> bool:
     if _test_patch_removes_test_coverage(patch):
         return True
     payload = _test_patch_payload(patch)
+    if patch.operation in {"create", "update"} and not payload.strip():
+        return True
     if not payload:
         return False
     compact = re.sub(r"\s+", "", payload).lower()

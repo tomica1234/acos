@@ -92,6 +92,34 @@ def test_test_patch_quality_rejects_empty_frontend_tests() -> None:
         ensure_test_patch_quality([patch], role="test_writer")
 
 
+def test_test_patch_quality_rejects_empty_test_file_create() -> None:
+    patch = FilePatch(
+        path="tests/test_project_setup.py",
+        operation="create",
+        content="",
+    )
+
+    with pytest.raises(QualityGateError, match="test_writer attempted to weaken tests"):
+        ensure_test_patch_quality([patch], role="test_writer")
+
+
+def test_test_patch_quality_rejects_removal_only_test_diff() -> None:
+    patch = FilePatch(
+        path="tests/test_project_setup.py",
+        operation="update",
+        unified_diff=(
+            "--- tests/test_project_setup.py\n"
+            "+++ tests/test_project_setup.py\n"
+            "@@ -1,2 +0,0 @@\n"
+            "-def test_project_setup() -> None:\n"
+            "-    assert 'project' in 'project setup'\n"
+        ),
+    )
+
+    with pytest.raises(QualityGateError, match="fixer attempted to weaken tests"):
+        ensure_test_patch_quality([patch], role="fixer")
+
+
 def test_test_patch_quality_rejects_python_pass_tests() -> None:
     patch = FilePatch(
         path="tests/test_feature.py",
