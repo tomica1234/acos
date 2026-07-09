@@ -4289,6 +4289,7 @@ class JobRunner:
             item_key="acceptance_test",
             index_key="acceptance_test_index",
             allow_reuse=True,
+            include_action_tokens=True,
         )
         test_writer_acceptance_test_coverage = JobRunner._semantic_task_coverage(
             acceptance_tests,
@@ -4296,6 +4297,7 @@ class JobRunner:
             item_key="acceptance_test",
             index_key="acceptance_test_index",
             allow_reuse=True,
+            include_action_tokens=True,
         )
         uncovered_small_parts = [
             item for item in small_part_coverage if not item["covered"]
@@ -4811,7 +4813,10 @@ class JobRunner:
             if not implementation_dependencies:
                 continue
             dependency_tokens = [
-                JobRunner._semantic_tokens(JobRunner._task_semantic_text(dependency))
+                JobRunner._semantic_tokens(
+                    JobRunner._task_semantic_text(dependency),
+                    include_action_tokens=True,
+                )
                 for dependency in implementation_dependencies
             ]
             uncovered_criteria: list[dict[str, Any]] = []
@@ -4882,7 +4887,10 @@ class JobRunner:
             "regression",
             "smoke",
         }
-        return JobRunner._semantic_tokens(criterion) - generic_test_tokens
+        return (
+            JobRunner._semantic_tokens(criterion, include_action_tokens=True)
+            - generic_test_tokens
+        )
 
     @staticmethod
     def _executor_order_dependency_violations(
@@ -5063,11 +5071,15 @@ class JobRunner:
         item_key: str,
         index_key: str,
         allow_reuse: bool = False,
+        include_action_tokens: bool = False,
     ) -> list[dict[str, Any]]:
         remaining_tasks = list(tasks)
         coverage: list[dict[str, Any]] = []
         for index, item in enumerate(items, start=1):
-            item_tokens = cls._semantic_tokens(item)
+            item_tokens = cls._semantic_tokens(
+                item,
+                include_action_tokens=include_action_tokens,
+            )
             if not item_tokens:
                 fallback_task = tasks[index - 1] if index <= len(tasks) else None
                 coverage.append(
@@ -5084,7 +5096,10 @@ class JobRunner:
             best_task: PlannedTask | None = None
             best_score = 0
             for task in remaining_tasks:
-                task_tokens = cls._semantic_tokens(cls._task_semantic_text(task))
+                task_tokens = cls._semantic_tokens(
+                    cls._task_semantic_text(task),
+                    include_action_tokens=include_action_tokens,
+                )
                 score = cls._semantic_overlap_score(
                     item_tokens,
                     task_tokens,
@@ -5119,7 +5134,7 @@ class JobRunner:
 
     @classmethod
     def _semantic_anchor_tokens(cls, item_tokens: set[str]) -> set[str]:
-        return item_tokens & cls.SEMANTIC_ANCHOR_TOKENS
+        return item_tokens & (cls.SEMANTIC_ANCHOR_TOKENS | cls.CRUD_OPERATION_TOKENS)
 
     @classmethod
     def _semantic_anchor_satisfied(
@@ -5128,6 +5143,14 @@ class JobRunner:
         candidate_tokens: set[str],
     ) -> bool:
         required_tokens = set(anchor_tokens)
+        required_operations = required_tokens & cls.CRUD_OPERATION_TOKENS
+        if required_operations:
+            candidate_operations = set(candidate_tokens & cls.CRUD_OPERATION_TOKENS)
+            if "crud" in candidate_tokens:
+                candidate_operations.update(cls.CRUD_OPERATION_TOKENS)
+            if not required_operations.issubset(candidate_operations):
+                return False
+            required_tokens -= required_operations
         if "crud" in required_tokens:
             required_tokens.remove("crud")
             has_crud_coverage = (
@@ -5139,7 +5162,12 @@ class JobRunner:
         return required_tokens.issubset(candidate_tokens)
 
     @classmethod
-    def _semantic_tokens(cls, text: str) -> set[str]:
+    def _semantic_tokens(
+        cls,
+        text: str,
+        *,
+        include_action_tokens: bool = False,
+    ) -> set[str]:
         stopwords = {
             "a",
             "add",
@@ -5240,28 +5268,6 @@ class JobRunner:
             "teachers": "role",
             "vocab": "vocabulary",
         }
-        expanded = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", " ", text)
-        raw_tokens = re.findall(r"[a-z0-9_]+", expanded.lower())
-        tokens: set[str] = set()
-        raw_pieces: set[str] = set()
-        for token in raw_tokens:
-            pieces = [token]
-            if "_" in token:
-                pieces.extend(part for part in token.split("_") if part)
-            if "-" in token:
-                pieces.extend(part for part in token.split("-") if part)
-            for piece in pieces:
-                raw_pieces.add(piece)
-                if len(piece) < 2 or piece.isdigit() or piece in stopwords:
-                    continue
-                normalized = aliases.get(piece, piece)
-                if (
-                    len(normalized) > 3
-                    and normalized.endswith("s")
-                    and not normalized.endswith("ss")
-                ):
-                    normalized = normalized[:-1]
-                tokens.add(normalized)
         crud_operation_aliases = {
             "create": {
                 "add",
@@ -5272,9 +5278,24 @@ class JobRunner:
                 "created",
                 "creates",
                 "creating",
+                "post",
+                "posts",
             },
-            "read": {"read", "reads", "list", "lists", "listed", "listing"},
+            "read": {
+                "get",
+                "gets",
+                "read",
+                "reads",
+                "list",
+                "lists",
+                "listed",
+                "listing",
+            },
             "update": {
+                "patch",
+                "patches",
+                "put",
+                "puts",
                 "update",
                 "updates",
                 "updated",
@@ -5295,6 +5316,38 @@ class JobRunner:
                 "removing",
             },
         }
+        action_aliases = {
+            raw_alias: operation
+            for operation, raw_aliases in crud_operation_aliases.items()
+            for raw_alias in raw_aliases
+        }
+        active_aliases = {**aliases, **action_aliases} if include_action_tokens else aliases
+        expanded = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", " ", text)
+        raw_tokens = re.findall(r"[a-z0-9_]+", expanded.lower())
+        tokens: set[str] = set()
+        raw_pieces: set[str] = set()
+        for token in raw_tokens:
+            pieces = [token]
+            if "_" in token:
+                pieces.extend(part for part in token.split("_") if part)
+            if "-" in token:
+                pieces.extend(part for part in token.split("-") if part)
+            for piece in pieces:
+                raw_pieces.add(piece)
+                if len(piece) < 2 or piece.isdigit() or piece in stopwords:
+                    continue
+                normalized = active_aliases.get(piece, piece)
+                if (
+                    len(normalized) > 3
+                    and normalized.endswith("s")
+                    and not normalized.endswith("ss")
+                ):
+                    normalized = normalized[:-1]
+                tokens.add(normalized)
+        if include_action_tokens:
+            for operation, raw_aliases in crud_operation_aliases.items():
+                if raw_pieces & raw_aliases:
+                    tokens.add(operation)
         if all(raw_pieces & aliases for aliases in crud_operation_aliases.values()):
             tokens.update(cls.CRUD_OPERATION_TOKENS)
         return tokens
