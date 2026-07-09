@@ -499,6 +499,49 @@ def test_test_patch_quality_rejects_frontend_assertion_removal_hidden_by_sibling
         ensure_test_patch_quality([patch], role="fixer")
 
 
+def test_test_patch_quality_rejects_unscoped_assertion_removal_hidden_later_in_hunk() -> None:
+    patch = FilePatch(
+        path="tests/test_feature.py",
+        operation="update",
+        unified_diff=(
+            "--- tests/test_feature.py\n"
+            "+++ tests/test_feature.py\n"
+            "@@ -5,9 +5,10 @@\n"
+            "     prepare_status_fixture()\n"
+            "     result = build_feature()\n"
+            "-    assert result.status == 'ready'\n"
+            "+    result.status\n"
+            "     finish_status_fixture()\n"
+            "\n"
+            "     result = build_name_fixture()\n"
+            "     assert result.name == 'feature'\n"
+            "+    assert result.name.startswith('f')\n"
+        ),
+    )
+
+    with pytest.raises(QualityGateError, match="fixer attempted to weaken tests"):
+        ensure_test_patch_quality([patch], role="fixer")
+
+
+def test_test_patch_quality_allows_unscoped_direct_assertion_replacement() -> None:
+    patch = FilePatch(
+        path="tests/test_feature.py",
+        operation="update",
+        unified_diff=(
+            "--- tests/test_feature.py\n"
+            "+++ tests/test_feature.py\n"
+            "@@ -5,4 +5,4 @@\n"
+            "     prepare_status_fixture()\n"
+            "     result = build_feature()\n"
+            "-    assert result.status == 'ready'\n"
+            "+    assert result.status in {'ready', 'warm'}\n"
+            "     finish_status_fixture()\n"
+        ),
+    )
+
+    ensure_test_patch_quality([patch], role="fixer")
+
+
 def test_test_patch_quality_rejects_content_update_that_removes_assertion(
     tmp_path,
 ) -> None:

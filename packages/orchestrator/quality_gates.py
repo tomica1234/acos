@@ -341,23 +341,37 @@ def _hunk_removes_assertions_without_replacement(
 
     removed_scopes: list[str | None] = []
     added_scopes: set[str | None] = set()
+    unscoped_removed_blocks: set[int] = set()
+    unscoped_added_blocks: set[int] = set()
     current_removed_scope: str | None = None
     current_added_scope: str | None = None
+    current_change_block = -1
+    in_change_block = False
     for marker, line in hunk:
+        if marker == " ":
+            in_change_block = False
+        elif not in_change_block:
+            current_change_block += 1
+            in_change_block = True
         scope = _test_case_scope_key(line)
         if scope is not None and marker != "+":
             current_removed_scope = scope
         if scope is not None and marker != "-":
             current_added_scope = scope
         if marker == "-" and _line_has_test_assertion(line):
-            removed_scopes.append(current_removed_scope)
+            if current_removed_scope is None:
+                unscoped_removed_blocks.add(current_change_block)
+            else:
+                removed_scopes.append(current_removed_scope)
         elif marker == "+" and _line_has_test_assertion(line):
-            added_scopes.add(current_added_scope)
+            if current_added_scope is None:
+                unscoped_added_blocks.add(current_change_block)
+            else:
+                added_scopes.add(current_added_scope)
 
-    scoped_removed = [scope for scope in removed_scopes if scope is not None]
-    return bool(scoped_removed) and any(
-        scope not in added_scopes for scope in scoped_removed
-    )
+    if any(scope not in added_scopes for scope in removed_scopes):
+        return True
+    return any(block not in unscoped_added_blocks for block in unscoped_removed_blocks)
 
 
 def _test_case_scope_key(line: str) -> str | None:
