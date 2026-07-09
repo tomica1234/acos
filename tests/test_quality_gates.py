@@ -256,6 +256,23 @@ def test_test_patch_quality_rejects_frontend_test_without_assertion() -> None:
         ensure_test_patch_quality([patch], role="test_writer")
 
 
+def test_test_patch_quality_rejects_frontend_test_file_without_runnable_test_case() -> None:
+    patch = FilePatch(
+        path="frontend/test/project_scaffold.test.tsx",
+        operation="create",
+        content=(
+            "import { render } from '@testing-library/react'\n"
+            "import App from '../src/App'\n\n"
+            "export function mountApp() {\n"
+            "  return render(<App />)\n"
+            "}\n"
+        ),
+    )
+
+    with pytest.raises(QualityGateError, match="test_writer attempted to weaken tests"):
+        ensure_test_patch_quality([patch], role="test_writer")
+
+
 def test_test_patch_quality_rejects_frontend_comment_only_expectation() -> None:
     patch = FilePatch(
         path="frontend/test/project_scaffold.test.tsx",
@@ -716,6 +733,20 @@ def test_test_patch_quality_rejects_python_test_without_assertion() -> None:
         ensure_test_patch_quality([patch], role="test_writer")
 
 
+def test_test_patch_quality_rejects_python_test_file_without_test_cases() -> None:
+    patch = FilePatch(
+        path="tests/test_feature.py",
+        operation="create",
+        content=(
+            "def build_feature_payload() -> dict[str, str]:\n"
+            "    return {'name': 'feature'}\n"
+        ),
+    )
+
+    with pytest.raises(QualityGateError, match="test_writer attempted to weaken tests"):
+        ensure_test_patch_quality([patch], role="test_writer")
+
+
 def test_test_patch_quality_rejects_python_comment_only_assertion() -> None:
     patch = FilePatch(
         path="tests/test_feature.py",
@@ -847,6 +878,17 @@ def test_test_patch_quality_rejects_renaming_tests_outside_test_tree() -> None:
         path="tests/test_feature.py",
         operation="rename",
         new_path="docs/test_feature_backup.py",
+    )
+
+    with pytest.raises(QualityGateError, match="test_writer attempted to weaken tests"):
+        ensure_test_patch_quality([patch], role="test_writer")
+
+
+def test_test_patch_quality_rejects_renaming_runnable_test_to_helper_file() -> None:
+    patch = FilePatch(
+        path="tests/test_feature.py",
+        operation="rename",
+        new_path="tests/helpers.py",
     )
 
     with pytest.raises(QualityGateError, match="test_writer attempted to weaken tests"):

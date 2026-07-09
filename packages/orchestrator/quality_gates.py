@@ -227,6 +227,8 @@ def _test_patch_is_suspicious(patch: FilePatch) -> bool:
         return True
     if _test_patch_removes_assertions_without_replacement(patch):
         return True
+    if _active_test_file_payload_lacks_runnable_test_case(patch):
+        return True
     payload = _test_patch_payload(patch)
     if patch.operation in {"create", "update"} and not payload.strip():
         return True
@@ -277,7 +279,7 @@ def _test_patch_removes_test_coverage(patch: FilePatch) -> bool:
         return False
     source_is_test = _looks_like_test_path(patch.path)
     target_is_test = bool(
-        patch.new_path and _looks_like_active_test_location(patch.new_path)
+        patch.new_path and _looks_like_runnable_test_file(patch.new_path)
     )
     return source_is_test and not target_is_test
 
@@ -286,8 +288,25 @@ def _test_patch_renames_non_test_into_test_location(patch: FilePatch) -> bool:
     if patch.operation != "rename" or not patch.new_path:
         return False
     source_is_test = _looks_like_test_path(patch.path)
-    target_is_test = _looks_like_active_test_location(patch.new_path)
+    target_is_test = _looks_like_runnable_test_file(patch.new_path)
     return target_is_test and not source_is_test
+
+
+def _active_test_file_payload_lacks_runnable_test_case(patch: FilePatch) -> bool:
+    if patch.operation not in {"create", "update"}:
+        return False
+    target_path = patch.new_path or patch.path
+    if not _looks_like_runnable_test_file(target_path):
+        return False
+    if patch.content is not None:
+        payload = patch.content
+    elif patch.operation == "create":
+        payload = _test_patch_payload(patch)
+    else:
+        return False
+    if not payload.strip():
+        return False
+    return not _payload_introduces_runnable_test_case(payload)
 
 
 def _patch_with_workspace_diff(
@@ -490,6 +509,14 @@ def _payload_introduces_test_case(payload: str) -> bool:
     test_case_patterns = (
         r"(?m)^\s*(?:async\s+)?def\s+test_[A-Za-z0-9_]+\s*\(",
         r"\b(?:describe|it|test)(?:\s*\.\s*[A-Za-z_$][\w$]*)*\s*\(",
+    )
+    return any(re.search(pattern, payload) for pattern in test_case_patterns)
+
+
+def _payload_introduces_runnable_test_case(payload: str) -> bool:
+    test_case_patterns = (
+        r"(?m)^\s*(?:async\s+)?def\s+test_[A-Za-z0-9_]+\s*\(",
+        r"\b(?:it|test)(?:\s*\.\s*[A-Za-z_$][\w$]*)*\s*\(",
     )
     return any(re.search(pattern, payload) for pattern in test_case_patterns)
 
@@ -785,6 +812,19 @@ def _looks_like_active_test_location(path: str) -> bool:
     if normalized.startswith(("docs/", "doc/")):
         return False
     return ".test." in name or ".spec." in name
+
+
+def _looks_like_runnable_test_file(path: str) -> bool:
+    normalized = str(path).replace("\\", "/").lower().lstrip("./")
+    name = normalized.rsplit("/", 1)[-1]
+    if normalized.startswith(("docs/", "doc/")):
+        return False
+    return (
+        (name.startswith("test_") and name.endswith(".py"))
+        or name.endswith("_test.py")
+        or ".test." in name
+        or ".spec." in name
+    )
 
 
 def _python_test_has_empty_body(payload: str) -> bool:
