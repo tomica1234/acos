@@ -77,6 +77,10 @@ def test_clear_active_recovery_state_removes_stale_done_markers(tmp_path: Path) 
                 "recovery_strategy": "task_graph_replanning",
                 "recovery_next_actor": "planner",
                 "recovery_next_status": "planning",
+                "recovery_reason": "stale failure",
+                "recovery_failed_task_id": "old-task",
+                "recovery_failed_stage": 2,
+                "recovery_attempt": 3,
                 "patch_operation_hint": "create",
                 "missing_target_file": "frontend/test/project_scaffold.test.tsx",
                 "max_autonomous_stages": 12,
@@ -121,6 +125,10 @@ def test_consume_completed_recovery_plan_clears_resolved_file_recovery_constrain
                 "recovery_strategy": "RETURN_TO_TEST_WRITER",
                 "recovery_next_actor": "test_writer",
                 "recovery_next_status": JobStatus.WRITING_TESTS.value,
+                "recovery_reason": "missing file recovery",
+                "recovery_failed_task_id": "project-scaffold-tests",
+                "recovery_failed_stage": 1,
+                "recovery_attempt": 2,
                 "patch_operation_hint": "create",
                 "missing_target_file": target,
                 "missing_artifacts": [],
@@ -8368,6 +8376,9 @@ def test_job_runner_clears_planning_repair_constraints_after_prd_passes(
                 "require_prd_quality": True,
                 "planning_repair_strategy_change": True,
                 "planning_repair_repeated_prd_missing": "acceptance_tests",
+                "pm_strategy_change": True,
+                "pm_strategy": "planning_repair_strategy_change",
+                "pm_intervention_count": 1,
                 "prd_quality_missing": ["acceptance_tests"],
                 "prd_quality_warnings": ["open_questions_present"],
                 "prd_open_questions": ["Which backend?"],
@@ -8398,6 +8409,10 @@ def test_job_runner_clears_planning_repair_constraints_after_prd_passes(
                 "recovery_strategy": "REVISE_PRD_AND_ARCHITECTURE",
                 "recovery_next_actor": "pm",
                 "recovery_next_status": "analyzing",
+                "recovery_reason": "PRD quality gate failed",
+                "recovery_failed_task_id": "pm",
+                "recovery_failed_stage": 1,
+                "recovery_attempt": 2,
                 "recovery_step_count": 1,
             }
         },
@@ -8422,6 +8437,9 @@ def test_job_runner_clears_planning_repair_constraints_after_prd_passes(
     for key in (
         "planning_repair_strategy_change",
         "planning_repair_repeated_prd_missing",
+        "pm_strategy_change",
+        "pm_strategy",
+        "pm_intervention_count",
         "prd_quality_missing",
         "prd_quality_warnings",
         "prd_open_questions",
@@ -8439,6 +8457,10 @@ def test_job_runner_clears_planning_repair_constraints_after_prd_passes(
         "recovery_strategy",
         "recovery_next_actor",
         "recovery_next_status",
+        "recovery_reason",
+        "recovery_failed_task_id",
+        "recovery_failed_stage",
+        "recovery_attempt",
         "recovery_step_count",
     ):
         assert key not in constraints
@@ -8468,6 +8490,9 @@ def test_job_runner_clears_planning_repair_constraints_after_task_graph_validate
             "constraints": {
                 "planning_repair_strategy_change": True,
                 "planning_repair_repeated_task_graph_error_types": "unknown_dependencies",
+                "pm_strategy_change": True,
+                "pm_strategy": "planning_repair_strategy_change",
+                "pm_intervention_count": 1,
                 "task_graph_validation_errors": ["unknown_dependencies"],
                 "unknown_dependencies": [
                     {"task_id": "views", "dependency": "models"}
@@ -8503,6 +8528,10 @@ def test_job_runner_clears_planning_repair_constraints_after_task_graph_validate
                 "recovery_strategy": "REPLAN_TASK",
                 "recovery_next_actor": "planner",
                 "recovery_next_status": "replanning",
+                "recovery_reason": "invalid task graph",
+                "recovery_failed_task_id": "planner",
+                "recovery_failed_stage": 1,
+                "recovery_attempt": 2,
                 "recovery_step_count": 1,
             }
         },
@@ -8534,6 +8563,9 @@ def test_job_runner_clears_planning_repair_constraints_after_task_graph_validate
     for key in (
         "planning_repair_strategy_change",
         "planning_repair_repeated_task_graph_error_types",
+        "pm_strategy_change",
+        "pm_strategy",
+        "pm_intervention_count",
         "task_graph_validation_errors",
         "unknown_dependencies",
         "duplicate_task_ids",
@@ -8547,11 +8579,51 @@ def test_job_runner_clears_planning_repair_constraints_after_task_graph_validate
         "recovery_strategy",
         "recovery_next_actor",
         "recovery_next_status",
+        "recovery_reason",
+        "recovery_failed_task_id",
+        "recovery_failed_stage",
+        "recovery_attempt",
         "recovery_step_count",
     ):
         assert key not in constraints
     for key in JobRunner.TASK_GRAPH_VALIDATION_DETAIL_KEYS:
         assert key not in constraints
+
+
+def test_clear_planning_repair_constraints_keeps_active_implementation_recovery(
+    tmp_path: Path,
+) -> None:
+    spec = JobSpec(
+        request_text="Recover implementation",
+        repo_path=str(tmp_path),
+        metadata={
+            "constraints": {
+                "planning_repair_repeated_prd_missing": "acceptance_tests",
+                "prd_quality_missing": ["acceptance_tests"],
+                "recovery_mode": "implementation_failure",
+                "recovery_strategy": "replan_current_task",
+                "recovery_reason": "the implementer failed before producing a safe completed change",
+                "recovery_failed_task_id": "core",
+                "recovery_failed_stage": 2,
+                "recovery_attempt": 3,
+            }
+        },
+    )
+    record = JobRecord(job_id=spec.job_id, spec=spec, status=JobStatus.PLANNING)
+
+    JobRunner._clear_planning_repair_constraints(record)
+
+    constraints = record.spec.metadata["constraints"]
+    assert "planning_repair_repeated_prd_missing" not in constraints
+    assert "prd_quality_missing" not in constraints
+    assert constraints.items() >= {
+        "recovery_mode": "implementation_failure",
+        "recovery_strategy": "replan_current_task",
+        "recovery_reason": "the implementer failed before producing a safe completed change",
+        "recovery_failed_task_id": "core",
+        "recovery_failed_stage": 2,
+        "recovery_attempt": 3,
+    }.items()
 
 
 def test_job_runner_adds_recovery_guidance_to_agent_logs(

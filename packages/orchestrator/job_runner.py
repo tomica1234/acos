@@ -123,6 +123,17 @@ class JobRunner:
         "backend/frontend/shared",
         "backend frontend shared",
     )
+    RECOVERY_METADATA_CONSTRAINT_KEYS = {
+        "recovery_mode",
+        "recovery_strategy",
+        "recovery_next_actor",
+        "recovery_next_status",
+        "recovery_reason",
+        "recovery_failed_task_id",
+        "recovery_failed_stage",
+        "recovery_attempt",
+        "recovery_step_count",
+    }
     SEMANTIC_ANCHOR_TOKENS = {
         "auth",
         "billing",
@@ -633,10 +644,7 @@ class JobRunner:
         if not isinstance(constraints, dict):
             return
         for key in (
-            "recovery_mode",
-            "recovery_strategy",
-            "recovery_next_actor",
-            "recovery_next_status",
+            *JobRunner.RECOVERY_METADATA_CONSTRAINT_KEYS,
             "missing_target_file",
             "patch_operation_hint",
             "missing_artifacts",
@@ -1246,10 +1254,7 @@ class JobRunner:
         if not isinstance(constraints, dict):
             return
         for key in (
-            "recovery_mode",
-            "recovery_strategy",
-            "recovery_next_actor",
-            "recovery_next_status",
+            *JobRunner.RECOVERY_METADATA_CONSTRAINT_KEYS,
             "patch_operation_hint",
             "missing_target_file",
         ):
@@ -1260,6 +1265,30 @@ class JobRunner:
         constraints = record.spec.metadata.get("constraints")
         if not isinstance(constraints, dict):
             return
+        clear_planning_pm_strategy = (
+            constraints.get("planning_repair_strategy_change") is True
+            or constraints.get("recovery_strategy")
+            == "planning_repair_strategy_change"
+            or constraints.get("pm_strategy") == "planning_repair_strategy_change"
+        )
+        clear_planning_recovery_metadata = (
+            constraints.get("planning_repair_strategy_change") is True
+            or constraints.get("recovery_mode")
+            in {
+                "planning_repair",
+                "prd_quality_repair",
+                "prd_quality_revision",
+                "task_graph_repair",
+                "task_graph_replanning",
+            }
+            or constraints.get("recovery_strategy")
+            in {
+                "planning_repair_strategy_change",
+                "REVISE_PRD_AND_ARCHITECTURE",
+                "REPLAN_TASK",
+                "task_graph_replanning",
+            }
+        )
         stale_planning_context_keys = {
             "prd_quality_missing",
             "prd_quality_warnings",
@@ -1276,14 +1305,19 @@ class JobRunner:
             "test_required_artifacts",
             "task_graph_validation_errors",
             *TASK_GRAPH_VALIDATION_CONTEXT_KEYS_SOURCE,
-            "recovery_mode",
-            "recovery_strategy",
-            "recovery_next_actor",
-            "recovery_next_status",
-            "recovery_step_count",
         }
         for key in list(constraints):
             if key.startswith("planning_repair_") or key in stale_planning_context_keys:
+                constraints.pop(key, None)
+        if clear_planning_recovery_metadata:
+            for key in JobRunner.RECOVERY_METADATA_CONSTRAINT_KEYS:
+                constraints.pop(key, None)
+        if clear_planning_pm_strategy:
+            for key in (
+                "pm_strategy_change",
+                "pm_strategy",
+                "pm_intervention_count",
+            ):
                 constraints.pop(key, None)
 
     def _recovery_guidance_logs(self, record: JobRecord, role: str) -> list[str]:
