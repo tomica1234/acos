@@ -4072,6 +4072,48 @@ def test_completion_integrity_fails_when_autonomous_stage_failed(
     ]
 
 
+def test_completion_integrity_report_records_failed_test_reason(
+    tmp_path: Path,
+) -> None:
+    store = InMemoryJobStore()
+    spec = JobSpec(
+        request_text="Create feature with tests",
+        repo_path=str(tmp_path),
+        target_branch="acos/completion-integrity-test-failed",
+    )
+    record = store.create(spec)
+    record.completed_task_ids = ["core"]
+    task_graph = TaskGraph(
+        goal="Build feature",
+        tasks=[
+            PlannedTask(
+                id="core",
+                title="Core",
+                description="Build core",
+                role="implementer",
+            )
+        ],
+    )
+
+    report = JobRunner._build_completion_integrity_report(
+        record,
+        task_graph,
+        TestRunResult(success=False, executed_test_count=1),
+        require_completion_integrity=True,
+        require_test_evidence=True,
+        require_stage_test_patches=False,
+    )
+    runtime_state = JobRunner._completion_integrity_recovery_state(
+        record,
+        report["failure_reasons"],
+    )
+
+    assert report["passed"] is False
+    assert report["failure_reasons"] == ["test_failed"]
+    assert report["test_success"] is False
+    assert runtime_state["completion_integrity_failure_reasons"] == ["test_failed"]
+
+
 def test_job_runner_blocks_completion_without_test_evidence(
     tmp_path: Path,
 ) -> None:

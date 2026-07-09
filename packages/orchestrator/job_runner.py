@@ -6643,7 +6643,7 @@ class JobRunner:
             deduped = list(dict.fromkeys(value for value in values if value.strip()))
             if deduped:
                 runtime_state[key] = deduped
-        if any(parsed.values()):
+        if failure_reasons:
             runtime_state["completion_integrity_failure_reasons"] = [
                 str(reason) for reason in failure_reasons
             ]
@@ -6670,6 +6670,8 @@ class JobRunner:
         failure_reasons: list[str] = []
         if require_completion_integrity and missing_task_ids:
             failure_reasons.append("missing_tasks:" + "|".join(missing_task_ids))
+        if not test_result.success:
+            failure_reasons.append("test_failed")
         if missing_test_evidence:
             failure_reasons.append("missing_test_evidence")
         stages_missing_test_patches = JobRunner._stages_missing_test_patches(record)
