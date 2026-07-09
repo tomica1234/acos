@@ -61,6 +61,20 @@ def test_test_patch_quality_rejects_frontend_skipped_tests() -> None:
         ensure_test_patch_quality([patch], role="test_writer")
 
 
+def test_test_patch_quality_rejects_frontend_todo_tests() -> None:
+    patch = FilePatch(
+        path="frontend/test/project_scaffold.test.tsx",
+        operation="create",
+        content=(
+            "import { test } from 'vitest'\n\n"
+            "test.todo('loads project scaffold')\n"
+        ),
+    )
+
+    with pytest.raises(QualityGateError, match="test_writer attempted to weaken tests"):
+        ensure_test_patch_quality([patch], role="test_writer")
+
+
 def test_test_patch_quality_rejects_vacuous_frontend_assertions() -> None:
     patch = FilePatch(
         path="src/App.spec.tsx",
@@ -291,6 +305,38 @@ def test_test_patch_quality_rejects_python_pass_tests() -> None:
         path="tests/test_feature.py",
         operation="create",
         content="def test_placeholder() -> None:\n    pass\n",
+    )
+
+    with pytest.raises(QualityGateError, match="test_writer attempted to weaken tests"):
+        ensure_test_patch_quality([patch], role="test_writer")
+
+
+def test_test_patch_quality_rejects_python_importorskip_tests() -> None:
+    patch = FilePatch(
+        path="tests/test_feature.py",
+        operation="create",
+        content=(
+            "import pytest\n\n"
+            "pytest.importorskip('missing_optional_dependency')\n\n"
+            "def test_feature() -> None:\n"
+            "    assert feature_enabled()\n"
+        ),
+    )
+
+    with pytest.raises(QualityGateError, match="test_writer attempted to weaken tests"):
+        ensure_test_patch_quality([patch], role="test_writer")
+
+
+def test_test_patch_quality_rejects_unittest_skip_tests() -> None:
+    patch = FilePatch(
+        path="tests/test_feature.py",
+        operation="create",
+        content=(
+            "import unittest\n\n"
+            "@unittest.skip('not ready')\n"
+            "def test_feature() -> None:\n"
+            "    assert feature_enabled()\n"
+        ),
     )
 
     with pytest.raises(QualityGateError, match="test_writer attempted to weaken tests"):

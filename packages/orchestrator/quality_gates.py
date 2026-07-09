@@ -234,11 +234,13 @@ def _test_patch_is_suspicious(patch: FilePatch) -> bool:
 
     suspicious_patterns = (
         r"\bassert\s+True\b",
-        r"\bpytest\s*\.\s*(?:skip|xfail|skipif)\s*\(",
+        r"\bpytest\s*\.\s*(?:skip|xfail|skipif|importorskip)\s*\(",
+        r"\bunittest\s*\.\s*skip(?:If|Unless)?\s*\(",
+        r"\bself\s*\.\s*skipTest\s*\(",
         r"\bskipif\s*\(",
         r"\bxfail\s*\(",
         r"\bmark\s*\.\s*(?:skip|xfail)\b",
-        r"\b(?:describe|it|test)\s*\.\s*(?:skip|only)\s*\(",
+        r"\b(?:describe|it|test)(?:\s*\.\s*[A-Za-z_$][\w$]*)*\s*\.\s*(?:skip|only|todo)\s*\(",
         r"\.\s*(?:skip|only)\s*\(",
     )
     return any(re.search(pattern, payload) for pattern in suspicious_patterns)
