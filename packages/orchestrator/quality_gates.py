@@ -303,36 +303,78 @@ def _patch_with_workspace_diff(
 def _test_patch_removes_assertions_without_replacement(patch: FilePatch) -> bool:
     if patch.operation != "update" or patch.unified_diff is None:
         return False
-    for removed, added in _test_patch_diff_hunks(patch.unified_diff):
-        if any(_line_has_test_assertion(line) for line in removed) and not any(
-            _line_has_test_assertion(line) for line in added
-        ):
+    for hunk in _test_patch_diff_hunks(patch.unified_diff):
+        if _hunk_removes_assertions_without_replacement(hunk):
             return True
     return False
 
 
-def _test_patch_diff_hunks(unified_diff: str) -> list[tuple[list[str], list[str]]]:
-    hunks: list[tuple[list[str], list[str]]] = []
-    removed: list[str] | None = None
-    added: list[str] | None = None
+def _test_patch_diff_hunks(unified_diff: str) -> list[list[tuple[str, str]]]:
+    hunks: list[list[tuple[str, str]]] = []
+    current: list[tuple[str, str]] | None = None
     for line in unified_diff.splitlines():
         if line.startswith("@@"):
-            if removed is not None and added is not None:
-                hunks.append((removed, added))
-            removed = []
-            added = []
+            if current is not None:
+                hunks.append(current)
+            current = []
             continue
-        if removed is None or added is None:
+        if current is None:
             continue
         if line.startswith("---") or line.startswith("+++"):
             continue
-        if line.startswith("-"):
-            removed.append(line[1:])
-        elif line.startswith("+"):
-            added.append(line[1:])
-    if removed is not None and added is not None:
-        hunks.append((removed, added))
+        if line.startswith(("-", "+", " ")):
+            current.append((line[:1], line[1:]))
+    if current is not None:
+        hunks.append(current)
     return hunks
+
+
+def _hunk_removes_assertions_without_replacement(
+    hunk: list[tuple[str, str]],
+) -> bool:
+    removed = [line for marker, line in hunk if marker == "-"]
+    if not any(_line_has_test_assertion(line) for line in removed):
+        return False
+    added = [line for marker, line in hunk if marker == "+"]
+    if not any(_line_has_test_assertion(line) for line in added):
+        return True
+
+    removed_scopes: list[str | None] = []
+    added_scopes: set[str | None] = set()
+    current_removed_scope: str | None = None
+    current_added_scope: str | None = None
+    for marker, line in hunk:
+        scope = _test_case_scope_key(line)
+        if scope is not None and marker != "+":
+            current_removed_scope = scope
+        if scope is not None and marker != "-":
+            current_added_scope = scope
+        if marker == "-" and _line_has_test_assertion(line):
+            removed_scopes.append(current_removed_scope)
+        elif marker == "+" and _line_has_test_assertion(line):
+            added_scopes.add(current_added_scope)
+
+    scoped_removed = [scope for scope in removed_scopes if scope is not None]
+    return bool(scoped_removed) and any(
+        scope not in added_scopes for scope in scoped_removed
+    )
+
+
+def _test_case_scope_key(line: str) -> str | None:
+    python_match = re.match(
+        r"^\s*(?:async\s+)?def\s+(test_[A-Za-z0-9_]+)\s*\(",
+        line,
+    )
+    if python_match:
+        return f"python:{python_match.group(1)}"
+    javascript_match = re.match(
+        r"^\s*(?:describe|it|test)(?:\s*\.\s*[A-Za-z_$][\w$]*)*\s*"
+        r"\(\s*(['\"`])(?P<name>.*?)\1",
+        line,
+    )
+    if javascript_match:
+        return f"javascript:{javascript_match.group('name')}"
+    return None
 
 
 def _test_patch_introduces_test_case_without_assertion(payload: str) -> bool:

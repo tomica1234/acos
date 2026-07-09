@@ -448,6 +448,57 @@ def test_test_patch_quality_rejects_assertion_removal_hidden_by_other_hunk() -> 
         ensure_test_patch_quality([patch], role="fixer")
 
 
+def test_test_patch_quality_rejects_assertion_removal_hidden_by_same_hunk_sibling_test() -> None:
+    patch = FilePatch(
+        path="tests/test_feature.py",
+        operation="update",
+        unified_diff=(
+            "--- tests/test_feature.py\n"
+            "+++ tests/test_feature.py\n"
+            "@@ -1,9 +1,10 @@\n"
+            " def test_feature_status() -> None:\n"
+            "     result = build_feature()\n"
+            "-    assert result.status == 'ready'\n"
+            "+    result.status\n"
+            "\n"
+            " def test_feature_name() -> None:\n"
+            "     result = build_feature()\n"
+            "     assert result.name == 'feature'\n"
+            "+    assert result.name.startswith('f')\n"
+        ),
+    )
+
+    with pytest.raises(QualityGateError, match="fixer attempted to weaken tests"):
+        ensure_test_patch_quality([patch], role="fixer")
+
+
+def test_test_patch_quality_rejects_frontend_assertion_removal_hidden_by_sibling_test() -> None:
+    patch = FilePatch(
+        path="frontend/test/project_scaffold.test.tsx",
+        operation="update",
+        unified_diff=(
+            "--- frontend/test/project_scaffold.test.tsx\n"
+            "+++ frontend/test/project_scaffold.test.tsx\n"
+            "@@ -2,12 +2,13 @@\n"
+            " describe('project scaffold', () => {\n"
+            "   it('shows status', () => {\n"
+            "     const status = renderProjectStatus()\n"
+            "-    expect(status).toBe('ready')\n"
+            "+    status\n"
+            "   })\n"
+            "   it('shows name', () => {\n"
+            "     const name = renderProjectName()\n"
+            "     expect(name).toContain('project')\n"
+            "+    expect(name).toContain('scaffold')\n"
+            "   })\n"
+            " })\n"
+        ),
+    )
+
+    with pytest.raises(QualityGateError, match="fixer attempted to weaken tests"):
+        ensure_test_patch_quality([patch], role="fixer")
+
+
 def test_test_patch_quality_rejects_content_update_that_removes_assertion(
     tmp_path,
 ) -> None:
