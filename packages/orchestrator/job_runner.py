@@ -2855,21 +2855,43 @@ class JobRunner:
             return False
         if task.role == "test_writer":
             return False
-        haystack = " ".join(
-            [
-                task.id,
-                task.title,
-                task.description,
-                " ".join(task.target_files),
-                " ".join(task.required_artifacts),
-            ]
-        ).lower()
-        if any(keyword in haystack for keyword in cls.PROJECT_SETUP_KEYWORDS):
-            return True
+        identity = " ".join([task.id, task.title]).lower()
+        description = task.description.lower()
+        artifacts = cls._unique_paths([*task.target_files, *task.required_artifacts])
+        artifact_text = " ".join(artifacts).lower()
+        haystack = " ".join([identity, description, artifact_text])
+        canonical_artifacts = set(cls.PROJECT_SETUP_REQUIRED_ARTIFACTS)
+        declares_project_setup_artifacts = any(
+            artifact in canonical_artifacts for artifact in artifacts
+        )
+        has_no_declared_artifacts = not artifacts
+        strong_identity = any(
+            keyword in identity
+            for keyword in (
+                "project-scaffold",
+                "project scaffold",
+                "project-setup",
+                "project setup",
+                "verify-project-setup",
+            )
+        )
         has_backend = "backend" in haystack
         has_frontend = "frontend" in haystack
         has_shared = "shared" in haystack
-        return has_backend and has_frontend and has_shared
+        structural_setup = (
+            "monorepo" in haystack
+            or "backend/frontend/shared" in haystack
+            or (has_backend and has_frontend and has_shared)
+        )
+        if strong_identity and (
+            has_no_declared_artifacts
+            or declares_project_setup_artifacts
+            or structural_setup
+        ):
+            return True
+        return structural_setup and (
+            has_no_declared_artifacts or declares_project_setup_artifacts
+        )
 
     def _project_setup_artifacts_ready(
         self,

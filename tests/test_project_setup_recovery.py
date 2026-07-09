@@ -296,6 +296,54 @@ def test_project_setup_repair_can_clear_stale_ignored_artifacts_and_pass(
     assert "ignored_project_setup_artifacts" not in record.spec.metadata["constraints"]
 
 
+def test_project_setup_phrase_in_app_task_does_not_trigger_scaffold(
+    tmp_path: Path,
+) -> None:
+    source_path = "backend/auth.py"
+    runner, _environment, record = _runner(
+        tmp_path,
+        scenario={
+            "implementer": ImplementationResult(
+                status=ImplementationStatus.IMPLEMENTED,
+                summary="Implemented auth backend.",
+                changed_files=[source_path],
+                patches=[
+                    FilePatch(
+                        path=source_path,
+                        operation="create",
+                        content="def authenticate() -> bool:\n    return True\n",
+                    )
+                ],
+            ).model_dump(),
+        },
+    )
+    task_graph = TaskGraph(
+        goal="Build English vocabulary test app",
+        tasks=[
+            PlannedTask(
+                id="auth-backend",
+                title="Build auth backend",
+                description=(
+                    "Implement auth endpoints after project setup is available."
+                ),
+                role="implementer",
+                target_files=[source_path],
+                required_artifacts=[source_path],
+            )
+        ],
+    )
+
+    normalized = runner._normalize_project_setup_task_graph(record, task_graph)
+    results = runner._run_implementation_tasks(record, normalized)
+
+    assert normalized == task_graph
+    assert results[0].summary == "Implemented auth backend."
+    assert (tmp_path / source_path).exists()
+    assert not (tmp_path / "frontend/package.json").exists()
+    assert "project_setup_scaffold" not in record.outputs
+    assert "task_graph_normalization" not in record.outputs
+
+
 def test_project_setup_cannot_enter_test_writer_before_required_artifacts_exist(
     tmp_path: Path,
 ) -> None:
