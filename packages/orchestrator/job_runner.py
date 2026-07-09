@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import re
+import shlex
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -21,6 +22,7 @@ from packages.orchestrator.audit import AuditRecorder
 from packages.orchestrator.approval import ApprovalGateway
 from packages.orchestrator.completion_verifier import DefinitionOfDoneVerifier
 from packages.orchestrator.context_builder import ContextBuilder
+from packages.orchestrator.execution_contracts import synthesize_job_metadata_from_prd
 from packages.orchestrator.job_store import InMemoryJobStore
 from packages.orchestrator.policy import PolicyEngine
 from packages.orchestrator.progress import summarize_job_progress
@@ -2281,7 +2283,117 @@ class JobRunner:
         )
         result = TestRunResult.model_validate(payload)
         record.outputs["test_run"] = result.model_dump()
+        if result.success:
+            runtime_result = self._run_runtime_contract_checks(
+                record,
+                timeout_seconds=timeout_seconds,
+            )
+            if runtime_result is not None and not runtime_result.success:
+                return runtime_result
         return result
+
+    def _run_runtime_contract_checks(
+        self,
+        record: JobRecord,
+        *,
+        timeout_seconds: int,
+    ) -> TestRunResult | None:
+        runtime_contract = self._runtime_contract(record)
+        acceptance_checks = self._runtime_acceptance_checks(record)
+        if not runtime_contract and not acceptance_checks:
+            return None
+        runtime_timeout_seconds = self._runtime_timeout_seconds(
+            runtime_contract,
+            fallback=timeout_seconds,
+        )
+        start_command = self._runtime_start_command(runtime_contract)
+        if start_command:
+            payload = self._call_tool(
+                "runner",
+                "test_server.run_command",
+                argv=start_command,
+                timeout_seconds=runtime_timeout_seconds,
+                mode="server",
+                http_path=self._runtime_http_path(runtime_contract),
+                http_checks=acceptance_checks or None,
+            )
+        else:
+            payload = self._call_tool(
+                "runner",
+                "test_server.run_test",
+                command_name="runtime-smoke-auto",
+                timeout_seconds=runtime_timeout_seconds,
+                http_checks=acceptance_checks or None,
+            )
+        result = TestRunResult.model_validate(payload)
+        result_payload = result.model_dump()
+        record.outputs["runtime_smoke"] = result_payload
+        if acceptance_checks:
+            record.outputs["acceptance_checks"] = result_payload
+        return result
+
+    @staticmethod
+    def _runtime_contract(record: JobRecord) -> dict[str, Any]:
+        metadata = record.spec.metadata if isinstance(record.spec.metadata, dict) else {}
+        constraints = metadata.get("constraints")
+        for source in (metadata, constraints if isinstance(constraints, dict) else {}):
+            value = source.get("runtime")
+            if isinstance(value, dict) and value:
+                return value
+        return {}
+
+    @staticmethod
+    def _runtime_acceptance_checks(record: JobRecord) -> list[dict[str, Any]]:
+        metadata = record.spec.metadata if isinstance(record.spec.metadata, dict) else {}
+        constraints = metadata.get("constraints")
+        checks: list[dict[str, Any]] = []
+        for source in (metadata, constraints if isinstance(constraints, dict) else {}):
+            runtime = source.get("runtime")
+            if isinstance(runtime, dict):
+                http_checks = runtime.get("http_checks")
+                if isinstance(http_checks, list):
+                    checks.extend(item for item in http_checks if isinstance(item, dict))
+            acceptance_checks = source.get("acceptance_checks")
+            if isinstance(acceptance_checks, list):
+                checks.extend(item for item in acceptance_checks if isinstance(item, dict))
+        deduped: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for check in checks:
+            key = repr(sorted(check.items()))
+            if key not in seen:
+                deduped.append(check)
+                seen.add(key)
+        return deduped
+
+    @staticmethod
+    def _runtime_timeout_seconds(
+        runtime_contract: dict[str, Any],
+        *,
+        fallback: int,
+    ) -> int:
+        for key in ("startup_timeout_seconds", "prepare_timeout_seconds"):
+            value = runtime_contract.get(key)
+            if isinstance(value, int) and value > 0:
+                return value
+        return fallback
+
+    @staticmethod
+    def _runtime_start_command(runtime_contract: dict[str, Any]) -> list[str]:
+        value = runtime_contract.get("start_command")
+        if isinstance(value, str) and value.strip():
+            return shlex.split(value)
+        if isinstance(value, list) and all(
+            isinstance(item, str) and item.strip() for item in value
+        ):
+            return [str(item) for item in value]
+        return []
+
+    @staticmethod
+    def _runtime_http_path(runtime_contract: dict[str, Any]) -> str:
+        value = runtime_contract.get("http_probe_path")
+        if isinstance(value, str) and value.startswith("/"):
+            return value
+        return "/"
 
     def _transition_to_testing(self, record: JobRecord) -> None:
         if record.status == JobStatus.IMPLEMENTING:
@@ -2298,7 +2410,29 @@ class JobRunner:
             "Produce the product requirements",
             memory_key="prd",
         )
-        return self._refine_prd_quality_for_autonomy(record, prd)
+        refined = self._refine_prd_quality_for_autonomy(record, prd)
+        if refined is not None:
+            self._sync_execution_contract_metadata(record, refined)
+        return refined
+
+    def _sync_execution_contract_metadata(self, record: JobRecord, prd: PRD) -> None:
+        merged = synthesize_job_metadata_from_prd(
+            prd,
+            record.spec.metadata,
+            workspace_root=self._workspace_root(record),
+        )
+        if merged == record.spec.metadata:
+            return
+        record.spec.metadata = merged
+        record.outputs["execution_contracts"] = {
+            "runtime": bool(merged.get("runtime")),
+            "acceptance_checks": bool(merged.get("acceptance_checks")),
+            "required_artifacts": list(merged.get("required_artifacts", []))
+            if isinstance(merged.get("required_artifacts"), list)
+            else [],
+            "framework_profile": merged.get("framework_profile"),
+        }
+        self.store.update(record)
 
     def _refine_prd_quality_for_autonomy(self, record: JobRecord, prd: PRD) -> PRD | None:
         min_small_parts = self._prd_quality_min_small_parts(record)

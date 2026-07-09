@@ -621,6 +621,17 @@ class TestServer:
     ) -> dict[str, object]:
         profile = self._detect_runtime_profile()
         if profile is None:
+            if http_checks:
+                return TestRunResult(
+                    success=False,
+                    command=["runtime-smoke", "missing-profile"],
+                    failed_tests=[],
+                    output_excerpt=(
+                        "runtime HTTP checks were requested, but no supported "
+                        "runtime profile was detected"
+                    ),
+                    exit_code=1,
+                ).model_dump()
             return TestRunResult(
                 success=True,
                 command=["runtime-smoke", "skipped"],

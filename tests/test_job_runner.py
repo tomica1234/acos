@@ -17,6 +17,7 @@ from packages.schemas.agent_outputs import (
     PRD,
     ReleaseResult,
     ReviewResult,
+    RuntimePlan,
     SecurityReviewResult,
     SummaryResult,
     TestRunResult,
@@ -33,6 +34,7 @@ from packages.schemas.models import (
     Severity,
     TestWriterStatus as WriterStatus,
 )
+from packages.schemas.runtime import RuntimeHttpCheck
 from packages.schemas.tasks import PlannedTask, TaskGraph
 
 from tests.conftest import attach_mock_adapter, config_dir
@@ -485,6 +487,286 @@ def test_run_structured_role_clears_active_status_after_adapter_error(
     assert "active_model" not in persisted.runtime_state
     assert "active_model_timeout_seconds" not in persisted.runtime_state
     assert "active_started_at" not in persisted.runtime_state
+
+
+def test_run_tests_executes_runtime_acceptance_contracts(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    registry = ModelRegistry.from_paths(
+        provider_path=config_dir() / "model_providers.yaml",
+        agents_path=config_dir() / "agents.yaml",
+        routing_path=config_dir() / "model_routing.yaml",
+    )
+    policy = PolicyEngine.from_path(config_dir() / "policies.yaml")
+    environment = FakeMCPEnvironment(
+        workspace_root=workspace,
+        memory_db_path=workspace / ".memory.sqlite3",
+    )
+    runner = JobRunner(registry=registry, policy=policy, router=environment.build_router())
+    record = runner.store.create(
+        JobSpec(
+            request_text="Build runtime app",
+            repo_path=str(workspace),
+            target_branch="acos/runtime-acceptance-contract",
+            metadata={
+                "runtime": {
+                    "startup_timeout_seconds": 37,
+                    "http_checks": [
+                        {
+                            "name": "health",
+                            "method": "GET",
+                            "path": "/health",
+                            "expect_status": 200,
+                        }
+                    ],
+                },
+                "acceptance_checks": [
+                    {
+                        "name": "home",
+                        "method": "GET",
+                        "path": "/",
+                        "expect_status": 200,
+                    }
+                ],
+                "constraints": {"test_command_name": "pytest"},
+            },
+        )
+    )
+    record.status = JobStatus.WRITING_TESTS
+    calls: list[dict[str, object]] = []
+
+    def fake_call_tool(role: str, tool_name: str, **kwargs):
+        calls.append({"role": role, "tool_name": tool_name, **kwargs})
+        if kwargs["command_name"] == "pytest":
+            return TestRunResult(
+                success=True,
+                command=["pytest"],
+                output_excerpt="1 passed",
+                exit_code=0,
+                executed_test_count=1,
+            ).model_dump()
+        assert kwargs["command_name"] == "runtime-smoke-auto"
+        assert kwargs["timeout_seconds"] == 37
+        assert kwargs["http_checks"] == [
+            {
+                "name": "health",
+                "method": "GET",
+                "path": "/health",
+                "expect_status": 200,
+            },
+            {
+                "name": "home",
+                "method": "GET",
+                "path": "/",
+                "expect_status": 200,
+            },
+        ]
+        return TestRunResult(
+            success=True,
+            command=["runtime-smoke-auto"],
+            output_excerpt="runtime checks passed",
+            exit_code=0,
+        ).model_dump()
+
+    runner._call_tool = fake_call_tool
+
+    result = runner._run_tests(record)
+
+    assert result.success is True
+    assert [call["command_name"] for call in calls] == [
+        "pytest",
+        "runtime-smoke-auto",
+    ]
+    assert record.outputs["test_run"]["success"] is True
+    assert record.outputs["runtime_smoke"]["success"] is True
+    assert record.outputs["acceptance_checks"]["success"] is True
+
+
+def test_run_tests_uses_explicit_runtime_start_command(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    registry = ModelRegistry.from_paths(
+        provider_path=config_dir() / "model_providers.yaml",
+        agents_path=config_dir() / "agents.yaml",
+        routing_path=config_dir() / "model_routing.yaml",
+    )
+    policy = PolicyEngine.from_path(config_dir() / "policies.yaml")
+    environment = FakeMCPEnvironment(
+        workspace_root=workspace,
+        memory_db_path=workspace / ".memory.sqlite3",
+    )
+    runner = JobRunner(registry=registry, policy=policy, router=environment.build_router())
+    record = runner.store.create(
+        JobSpec(
+            request_text="Build runtime app",
+            repo_path=str(workspace),
+            target_branch="acos/runtime-start-command-contract",
+            metadata={
+                "runtime": {
+                    "start_command": [
+                        "python",
+                        "-m",
+                        "uvicorn",
+                        "app.main:app",
+                        "--host",
+                        "{host}",
+                        "--port",
+                        "{port}",
+                    ],
+                    "http_probe_path": "/healthz",
+                    "startup_timeout_seconds": 41,
+                },
+                "acceptance_checks": [
+                    {
+                        "name": "home",
+                        "method": "GET",
+                        "path": "/",
+                        "expect_status": 200,
+                    }
+                ],
+                "constraints": {"test_command_name": "pytest"},
+            },
+        )
+    )
+    record.status = JobStatus.WRITING_TESTS
+    calls: list[dict[str, object]] = []
+
+    def fake_call_tool(role: str, tool_name: str, **kwargs):
+        calls.append({"role": role, "tool_name": tool_name, **kwargs})
+        if tool_name == "test_server.run_test":
+            return TestRunResult(
+                success=True,
+                command=["pytest"],
+                output_excerpt="1 passed",
+                exit_code=0,
+                executed_test_count=1,
+            ).model_dump()
+        assert tool_name == "test_server.run_command"
+        assert kwargs["argv"] == [
+            "python",
+            "-m",
+            "uvicorn",
+            "app.main:app",
+            "--host",
+            "{host}",
+            "--port",
+            "{port}",
+        ]
+        assert kwargs["mode"] == "server"
+        assert kwargs["http_path"] == "/healthz"
+        assert kwargs["timeout_seconds"] == 41
+        assert kwargs["http_checks"] == [
+            {
+                "name": "home",
+                "method": "GET",
+                "path": "/",
+                "expect_status": 200,
+            }
+        ]
+        return TestRunResult(
+            success=True,
+            command=["runtime-start-command"],
+            output_excerpt="runtime command passed",
+            exit_code=0,
+        ).model_dump()
+
+    runner._call_tool = fake_call_tool
+
+    result = runner._run_tests(record)
+
+    assert result.success is True
+    assert [call["tool_name"] for call in calls] == [
+        "test_server.run_test",
+        "test_server.run_command",
+    ]
+    assert record.outputs["runtime_smoke"]["success"] is True
+    assert record.outputs["acceptance_checks"]["success"] is True
+
+
+def test_prd_runtime_contracts_are_synthesized_into_job_metadata(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    registry = ModelRegistry.from_paths(
+        provider_path=config_dir() / "model_providers.yaml",
+        agents_path=config_dir() / "agents.yaml",
+        routing_path=config_dir() / "model_routing.yaml",
+    )
+    prd = PRD(
+        title="Runtime App",
+        problem_statement="Need a web runtime check.",
+        runtime=RuntimePlan(
+            start_command=[
+                "python",
+                "-m",
+                "uvicorn",
+                "app.main:app",
+                "--host",
+                "{host}",
+                "--port",
+                "{port}",
+            ],
+            http_probe_path="/healthz",
+        ),
+        acceptance_checks=[
+            RuntimeHttpCheck(
+                name="home",
+                method="GET",
+                path="/",
+                expect_status=200,
+            )
+        ],
+        required_artifacts=["app/main.py", "tests/test_app.py"],
+    )
+    attach_mock_adapter(registry, {"pm": prd.model_dump()})
+    policy = PolicyEngine.from_path(config_dir() / "policies.yaml")
+    environment = FakeMCPEnvironment(
+        workspace_root=workspace,
+        memory_db_path=workspace / ".memory.sqlite3",
+    )
+    runner = JobRunner(registry=registry, policy=policy, router=environment.build_router())
+    record = runner.store.create(
+        JobSpec(
+            request_text="Build runtime app",
+            repo_path=str(workspace),
+            target_branch="acos/prd-runtime-contract-metadata",
+        )
+    )
+
+    loaded = runner._load_or_refine_prd_for_autonomy(record)
+
+    assert loaded == prd
+    assert record.spec.metadata["runtime"]["start_command"] == [
+        "python",
+        "-m",
+        "uvicorn",
+        "app.main:app",
+        "--host",
+        "{host}",
+        "--port",
+        "{port}",
+    ]
+    assert record.spec.metadata["runtime"]["http_probe_path"] == "/healthz"
+    acceptance_check = record.spec.metadata["acceptance_checks"][0]
+    assert acceptance_check["name"] == "home"
+    assert acceptance_check["method"] == "GET"
+    assert acceptance_check["path"] == "/"
+    assert acceptance_check["expect_status"] == 200
+    assert record.spec.metadata["required_artifacts"] == [
+        "app/main.py",
+        "tests/test_app.py",
+    ]
+    assert record.outputs["execution_contracts"] == {
+        "runtime": True,
+        "acceptance_checks": True,
+        "required_artifacts": ["app/main.py", "tests/test_app.py"],
+        "framework_profile": None,
+    }
 
 
 def test_job_runner_review_request_changes_then_fix(tmp_path: Path) -> None:

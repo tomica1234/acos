@@ -284,6 +284,30 @@ def test_test_server_runtime_smoke_detects_fastapi_entrypoint(
     assert captured["http_path"] == "/"
 
 
+def test_test_server_runtime_smoke_fails_http_checks_without_runtime_profile(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    server = TestServer(workspace)
+
+    payload = server.run_test(
+        command_name="runtime-smoke-auto",
+        http_checks=[
+            {
+                "name": "home",
+                "method": "GET",
+                "path": "/",
+                "expect_status": 200,
+            }
+        ],
+    )
+
+    assert payload["success"] is False
+    assert payload["command"] == ["runtime-smoke", "missing-profile"]
+    assert "no supported runtime profile" in payload["output_excerpt"]
+
+
 def test_test_server_run_command_formats_server_placeholders(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

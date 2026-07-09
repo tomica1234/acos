@@ -51,9 +51,15 @@ class DefinitionOfDoneVerifier:
         test_run = outputs.get("test_run")
         if not isinstance(test_run, dict) or test_run.get("success") is not True:
             missing.append("unit_tests_success")
-        if "runtime_smoke" in outputs and not self._success_value(outputs.get("runtime_smoke")):
+        if (
+            self._runtime_required(record)
+            or "runtime_smoke" in outputs
+        ) and not self._success_value(outputs.get("runtime_smoke")):
             missing.append("runtime_smoke_success")
-        if "acceptance_checks" in outputs and not self._success_value(outputs.get("acceptance_checks")):
+        if (
+            self._acceptance_checks_required(record)
+            or "acceptance_checks" in outputs
+        ) and not self._success_value(outputs.get("acceptance_checks")):
             missing.append("acceptance_checks_success")
 
         review = outputs.get("reviewer") or outputs.get("review")
@@ -83,6 +89,32 @@ class DefinitionOfDoneVerifier:
     @staticmethod
     def _success_value(value: Any) -> bool:
         return bool(isinstance(value, dict) and value.get("success") is True)
+
+    @classmethod
+    def _runtime_required(cls, record: JobRecord) -> bool:
+        return cls._metadata_has_non_empty(record, "runtime")
+
+    @classmethod
+    def _acceptance_checks_required(cls, record: JobRecord) -> bool:
+        return cls._metadata_has_non_empty(record, "acceptance_checks")
+
+    @staticmethod
+    def _metadata_has_non_empty(record: JobRecord, key: str) -> bool:
+        metadata = record.spec.metadata if isinstance(record.spec.metadata, dict) else {}
+        candidates: list[Any] = [metadata.get(key)]
+        constraints = metadata.get("constraints")
+        if isinstance(constraints, dict):
+            candidates.append(constraints.get(key))
+        for value in candidates:
+            if isinstance(value, dict) and value:
+                return True
+            if isinstance(value, list) and value:
+                return True
+            if isinstance(value, str) and value.strip():
+                return True
+            if isinstance(value, bool):
+                return value
+        return False
 
     @staticmethod
     def _required_artifacts(outputs: dict[str, Any]) -> set[str]:

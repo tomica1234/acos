@@ -174,6 +174,37 @@ def test_completion_verifier_reports_missing_evidence(tmp_path: Path) -> None:
     assert "unit_tests_success" in result.missing_evidence
 
 
+def test_completion_verifier_requires_requested_runtime_and_acceptance_evidence(
+    tmp_path: Path,
+) -> None:
+    record = _record(tmp_path, status=JobStatus.FINALIZING, error="")
+    record.spec.metadata["runtime"] = {"http_probe_path": "/health"}
+    record.spec.metadata["acceptance_checks"] = [
+        {"name": "home", "method": "GET", "path": "/", "expect_status": 200}
+    ]
+    record.outputs["task_graph"] = {
+        "goal": "Build it",
+        "tasks": [
+            {
+                "id": "core",
+                "title": "Core",
+                "description": "Core",
+                "role": "implementer",
+            }
+        ],
+    }
+    record.completed_task_ids.append("core")
+    record.outputs["test_run"] = {"success": True}
+    record.audit_events.append({"event": "verified"})
+    record.checkpoints.append({"kind": "stage"})
+
+    result = DefinitionOfDoneVerifier().verify(record)
+
+    assert not result.passed
+    assert "runtime_smoke_success" in result.missing_evidence
+    assert "acceptance_checks_success" in result.missing_evidence
+
+
 def test_completion_verifier_rejects_invalid_and_non_file_artifacts(
     tmp_path: Path,
 ) -> None:
