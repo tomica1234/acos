@@ -590,10 +590,54 @@ def _python_payload_has_vacuous_assertion(payload: str) -> bool:
             _python_assert_line_is_vacuous(line)
             for line in payload.splitlines()
         )
-    return any(
-        isinstance(node, ast.Assert) and _python_assert_expr_is_vacuous(node.test)
-        for node in ast.walk(tree)
-    )
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assert) and _python_assert_expr_is_vacuous(node.test):
+            return True
+        if (
+            isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and node.name.startswith("test_")
+            and _python_test_function_has_literal_bound_vacuous_assertion(node)
+        ):
+            return True
+    return False
+
+
+def _python_test_function_has_literal_bound_vacuous_assertion(
+    node: ast.FunctionDef | ast.AsyncFunctionDef,
+) -> bool:
+    literal_bindings: dict[str, object] = {}
+    for statement in node.body:
+        _update_python_literal_binding(statement, literal_bindings)
+        if isinstance(statement, ast.Assert) and _python_assert_expr_is_vacuous(
+            statement.test,
+            literal_bindings,
+        ):
+            return True
+    return False
+
+
+def _update_python_literal_binding(
+    statement: ast.stmt,
+    literal_bindings: dict[str, object],
+) -> None:
+    target: ast.expr | None = None
+    value: ast.expr | None = None
+    if isinstance(statement, ast.Assign) and len(statement.targets) == 1:
+        target = statement.targets[0]
+        value = statement.value
+    elif isinstance(statement, ast.AnnAssign):
+        target = statement.target
+        value = statement.value
+    elif isinstance(statement, ast.AugAssign) and isinstance(statement.target, ast.Name):
+        literal_bindings.pop(statement.target.id, None)
+        return
+    if not isinstance(target, ast.Name) or value is None:
+        return
+    literal_value = _literal_value(value)
+    if literal_value is _MISSING_LITERAL:
+        literal_bindings.pop(target.id, None)
+        return
+    literal_bindings[target.id] = literal_value
 
 
 def _python_assert_line_is_vacuous(line: str) -> bool:
@@ -610,13 +654,20 @@ def _python_assert_line_is_vacuous(line: str) -> bool:
     return _python_assert_expr_is_vacuous(statements[0].test)
 
 
-def _python_assert_expr_is_vacuous(expression: ast.expr) -> bool:
-    if isinstance(expression, ast.Constant):
-        return bool(expression.value) is True
+def _python_assert_expr_is_vacuous(
+    expression: ast.expr,
+    literal_bindings: dict[str, object] | None = None,
+) -> bool:
+    literal_value = _literal_value(expression, literal_bindings)
+    if literal_value is not _MISSING_LITERAL and not isinstance(expression, ast.Compare):
+        return bool(literal_value) is True
     if not isinstance(expression, ast.Compare):
         return False
-    values = [_literal_value(expression.left)]
-    values.extend(_literal_value(comparator) for comparator in expression.comparators)
+    values = [_literal_value(expression.left, literal_bindings)]
+    values.extend(
+        _literal_value(comparator, literal_bindings)
+        for comparator in expression.comparators
+    )
     if any(value is _MISSING_LITERAL for value in values):
         return False
     return _python_literal_compare_chain_is_true(values, expression.ops)
@@ -667,7 +718,16 @@ _MISSING_LITERAL = object()
 _JS_UNDEFINED = object()
 
 
-def _literal_value(expression: ast.expr) -> object:
+def _literal_value(
+    expression: ast.expr,
+    literal_bindings: dict[str, object] | None = None,
+) -> object:
+    if (
+        literal_bindings is not None
+        and isinstance(expression, ast.Name)
+        and expression.id in literal_bindings
+    ):
+        return literal_bindings[expression.id]
     try:
         return ast.literal_eval(expression)
     except (ValueError, TypeError):
@@ -678,21 +738,24 @@ _JS_LITERAL = (
     r"(?:true|false|null|undefined|-?\d+(?:\.\d+)?|"
     r"\"(?:\\.|[^\"\\])*\"|'(?:\\.|[^'\\])*'|`(?:\\.|[^`\\])*`)"
 )
+_JS_IDENTIFIER = r"[A-Za-z_$][\w$]*"
+_JS_EXPECTATION_VALUE = rf"(?:{_JS_LITERAL}|{_JS_IDENTIFIER})"
 
 
 def _javascript_payload_has_vacuous_expectation(payload: str) -> bool:
+    literal_bindings = _javascript_literal_bindings(payload)
     expectation_with_argument = re.compile(
-        rf"\bexpect\s*\(\s*(?P<actual>{_JS_LITERAL})\s*\)"
+        rf"\bexpect\s*\(\s*(?P<actual>{_JS_EXPECTATION_VALUE})\s*\)"
         rf"\s*\.\s*(?:(?P<negated>not)\s*\.\s*)?"
         rf"(?P<matcher>"
         rf"toBeGreaterThanOrEqual|toBeLessThanOrEqual|toBeGreaterThan|"
         rf"toBeLessThan|toBe|toEqual|toStrictEqual|toContain"
         rf")\s*"
-        rf"\(\s*(?P<expected>{_JS_LITERAL})\s*\)",
+        rf"\(\s*(?P<expected>{_JS_EXPECTATION_VALUE})\s*\)",
         re.MULTILINE,
     )
     expectation_without_argument = re.compile(
-        rf"\bexpect\s*\(\s*(?P<actual>{_JS_LITERAL})\s*\)"
+        rf"\bexpect\s*\(\s*(?P<actual>{_JS_EXPECTATION_VALUE})\s*\)"
         rf"\s*\.\s*(?:(?P<negated>not)\s*\.\s*)?"
         rf"(?P<matcher>"
         rf"toBeTruthy|toBeFalsy|toBeNull|toBeUndefined|toBeDefined"
@@ -700,8 +763,14 @@ def _javascript_payload_has_vacuous_expectation(payload: str) -> bool:
         re.MULTILINE,
     )
     for match in expectation_with_argument.finditer(payload):
-        actual = _javascript_literal_value(match.group("actual"))
-        expected = _javascript_literal_value(match.group("expected"))
+        actual = _javascript_expression_value(
+            match.group("actual"),
+            literal_bindings,
+        )
+        expected = _javascript_expression_value(
+            match.group("expected"),
+            literal_bindings,
+        )
         if actual is _MISSING_LITERAL or expected is _MISSING_LITERAL:
             continue
         passes = _javascript_matcher_passes(
@@ -716,7 +785,10 @@ def _javascript_payload_has_vacuous_expectation(payload: str) -> bool:
         if passes:
             return True
     for match in expectation_without_argument.finditer(payload):
-        actual = _javascript_literal_value(match.group("actual"))
+        actual = _javascript_expression_value(
+            match.group("actual"),
+            literal_bindings,
+        )
         if actual is _MISSING_LITERAL:
             continue
         passes = _javascript_matcher_passes(actual, match.group("matcher"))
@@ -727,6 +799,30 @@ def _javascript_payload_has_vacuous_expectation(payload: str) -> bool:
         if passes:
             return True
     return False
+
+
+def _javascript_literal_bindings(payload: str) -> dict[str, object]:
+    assignment = re.compile(
+        rf"\b(?:const|let|var)\s+(?P<name>{_JS_IDENTIFIER})\s*=\s*"
+        rf"(?P<literal>{_JS_LITERAL})\s*;?",
+        re.MULTILINE,
+    )
+    bindings: dict[str, object] = {}
+    for match in assignment.finditer(payload):
+        value = _javascript_literal_value(match.group("literal"))
+        if value is not _MISSING_LITERAL:
+            bindings[match.group("name")] = value
+    return bindings
+
+
+def _javascript_expression_value(
+    expression: str,
+    literal_bindings: dict[str, object],
+) -> object:
+    stripped = expression.strip()
+    if stripped in literal_bindings:
+        return literal_bindings[stripped]
+    return _javascript_literal_value(stripped)
 
 
 def _javascript_matcher_passes(
