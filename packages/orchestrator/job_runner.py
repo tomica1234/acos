@@ -6443,6 +6443,17 @@ class JobRunner:
             if self._autonomous_stage_limit_reached(record, stage_results):
                 return implementation_results, test_writer_results, last_test_result, stage_results
             if task.id in completed_task_ids:
+                unmet_dependencies = self._unmet_dependencies_for_task(
+                    task,
+                    completed_task_ids,
+                )
+                if unmet_dependencies:
+                    self._recover_unmet_task_dependencies(
+                        record,
+                        task,
+                        unmet_dependencies,
+                    )
+                    return implementation_results, test_writer_results, last_test_result, stage_results
                 stage_test_pairs = self._run_ready_test_tasks(
                     record=record,
                     pending_test_tasks=pending_test_tasks,
@@ -6491,6 +6502,17 @@ class JobRunner:
                     ready_task_ids.update(task.id for task, _ in stage_test_pairs)
                 continue
             if task.id in recorded_implementation_task_ids:
+                unmet_dependencies = self._unmet_dependencies_for_task(
+                    task,
+                    completed_task_ids,
+                )
+                if unmet_dependencies:
+                    self._recover_unmet_task_dependencies(
+                        record,
+                        task,
+                        unmet_dependencies,
+                    )
+                    return implementation_results, test_writer_results, last_test_result, stage_results
                 stage_test_pairs: list[tuple[PlannedTask, TestWriterResult]] = []
                 ready_task_ids.add(task.id)
                 stage_test_pairs = self._run_ready_test_tasks(

@@ -5909,6 +5909,170 @@ def test_autonomous_loop_blocks_tail_test_writer_with_unmet_dependency(
     assert not (workspace / "tests" / "test_core.py").exists()
 
 
+def test_autonomous_loop_blocks_recorded_implementation_with_unmet_dependency(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    registry = ModelRegistry.from_paths(
+        provider_path=config_dir() / "model_providers.yaml",
+        agents_path=config_dir() / "agents.yaml",
+        routing_path=config_dir() / "model_routing.yaml",
+    )
+    attach_mock_adapter(
+        registry,
+        {
+            "test_writer": TestWriterOutput(
+                summary="Should not validate a task before its dependency completes.",
+                patches=[
+                    {
+                        "path": "tests/test_extra.py",
+                        "content": (
+                            "def test_extra_exists() -> None:\n"
+                            "    assert 'extra' in 'extra exists'\n"
+                        ),
+                        "operation": "create",
+                    }
+                ],
+            ).model_dump(),
+        },
+    )
+    policy = PolicyEngine.from_path(config_dir() / "policies.yaml")
+    environment = FakeMCPEnvironment(
+        workspace_root=workspace,
+        memory_db_path=workspace / ".memory.sqlite3",
+    )
+    runner = JobRunner(
+        registry=registry,
+        policy=policy,
+        router=environment.build_router(),
+    )
+    record = runner.store.create(
+        JobSpec(
+            request_text="Create feature with tests",
+            repo_path=str(workspace),
+            target_branch="acos/recorded-implementation-dependency-guard",
+        )
+    )
+    task = PlannedTask(
+        id="extra",
+        title="Build extra",
+        description="Build extra behavior after the core is complete.",
+        role="implementer",
+        depends_on=["core"],
+        acceptance_criteria=["Extra behavior works"],
+        target_files=["extra.py"],
+        required_artifacts=["extra.py"],
+    )
+    record.outputs["implementation_tasks"] = [
+        {
+            "task": task.model_dump(),
+            "result": ImplementationResult(
+                status=ImplementationStatus.IMPLEMENTED,
+                summary="Previously recorded extra implementation.",
+                changed_files=["extra.py"],
+            ).model_dump(),
+        }
+    ]
+    runner.store.update(record)
+    task_graph = TaskGraph(goal="Build feature", tasks=[task])
+
+    implementation_results, test_writer_results, test_result, stages = (
+        runner._run_autonomous_task_loop(record, task_graph)
+    )
+
+    assert [item.summary for item in implementation_results] == [
+        "Previously recorded extra implementation."
+    ]
+    assert test_writer_results == []
+    assert stages == []
+    assert test_result.success is True
+    assert_recovery_plan(record, status=JobStatus.REPLANNING, strategy="REPLAN_TASK")
+    assert_recoverable_error(record, "unmet_task_dependencies:core")
+    constraints = record.runtime_state["recovery_plan"]["constraints"]
+    assert constraints["failed_task_id"] == "extra"
+    assert constraints["unmet_dependencies"] == ["core"]
+    assert "test_writer_tasks" not in record.outputs
+    assert not (workspace / "tests" / "test_extra.py").exists()
+    assert record.completed_task_ids == []
+
+
+def test_autonomous_loop_blocks_inconsistent_completed_task_dependency(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    registry = ModelRegistry.from_paths(
+        provider_path=config_dir() / "model_providers.yaml",
+        agents_path=config_dir() / "agents.yaml",
+        routing_path=config_dir() / "model_routing.yaml",
+    )
+    attach_mock_adapter(
+        registry,
+        {
+            "test_writer": TestWriterOutput(
+                summary="Should not run for an inconsistent completed task.",
+                patches=[
+                    {
+                        "path": "tests/test_extra.py",
+                        "content": (
+                            "def test_extra_exists() -> None:\n"
+                            "    assert 'extra' in 'extra exists'\n"
+                        ),
+                        "operation": "create",
+                    }
+                ],
+            ).model_dump(),
+        },
+    )
+    policy = PolicyEngine.from_path(config_dir() / "policies.yaml")
+    environment = FakeMCPEnvironment(
+        workspace_root=workspace,
+        memory_db_path=workspace / ".memory.sqlite3",
+    )
+    runner = JobRunner(
+        registry=registry,
+        policy=policy,
+        router=environment.build_router(),
+    )
+    record = runner.store.create(
+        JobSpec(
+            request_text="Create feature with tests",
+            repo_path=str(workspace),
+            target_branch="acos/completed-task-dependency-guard",
+        )
+    )
+    task = PlannedTask(
+        id="extra",
+        title="Build extra",
+        description="Build extra behavior after the core is complete.",
+        role="implementer",
+        depends_on=["core"],
+        acceptance_criteria=["Extra behavior works"],
+        target_files=["extra.py"],
+        required_artifacts=["extra.py"],
+    )
+    record.completed_task_ids = ["extra"]
+    runner.store.update(record)
+    task_graph = TaskGraph(goal="Build feature", tasks=[task])
+
+    implementation_results, test_writer_results, test_result, stages = (
+        runner._run_autonomous_task_loop(record, task_graph)
+    )
+
+    assert implementation_results == []
+    assert test_writer_results == []
+    assert stages == []
+    assert test_result.success is True
+    assert_recovery_plan(record, status=JobStatus.REPLANNING, strategy="REPLAN_TASK")
+    assert_recoverable_error(record, "unmet_task_dependencies:core")
+    constraints = record.runtime_state["recovery_plan"]["constraints"]
+    assert constraints["failed_task_id"] == "extra"
+    assert constraints["unmet_dependencies"] == ["core"]
+    assert "test_writer_tasks" not in record.outputs
+    assert not (workspace / "tests" / "test_extra.py").exists()
+
+
 def test_job_runner_repairs_invalid_task_graph_before_implementation(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
     workspace.mkdir()
