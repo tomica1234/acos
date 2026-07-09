@@ -223,6 +223,8 @@ def _test_patch_is_suspicious(patch: FilePatch) -> bool:
     )
     if any(snippet in compact for snippet in vacuous_assertions):
         return True
+    if _javascript_payload_has_vacuous_expectation(payload):
+        return True
     if _python_payload_has_vacuous_assertion(payload):
         return True
     if _python_test_has_empty_body(payload):
@@ -352,6 +354,7 @@ def _python_assert_expr_is_vacuous(expression: ast.expr) -> bool:
 
 
 _MISSING_LITERAL = object()
+_JS_UNDEFINED = object()
 
 
 def _literal_value(expression: ast.expr) -> object:
@@ -359,6 +362,58 @@ def _literal_value(expression: ast.expr) -> object:
         return ast.literal_eval(expression)
     except (ValueError, TypeError):
         return _MISSING_LITERAL
+
+
+_JS_LITERAL = (
+    r"(?:true|false|null|undefined|-?\d+(?:\.\d+)?|"
+    r"\"(?:\\.|[^\"\\])*\"|'(?:\\.|[^'\\])*'|`(?:\\.|[^`\\])*`)"
+)
+
+
+def _javascript_payload_has_vacuous_expectation(payload: str) -> bool:
+    expectation = re.compile(
+        rf"\bexpect\s*\(\s*(?P<actual>{_JS_LITERAL})\s*\)"
+        rf"\s*\.\s*(?P<matcher>toBe|toEqual|toStrictEqual|toContain)\s*"
+        rf"\(\s*(?P<expected>{_JS_LITERAL})\s*\)",
+        re.MULTILINE,
+    )
+    for match in expectation.finditer(payload):
+        actual = _javascript_literal_value(match.group("actual"))
+        expected = _javascript_literal_value(match.group("expected"))
+        if actual is _MISSING_LITERAL or expected is _MISSING_LITERAL:
+            continue
+        matcher = match.group("matcher")
+        if matcher in {"toBe", "toEqual", "toStrictEqual"} and actual == expected:
+            return True
+        if matcher == "toContain" and isinstance(actual, str) and isinstance(expected, str):
+            return expected in actual
+    return False
+
+
+def _javascript_literal_value(raw_literal: str) -> object:
+    raw = raw_literal.strip()
+    lowered = raw.lower()
+    if lowered == "true":
+        return True
+    if lowered == "false":
+        return False
+    if lowered == "null":
+        return None
+    if lowered == "undefined":
+        return _JS_UNDEFINED
+    if re.fullmatch(r"-?\d+(?:\.\d+)?", raw):
+        return float(raw) if "." in raw else int(raw)
+    if len(raw) >= 2 and raw[0] in {"'", '"'} and raw[-1] == raw[0]:
+        try:
+            return ast.literal_eval(raw)
+        except (ValueError, SyntaxError):
+            return _MISSING_LITERAL
+    if len(raw) >= 2 and raw.startswith("`") and raw.endswith("`"):
+        body = raw[1:-1]
+        if "${" in body:
+            return _MISSING_LITERAL
+        return body
+    return _MISSING_LITERAL
 
 
 def _looks_like_active_test_location(path: str) -> bool:

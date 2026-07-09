@@ -77,6 +77,57 @@ def test_test_patch_quality_rejects_vacuous_frontend_assertions() -> None:
         ensure_test_patch_quality([patch], role="test_writer")
 
 
+def test_test_patch_quality_rejects_vacuous_frontend_literal_expectations() -> None:
+    patch = FilePatch(
+        path="src/App.spec.tsx",
+        operation="create",
+        content=(
+            "import { expect, test } from 'vitest'\n\n"
+            "test('placeholder', () => {\n"
+            "  expect('project scaffold').toContain('scaffold')\n"
+            "})\n"
+        ),
+    )
+
+    with pytest.raises(QualityGateError, match="test_writer attempted to weaken tests"):
+        ensure_test_patch_quality([patch], role="test_writer")
+
+
+def test_test_patch_quality_rejects_vacuous_frontend_expectation_update_diff() -> None:
+    patch = FilePatch(
+        path="src/App.spec.tsx",
+        operation="update",
+        unified_diff=(
+            "--- src/App.spec.tsx\n"
+            "+++ src/App.spec.tsx\n"
+            "@@ -2,5 +2,5 @@\n"
+            " test('loads app', () => {\n"
+            "-  expect(screen.getByText('Ready')).toBeInTheDocument()\n"
+            "+  expect(2).toEqual(2)\n"
+            " })\n"
+        ),
+    )
+
+    with pytest.raises(QualityGateError, match="fixer attempted to weaken tests"):
+        ensure_test_patch_quality([patch], role="fixer")
+
+
+def test_test_patch_quality_allows_frontend_variable_expectation() -> None:
+    patch = FilePatch(
+        path="src/App.spec.tsx",
+        operation="create",
+        content=(
+            "import { expect, test } from 'vitest'\n\n"
+            "test('uses app output', () => {\n"
+            "  const label = renderAppLabel()\n"
+            "  expect(label).toContain('project scaffold')\n"
+            "})\n"
+        ),
+    )
+
+    ensure_test_patch_quality([patch], role="test_writer")
+
+
 def test_test_patch_quality_rejects_empty_frontend_tests() -> None:
     patch = FilePatch(
         path="backend/test/scaffold.test.js",
