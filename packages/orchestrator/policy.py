@@ -153,11 +153,20 @@ class PolicyEngine:
         )
 
     def is_test_path(self, path: str) -> bool:
-        normalized = self.normalize_path(path)
+        normalized = self.normalize_path(path).lower()
         basename = PurePosixPath(normalized).name
-        return any(
-            normalized.startswith(prefix) for prefix in self.config.workspace.test_path_prefixes
-        ) or (basename.startswith("test_") and basename.endswith(".py"))
+        configured_prefixes = [
+            self.normalize_path(prefix).lower()
+            for prefix in self.config.workspace.test_path_prefixes
+        ]
+        return (
+            any(normalized.startswith(prefix) for prefix in configured_prefixes)
+            or "/tests/" in f"/{normalized}"
+            or "/test/" in f"/{normalized}"
+            or (basename.startswith("test_") and basename.endswith(".py"))
+            or ".test." in basename
+            or ".spec." in basename
+        )
 
     def is_dependency_manifest(self, path: str) -> bool:
         normalized = self.normalize_path(path)

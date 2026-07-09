@@ -537,12 +537,25 @@ def test_policy_blocks_test_and_dependency_patches() -> None:
         policy.assert_patch_target_allowed("fixer", "tests/test_feature.py")
 
     with pytest.raises(PermissionError):
+        policy.assert_patch_target_allowed(
+            "implementer",
+            "frontend/test/project_scaffold.test.tsx",
+        )
+
+    with pytest.raises(PermissionError):
+        policy.assert_patch_target_allowed("fixer", "src/App.spec.tsx")
+
+    with pytest.raises(PermissionError):
         policy.assert_patch_target_allowed("implementer", "pyproject.toml")
 
     with pytest.raises(PermissionError):
         policy.assert_patch_target_allowed("test_writer", ".env.local")
 
     policy.assert_patch_target_allowed("test_writer", "tests/test_feature.py")
+    policy.assert_patch_target_allowed(
+        "test_writer",
+        "frontend/test/project_scaffold.test.tsx",
+    )
 
 
 def test_agent_runner_rejects_tool_override_outside_agent_config(tmp_path: Path) -> None:
