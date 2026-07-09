@@ -2472,18 +2472,15 @@ def test_task_graph_enrichment_matches_prd_artifacts_to_multi_tasks(
     assert tasks["auth"].required_artifacts == ["backend/auth.py"]
     assert tasks["word-sets"].target_files == ["backend/words.py"]
     assert tasks["word-sets"].required_artifacts == ["backend/words.py"]
-    assert tasks["auth-tests"].target_files == ["tests/test_vocab_app.py"]
-    assert tasks["auth-tests"].required_artifacts == ["tests/test_vocab_app.py"]
-    assert tasks["auth-tests"].depends_on == ["auth"]
-    assert tasks["word-sets-tests"].target_files == ["tests/test_vocab_app.py"]
-    assert tasks["word-sets-tests"].required_artifacts == ["tests/test_vocab_app.py"]
-    assert tasks["word-sets-tests"].depends_on == ["word-sets"]
+    assert tasks["prd-tests"].target_files == ["tests/test_vocab_app.py"]
+    assert tasks["prd-tests"].required_artifacts == ["tests/test_vocab_app.py"]
+    assert tasks["prd-tests"].depends_on == ["auth", "word-sets"]
     assert record.outputs["task_graph_acceptance_enrichment"][
         "synthesized_test_writer_task_ids"
-    ] == ["auth-tests", "word-sets-tests"]
+    ] == ["prd-tests"]
     assert record.outputs["task_graph_acceptance_enrichment"][
         "artifact_updated_task_ids"
-    ] == ["auth", "auth-tests", "word-sets", "word-sets-tests"]
+    ] == ["auth", "word-sets", "prd-tests"]
 
     validation = JobRunner._build_task_graph_validation(
         refined,
@@ -3160,6 +3157,55 @@ def test_task_graph_validation_rejects_single_token_test_writer_dependency_match
         "type": "test_writer_dependency_semantic_mismatch",
         "items": validation["test_writer_dependency_semantic_mismatches"],
     } in validation["errors"]
+
+
+def test_task_graph_validation_allows_aggregate_test_writer_dependencies() -> None:
+    task_graph = TaskGraph(
+        goal="Build vocabulary app",
+        tasks=[
+            PlannedTask(
+                id="auth",
+                title="User authentication",
+                description="Implement authentication and roles.",
+                role="implementer",
+                acceptance_criteria=["Student can register and login"],
+                target_files=["backend/auth.py"],
+                required_artifacts=["backend/auth.py"],
+            ),
+            PlannedTask(
+                id="word-sets",
+                title="Word set CRUD",
+                description="Implement word set CRUD operations.",
+                role="implementer",
+                acceptance_criteria=["Teacher can perform CRUD for word sets"],
+                target_files=["backend/words.py"],
+                required_artifacts=["backend/words.py"],
+            ),
+            PlannedTask(
+                id="prd-tests",
+                title="PRD acceptance tests",
+                description="Test authentication and word set CRUD together.",
+                role="test_writer",
+                depends_on=["auth", "word-sets"],
+                acceptance_criteria=[
+                    "Student can register and login",
+                    "Teacher can perform CRUD for word sets",
+                ],
+                target_files=["tests/test_vocab_app.py"],
+                required_artifacts=["tests/test_vocab_app.py"],
+            ),
+        ],
+    )
+
+    validation = JobRunner._build_task_graph_validation(
+        task_graph,
+        require_acceptance_criteria=True,
+        require_task_artifacts=True,
+    )
+
+    assert validation["valid"] is True
+    assert validation["test_writer_dependency_semantic_mismatches"] == []
+    assert validation["test_writer_acceptance_dependency_mismatches"] == []
 
 
 def test_task_graph_validation_requires_test_writer_acceptance_dependency_match() -> None:

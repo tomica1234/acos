@@ -4039,6 +4039,8 @@ class JobRunner:
         test_writer_index = 0
         synthesized_test_writer_task_ids: list[str] = []
         used_task_ids = {task.id for task in task_graph.tasks}
+        implementation_dependency_ids: list[str] = []
+        assigned_synthetic_test_artifacts: set[str] = set()
         tasks: list[PlannedTask] = []
         for task in task_graph.tasks:
             if task.role in self.IMPLEMENTATION_TASK_ROLES:
@@ -4049,6 +4051,7 @@ class JobRunner:
                 )
                 criteria_index = implementation_index
                 implementation_index += 1
+                implementation_dependency_ids.append(task.id)
             elif task.role in self.TEST_TASK_ROLES:
                 task_artifacts = self._prd_artifacts_for_task(
                     task,
@@ -4110,11 +4113,18 @@ class JobRunner:
                     depends_on=[task.id],
                     acceptance_criteria=criteria,
                 )
-                test_artifacts = self._prd_artifacts_for_task(
+                matched_test_artifacts = self._prd_artifacts_for_task(
                     synthetic_test_task,
                     source_test_artifacts,
                     task_count=implementation_task_count,
-                ) or list(source_test_artifacts)
+                )
+                test_artifacts = [
+                    artifact
+                    for artifact in matched_test_artifacts
+                    if artifact not in assigned_synthetic_test_artifacts
+                ]
+                if not test_artifacts:
+                    continue
                 tasks.append(
                     synthetic_test_task.model_copy(
                         update={
@@ -4123,6 +4133,40 @@ class JobRunner:
                         }
                     )
                 )
+                synthesized_test_writer_task_ids.append(test_task_id)
+                artifact_updated_task_ids.append(test_task_id)
+                assigned_synthetic_test_artifacts.update(test_artifacts)
+
+        if should_synthesize_test_writer_tasks:
+            unassigned_test_artifacts = [
+                artifact
+                for artifact in source_test_artifacts
+                if artifact not in assigned_synthetic_test_artifacts
+            ]
+            if unassigned_test_artifacts:
+                test_task_id = self._unique_task_id("prd-tests", used_task_ids)
+                aggregate_criteria = (
+                    list(acceptance_tests)
+                    if acceptance_tests
+                    else [
+                        "Generated tests cover the PRD-required test artifacts."
+                    ]
+                )
+                aggregate_test_task = PlannedTask(
+                    id=test_task_id,
+                    title="PRD acceptance tests",
+                    description=(
+                        "Write the required tests for PRD test artifacts that are "
+                        "not domain-specific enough to attach to one implementation task."
+                    ),
+                    role="test_writer",
+                    complexity=TaskComplexity.MEDIUM,
+                    depends_on=list(implementation_dependency_ids),
+                    acceptance_criteria=aggregate_criteria,
+                    target_files=unassigned_test_artifacts,
+                    required_artifacts=unassigned_test_artifacts,
+                )
+                tasks.append(aggregate_test_task)
                 synthesized_test_writer_task_ids.append(test_task_id)
                 artifact_updated_task_ids.append(test_task_id)
 
@@ -5668,10 +5712,12 @@ class JobRunner:
             required_score = JobRunner._semantic_overlap_required(task_tokens)
             anchor_tokens = JobRunner._semantic_anchor_tokens(task_tokens)
             matching_dependencies: list[str] = []
+            combined_dependency_tokens: set[str] = set()
             for dependency in implementation_dependencies:
                 dependency_tokens = JobRunner._semantic_tokens(
                     JobRunner._task_semantic_text(dependency)
                 )
+                combined_dependency_tokens.update(dependency_tokens)
                 score = JobRunner._semantic_overlap_score(
                     task_tokens,
                     dependency_tokens,
@@ -5684,6 +5730,21 @@ class JobRunner:
                     )
                 ):
                     matching_dependencies.append(dependency.id)
+            if not matching_dependencies and combined_dependency_tokens:
+                combined_score = JobRunner._semantic_overlap_score(
+                    task_tokens,
+                    combined_dependency_tokens,
+                )
+                if (
+                    combined_score >= required_score
+                    and JobRunner._semantic_anchor_satisfied(
+                        anchor_tokens,
+                        combined_dependency_tokens,
+                    )
+                ):
+                    matching_dependencies = [
+                        dependency.id for dependency in implementation_dependencies
+                    ]
             if not matching_dependencies:
                 mismatches.append(
                     {
