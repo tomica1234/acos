@@ -1215,6 +1215,7 @@ class JobRunner:
             "uncovered_acceptance_small_parts",
             "invalid_required_artifacts",
             "prd_required_artifacts",
+            "required_small_part_count",
             "source_required_artifacts",
             "implementation_required_artifacts",
             "test_required_artifacts",
@@ -2123,7 +2124,11 @@ class JobRunner:
         return self._refine_prd_quality_for_autonomy(record, prd)
 
     def _refine_prd_quality_for_autonomy(self, record: JobRecord, prd: PRD) -> PRD | None:
-        report = self._build_prd_quality_report(prd)
+        min_small_parts = self._prd_quality_min_small_parts(record)
+        report = self._build_prd_quality_report(
+            prd,
+            min_small_parts=min_small_parts,
+        )
         record.outputs["prd_quality"] = report
         self._record_prd_quality_attempt(record, attempt=0, action="initial", report=report)
         if report["passed"] or not self._constraint_flag(record, "require_prd_quality"):
@@ -2164,7 +2169,10 @@ class JobRunner:
             }
             self._write_memory_item(record, "pm", "prd", current_prd.model_dump_json())
             record.outputs["pm"] = current_prd.model_dump()
-            report = self._build_prd_quality_report(current_prd)
+            report = self._build_prd_quality_report(
+                current_prd,
+                min_small_parts=min_small_parts,
+            )
             record.outputs["prd_quality"] = report
             self._record_prd_quality_attempt(
                 record,
@@ -2193,7 +2201,10 @@ class JobRunner:
                 logs=self._prd_quality_repair_logs(current_prd, report),
             )
             self._write_memory_item(record, "pm", "prd", current_prd.model_dump_json())
-            report = self._build_prd_quality_report(current_prd)
+            report = self._build_prd_quality_report(
+                current_prd,
+                min_small_parts=min_small_parts,
+            )
             record.outputs["prd_quality"] = report
             self._record_prd_quality_attempt(
                 record,
@@ -2218,6 +2229,17 @@ class JobRunner:
         self.store.update(record)
         return None
 
+    def _prd_quality_min_small_parts(self, record: JobRecord) -> int:
+        explicit = self._constraint_int(record, "min_prd_small_parts", 0)
+        if explicit > 0:
+            return explicit
+        if (
+            self._constraint_flag(record, "require_prd_quality")
+            and self._constraint_int(record, "max_autonomous_stages", 0) > 0
+        ):
+            return 2
+        return 0
+
     @staticmethod
     def _prd_quality_recovery_state(
         record: JobRecord,
@@ -2232,6 +2254,7 @@ class JobRunner:
             "uncovered_acceptance_small_parts",
             "invalid_required_artifacts",
             "prd_required_artifacts",
+            "required_small_part_count",
             "source_required_artifacts",
             "implementation_required_artifacts",
             "test_required_artifacts",
@@ -2250,6 +2273,7 @@ class JobRunner:
         prd_required_artifacts = JobRunner._non_empty_items(
             [str(item) for item in report.get("required_artifacts", [])]
         )
+        required_small_part_count = report.get("required_small_part_count")
         source_required_artifacts = JobRunner._non_empty_items(
             [str(item) for item in report.get("source_required_artifacts", [])]
         )
@@ -2272,6 +2296,8 @@ class JobRunner:
             runtime_state["invalid_required_artifacts"] = invalid_required_artifacts
         if prd_required_artifacts:
             runtime_state["prd_required_artifacts"] = prd_required_artifacts
+        if isinstance(required_small_part_count, int) and required_small_part_count > 0:
+            runtime_state["required_small_part_count"] = required_small_part_count
         if source_required_artifacts:
             runtime_state["source_required_artifacts"] = source_required_artifacts
         if implementation_required_artifacts:
@@ -2362,6 +2388,18 @@ class JobRunner:
         if required_artifacts:
             logs.append("Current required_artifacts: " + " | ".join(required_artifacts))
         missing = set(report.get("missing") or [])
+        if "small_parts_split_for_autonomy" in missing:
+            required_count = report.get("required_small_part_count")
+            required_text = (
+                str(required_count)
+                if isinstance(required_count, int) and required_count > 0
+                else "multiple"
+            )
+            logs.append(
+                "Split small_parts into at least "
+                f"{required_text} independently executable implementation/test steps; "
+                "a single broad work item is not specific enough for large autonomous execution."
+            )
         if "required_source_artifacts" in missing:
             logs.append(
                 "Add at least one non-test required_artifact for the implementation or app surface; "
@@ -2410,7 +2448,11 @@ class JobRunner:
         )
 
     @staticmethod
-    def _build_prd_quality_report(prd: PRD) -> dict[str, Any]:
+    def _build_prd_quality_report(
+        prd: PRD,
+        *,
+        min_small_parts: int = 0,
+    ) -> dict[str, Any]:
         missing: list[str] = []
         warnings: list[str] = []
         if not prd.title.strip():
@@ -2424,6 +2466,8 @@ class JobRunner:
             missing.append("small_parts")
         elif len(small_parts) == 1:
             warnings.append("small_parts_has_single_item")
+        if min_small_parts > 0 and small_parts and len(small_parts) < min_small_parts:
+            missing.append("small_parts_split_for_autonomy")
         if not JobRunner._non_empty_items(prd.incremental_milestones):
             missing.append("incremental_milestones")
         acceptance_tests = JobRunner._non_empty_items(prd.acceptance_tests)
@@ -2485,7 +2529,7 @@ class JobRunner:
             missing.append("open_questions_resolved")
             warnings.append("open_questions_present")
         missing_acceptance_test_count = max(0, len(small_parts) - len(acceptance_tests))
-        return {
+        report = {
             "passed": not missing,
             "missing": missing,
             "warnings": warnings,
@@ -2511,6 +2555,10 @@ class JobRunner:
             "test_required_artifacts": test_required_artifacts,
             "invalid_required_artifacts": invalid_required_artifacts,
         }
+        if min_small_parts > 0:
+            report["required_small_part_count"] = min_small_parts
+            report["small_parts_split_for_autonomy"] = len(small_parts) >= min_small_parts
+        return report
 
     @staticmethod
     def _non_empty_items(items: list[str]) -> list[str]:

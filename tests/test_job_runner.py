@@ -6928,6 +6928,75 @@ def test_job_runner_blocks_prd_quality_when_source_required_artifact_missing(
     assert "architect" not in record.outputs
 
 
+def test_large_autonomous_prd_quality_requires_split_small_parts(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    registry = ModelRegistry.from_paths(
+        provider_path=config_dir() / "model_providers.yaml",
+        agents_path=config_dir() / "agents.yaml",
+        routing_path=config_dir() / "model_routing.yaml",
+    )
+    attach_mock_adapter(
+        registry,
+        {
+            "pm": PRD(
+                title="Feature",
+                problem_statement="Need feature",
+                smallest_working_core=["Expose a feature module"],
+                small_parts=["Create feature module"],
+                incremental_milestones=["Module exists"],
+                acceptance_tests=["Feature module exists"],
+                definition_of_done=["All tests pass"],
+                required_artifacts=["feature.py", "tests/test_feature.py"],
+            ).model_dump(),
+            "architect": ArchitecturePlan(summary="Should not run").model_dump(),
+        },
+    )
+    policy = PolicyEngine.from_path(config_dir() / "policies.yaml")
+    environment = FakeMCPEnvironment(
+        workspace_root=workspace,
+        memory_db_path=workspace / ".memory.sqlite3",
+    )
+    runner = JobRunner(registry=registry, policy=policy, router=environment.build_router())
+    spec = JobSpec(
+        request_text="Create a feature as a large autonomous run",
+        repo_path=str(workspace),
+        target_branch="acos/strict-prd-split-small-parts",
+        metadata={
+            "constraints": {
+                "require_prd_quality": True,
+                "max_autonomous_stages": 1,
+                "prd_quality_refinement_attempts": 0,
+            }
+        },
+    )
+
+    record = runner.run_job(spec)
+
+    assert_recovery_plan(
+        record,
+        status=JobStatus.ANALYZING,
+        strategy="REVISE_PRD_AND_ARCHITECTURE",
+    )
+    assert_recoverable_error(
+        record,
+        "prd_quality_gate_failed:small_parts_split_for_autonomy",
+    )
+    report = record.outputs["prd_quality"]
+    assert report["passed"] is False
+    assert report["missing"] == ["small_parts_split_for_autonomy"]
+    assert report["warnings"] == ["small_parts_has_single_item"]
+    assert report["required_small_part_count"] == 2
+    assert report["small_parts_split_for_autonomy"] is False
+    constraints = record.runtime_state["recovery_plan"]["constraints"]
+    assert constraints["prd_quality_missing"] == ["small_parts_split_for_autonomy"]
+    assert constraints["required_small_part_count"] == 2
+    assert constraints["implementation_required_artifacts"] == ["feature.py"]
+    assert "architect" not in record.outputs
+
+
 def test_job_runner_refines_sparse_prd_before_implementation_when_required(
     tmp_path: Path,
 ) -> None:
@@ -7829,6 +7898,7 @@ def test_job_runner_clears_planning_repair_constraints_after_prd_passes(
                 ],
                 "invalid_required_artifacts": ["../outside.py"],
                 "prd_required_artifacts": ["tests/test_feature.py"],
+                "required_small_part_count": 2,
                 "source_required_artifacts": ["feature.py"],
                 "implementation_required_artifacts": ["feature.py"],
                 "test_required_artifacts": ["tests/test_feature.py"],
@@ -7866,6 +7936,7 @@ def test_job_runner_clears_planning_repair_constraints_after_prd_passes(
         "uncovered_acceptance_small_parts",
         "invalid_required_artifacts",
         "prd_required_artifacts",
+        "required_small_part_count",
         "source_required_artifacts",
         "implementation_required_artifacts",
         "test_required_artifacts",

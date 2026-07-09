@@ -165,6 +165,7 @@ def test_recovery_governor_preserves_prd_quality_artifact_context() -> None:
             "prd_quality_warnings": ["open_questions_present"],
             "prd_open_questions": ["Which UI?"],
             "invalid_required_artifacts": ["../outside.py"],
+            "required_small_part_count": 2,
             "prd_required_artifacts": [
                 "README.md",
                 "frontend/src/App.tsx",
@@ -182,6 +183,7 @@ def test_recovery_governor_preserves_prd_quality_artifact_context() -> None:
     assert constraints["implementation_required_artifacts"] == [
         "frontend/src/App.tsx"
     ]
+    assert constraints["required_small_part_count"] == 2
     assert constraints["source_required_artifacts"] == [
         "README.md",
         "frontend/src/App.tsx",
