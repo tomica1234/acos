@@ -205,6 +205,8 @@ def _looks_like_test_path(path: str) -> bool:
 def _test_patch_is_suspicious(patch: FilePatch) -> bool:
     if _test_patch_removes_test_coverage(patch):
         return True
+    if _test_patch_removes_assertions_without_replacement(patch):
+        return True
     payload = _test_patch_payload(patch)
     if patch.operation in {"create", "update"} and not payload.strip():
         return True
@@ -249,6 +251,38 @@ def _test_patch_removes_test_coverage(patch: FilePatch) -> bool:
         patch.new_path and _looks_like_active_test_location(patch.new_path)
     )
     return source_is_test and not target_is_test
+
+
+def _test_patch_removes_assertions_without_replacement(patch: FilePatch) -> bool:
+    if patch.operation != "update" or patch.unified_diff is None:
+        return False
+    removed = _test_patch_diff_lines(patch.unified_diff, "-")
+    if not any(_line_has_test_assertion(line) for line in removed):
+        return False
+    added = _test_patch_diff_lines(patch.unified_diff, "+")
+    return not any(_line_has_test_assertion(line) for line in added)
+
+
+def _test_patch_diff_lines(unified_diff: str, prefix: str) -> list[str]:
+    lines: list[str] = []
+    header_prefix = "---" if prefix == "-" else "+++"
+    for line in unified_diff.splitlines():
+        if line.startswith(header_prefix) or not line.startswith(prefix):
+            continue
+        lines.append(line[1:])
+    return lines
+
+
+def _line_has_test_assertion(line: str) -> bool:
+    return any(
+        re.search(pattern, line)
+        for pattern in (
+            r"\bassert\b",
+            r"\bexpect\s*\(",
+            r"\bpytest\s*\.\s*raises\s*\(",
+            r"\.\s*assert[A-Za-z_]*\s*\(",
+        )
+    )
 
 
 def _looks_like_active_test_location(path: str) -> bool:

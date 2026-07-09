@@ -120,6 +120,41 @@ def test_test_patch_quality_rejects_removal_only_test_diff() -> None:
         ensure_test_patch_quality([patch], role="fixer")
 
 
+def test_test_patch_quality_rejects_assertion_removal_with_non_assertion_addition() -> None:
+    patch = FilePatch(
+        path="tests/test_feature.py",
+        operation="update",
+        unified_diff=(
+            "--- tests/test_feature.py\n"
+            "+++ tests/test_feature.py\n"
+            "@@ -1,3 +1,3 @@\n"
+            " def test_feature() -> None:\n"
+            "-    assert VALUE == 1\n"
+            "+    # Covered by manual validation.\n"
+        ),
+    )
+
+    with pytest.raises(QualityGateError, match="fixer attempted to weaken tests"):
+        ensure_test_patch_quality([patch], role="fixer")
+
+
+def test_test_patch_quality_allows_assertion_replacement_diff() -> None:
+    patch = FilePatch(
+        path="tests/test_feature.py",
+        operation="update",
+        unified_diff=(
+            "--- tests/test_feature.py\n"
+            "+++ tests/test_feature.py\n"
+            "@@ -1,3 +1,3 @@\n"
+            " def test_feature() -> None:\n"
+            "-    assert VALUE == 1\n"
+            "+    assert VALUE == 2\n"
+        ),
+    )
+
+    ensure_test_patch_quality([patch], role="fixer")
+
+
 def test_test_patch_quality_rejects_python_pass_tests() -> None:
     patch = FilePatch(
         path="tests/test_feature.py",
