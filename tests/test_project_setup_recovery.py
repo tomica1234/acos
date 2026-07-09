@@ -7,6 +7,7 @@ from packages.mcp_client.fake import FakeMCPEnvironment
 from packages.orchestrator.job_runner import JobRunner
 from packages.orchestrator.job_store import InMemoryJobStore
 from packages.orchestrator.policy import PolicyEngine
+from packages.orchestrator.quality_gates import ensure_test_patch_quality
 from packages.orchestrator.recovery_executor import RecoveryExecutor
 from packages.schemas.agent_outputs import (
     FilePatch,
@@ -394,6 +395,57 @@ def test_project_setup_cannot_enter_test_writer_before_required_artifacts_exist(
     assert not runner._ensure_project_setup_ready_before_test_writer(record, task)
     assert record.runtime_state["recovery_plan"]["trigger"] == "required_artifacts_missing"
     assert record.runtime_state["recovery_plan"]["status"] != "completed"
+
+
+def test_deterministic_missing_test_scaffold_content_is_not_vacuous() -> None:
+    frontend_path = "frontend/test/project_scaffold.test.tsx"
+    frontend_content = JobRunner._minimal_test_scaffold_content(frontend_path)
+    assert "expect(true)" not in frontend_content
+    assert frontend_path in frontend_content
+    ensure_test_patch_quality(
+        [
+            FilePatch(
+                path=frontend_path,
+                operation="create",
+                content=frontend_content,
+            )
+        ],
+        role="test_writer",
+    )
+
+    backend_path = "backend/tests/test_project_setup.py"
+    backend_content = JobRunner._minimal_test_scaffold_content(backend_path)
+    assert "assert True" not in backend_content
+    assert backend_path in backend_content
+    ensure_test_patch_quality(
+        [
+            FilePatch(
+                path=backend_path,
+                operation="create",
+                content=backend_content,
+            )
+        ],
+        role="test_writer",
+    )
+
+
+def test_recovery_executor_deterministic_test_content_is_not_vacuous() -> None:
+    test_path = "frontend/test/project_scaffold.test.tsx"
+    content = RecoveryExecutor._deterministic_content_for_path(test_path)
+
+    assert content is not None
+    assert "expect(true)" not in content
+    assert test_path in content
+    ensure_test_patch_quality(
+        [
+            FilePatch(
+                path=test_path,
+                operation="create",
+                content=content,
+            )
+        ],
+        role="test_writer",
+    )
 
 
 def test_project_scaffold_role_runs_deterministic_scaffold_before_test_writer(

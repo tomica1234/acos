@@ -349,19 +349,27 @@ class RecoveryExecutor:
     @classmethod
     def _deterministic_content_for_path(cls, path: str) -> str | None:
         if cls._looks_like_test_path(path):
+            normalized = path.replace("\\", "/").removeprefix("./")
             suffix = Path(path).suffix.lower()
             if suffix in {".ts", ".tsx", ".js", ".jsx"}:
+                js_path = normalized.replace("\\", "\\\\").replace("'", "\\'")
                 return (
                     "import { describe, expect, it } from 'vitest'\n\n"
                     "describe('project scaffold', () => {\n"
                     "  it('has a deterministic test scaffold', () => {\n"
-                    "    expect(true).toBe(true)\n"
+                    f"    const path = '{js_path}'\n"
+                    "    expect(path).toMatch(/(^|\\/)(test|tests)\\//)\n"
+                    "    expect(path).toMatch(/(^|\\/)test_|\\.(test|spec)\\./)\n"
                     "  })\n"
                     "})\n"
                 )
+            py_path = repr(normalized)
             return (
                 "def test_project_scaffold_placeholder() -> None:\n"
-                "    assert True\n"
+                f"    path = {py_path}\n"
+                "    normalized = path.replace('\\\\', '/')\n"
+                "    name = normalized.rsplit('/', 1)[-1]\n"
+                "    assert '/test' in f'/{normalized}' or name.startswith('test_')\n"
             )
         contents = {
             "backend/main.py": (
