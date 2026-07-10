@@ -3,6 +3,7 @@ from datetime import datetime, timedelta, timezone
 from packages.orchestrator.job_constraints import STRICT_JOB_CONSTRAINTS
 from packages.orchestrator.progress import summarize_job_progress
 from packages.orchestrator.task_graph_validation import (
+    prd_quality_fingerprint,
     prd_validation_fingerprint,
     task_graph_validation_fingerprint,
 )
@@ -745,6 +746,90 @@ def test_summarize_job_progress_ignores_stale_task_graph_validation_attempts_for
         "consecutive_task_graph_failure_count": 1,
         "last_prd_missing": [],
         "last_task_graph_error_types": ["missing_required_artifacts"],
+        "repeated_prd_missing": [],
+        "repeated_task_graph_error_types": [],
+        "strategy_change_recommended": False,
+    }
+
+
+def test_summarize_job_progress_ignores_stale_prd_quality_attempts_for_repair(
+    tmp_path,
+) -> None:
+    old_prd = {
+        "title": "Feature",
+        "problem_statement": "Need feature",
+        "smallest_working_core": ["Expose VALUE"],
+        "small_parts": ["Create feature module"],
+        "incremental_milestones": ["Module exists"],
+        "acceptance_tests": [],
+        "definition_of_done": ["Tests pass"],
+        "required_artifacts": ["feature.py", "tests/test_feature.py"],
+        "open_questions": [],
+    }
+    current_prd = {
+        **old_prd,
+        "acceptance_tests": ["VALUE equals 1"],
+        "definition_of_done": [],
+    }
+    old_fingerprint = prd_quality_fingerprint(old_prd)
+    current_fingerprint = prd_quality_fingerprint(current_prd)
+    spec = JobSpec(
+        job_id="planning-repair-stale-prd-quality-attempts-job",
+        request_text="Build it carefully",
+        repo_path=str(tmp_path),
+    )
+    record = JobRecord(job_id=spec.job_id, spec=spec, status=JobStatus.ANALYZING)
+    record.outputs["prd"] = current_prd
+    record.outputs["prd_quality"] = {
+        "passed": False,
+        "missing": ["definition_of_done"],
+        "warnings": [],
+    }
+    record.outputs["prd_quality_attempts"] = [
+        {
+            "attempt": 0,
+            "action": "initial",
+            "passed": False,
+            "missing": ["acceptance_tests"],
+            "warnings": [],
+            "prd_quality_fingerprint": old_fingerprint,
+        },
+        {
+            "attempt": 1,
+            "action": "refine",
+            "passed": False,
+            "missing": ["acceptance_tests"],
+            "warnings": [],
+            "prd_quality_fingerprint": old_fingerprint,
+        },
+        {
+            "attempt": 2,
+            "action": "refine",
+            "passed": False,
+            "missing": ["acceptance_tests"],
+            "warnings": [],
+            "prd_quality_fingerprint": old_fingerprint,
+        },
+        {
+            "attempt": 3,
+            "action": "refine",
+            "passed": False,
+            "missing": ["definition_of_done"],
+            "warnings": [],
+            "prd_quality_fingerprint": current_fingerprint,
+        },
+    ]
+
+    payload = summarize_job_progress(record)
+
+    assert payload["planning_quality"]["last_prd_quality_attempt"]["missing"] == [
+        "definition_of_done"
+    ]
+    assert payload["planning_quality"]["planning_repair"] == {
+        "consecutive_prd_failure_count": 1,
+        "consecutive_task_graph_failure_count": 0,
+        "last_prd_missing": ["definition_of_done"],
+        "last_task_graph_error_types": [],
         "repeated_prd_missing": [],
         "repeated_task_graph_error_types": [],
         "strategy_change_recommended": False,

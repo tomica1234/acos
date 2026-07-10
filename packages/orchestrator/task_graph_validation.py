@@ -76,6 +76,17 @@ _PRD_VALIDATION_FINGERPRINT_FIELDS = (
     "acceptance_tests",
     "required_artifacts",
 )
+_PRD_QUALITY_FINGERPRINT_FIELDS = (
+    "title",
+    "problem_statement",
+    "smallest_working_core",
+    "small_parts",
+    "incremental_milestones",
+    "acceptance_tests",
+    "definition_of_done",
+    "required_artifacts",
+    "open_questions",
+)
 _MISSING = object()
 
 
@@ -113,6 +124,20 @@ def prd_validation_fingerprint(prd: Mapping[str, Any]) -> str:
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
+def prd_quality_fingerprint(prd: Mapping[str, Any]) -> str:
+    """Return a stable fingerprint for PRD fields covered by PRD quality gates."""
+    payload = json.dumps(
+        {
+            field: _fingerprint_value(prd.get(field))
+            for field in _PRD_QUALITY_FINGERPRINT_FIELDS
+        },
+        ensure_ascii=True,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
 def _fingerprint_value(value: Any) -> Any:
     if isinstance(value, list):
         return [_fingerprint_value(item) for item in value]
@@ -137,6 +162,7 @@ __all__ = [
     "TASK_GRAPH_VALIDATION_CONTRACT_KEYS",
     "TASK_GRAPH_VALIDATION_CONTEXT_KEYS",
     "TASK_GRAPH_VALIDATION_DETAIL_KEYS",
+    "prd_quality_fingerprint",
     "prd_validation_fingerprint",
     "task_graph_validation_fingerprint",
 ]

@@ -53,6 +53,7 @@ from packages.orchestrator.task_graph_validation import (
     TASK_GRAPH_VALIDATION_CONTRACT_KEYS as TASK_GRAPH_VALIDATION_CONTRACT_KEYS_SOURCE,
     TASK_GRAPH_VALIDATION_CONTEXT_KEYS as TASK_GRAPH_VALIDATION_CONTEXT_KEYS_SOURCE,
     TASK_GRAPH_VALIDATION_DETAIL_KEYS as TASK_GRAPH_VALIDATION_DETAIL_KEYS_SOURCE,
+    prd_quality_fingerprint,
     prd_validation_fingerprint,
     task_graph_validation_fingerprint,
 )
@@ -2790,7 +2791,14 @@ class JobRunner:
             min_small_parts=min_small_parts,
         )
         record.outputs["prd_quality"] = report
-        self._record_prd_quality_attempt(record, attempt=0, action="initial", report=report)
+        self._record_prd_quality_attempt(
+            record,
+            attempt=0,
+            action="initial",
+            report=report,
+            prd=prd,
+            min_small_parts=min_small_parts,
+        )
         if report["passed"] or not self._constraint_flag(record, "require_prd_quality"):
             if report["passed"]:
                 self._clear_planning_repair_constraints(record)
@@ -2861,6 +2869,8 @@ class JobRunner:
                 attempt=1,
                 action="deterministic_repair",
                 report=report,
+                prd=current_prd,
+                min_small_parts=min_small_parts,
             )
             attempt_offset = 1
             if report["passed"]:
@@ -2893,6 +2903,8 @@ class JobRunner:
                 attempt=attempt,
                 action="refine",
                 report=report,
+                prd=current_prd,
+                min_small_parts=min_small_parts,
             )
             if report["passed"]:
                 self._clear_planning_repair_constraints(record)
@@ -3789,20 +3801,27 @@ class JobRunner:
         attempt: int,
         action: str,
         report: dict[str, Any],
+        prd: PRD | None = None,
+        min_small_parts: int | None = None,
     ) -> None:
         attempts = record.outputs.setdefault("prd_quality_attempts", [])
         if not isinstance(attempts, list):
             attempts = []
             record.outputs["prd_quality_attempts"] = attempts
-        attempts.append(
-            {
-                "attempt": attempt,
-                "action": action,
-                "passed": report["passed"],
-                "missing": list(report["missing"]),
-                "warnings": list(report["warnings"]),
-            }
-        )
+        attempt_record = {
+            "attempt": attempt,
+            "action": action,
+            "passed": report["passed"],
+            "missing": list(report["missing"]),
+            "warnings": list(report["warnings"]),
+        }
+        if prd is not None:
+            attempt_record["prd_quality_fingerprint"] = prd_quality_fingerprint(
+                prd.model_dump(mode="json")
+            )
+        if min_small_parts is not None:
+            attempt_record["required_small_part_count"] = min_small_parts
+        attempts.append(attempt_record)
 
     @staticmethod
     def _build_prd_quality_report(

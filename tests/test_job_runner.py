@@ -11,6 +11,7 @@ from packages.orchestrator.job_runner import JobRunner
 from packages.orchestrator.job_store import InMemoryJobStore
 from packages.orchestrator.policy import PolicyEngine
 from packages.orchestrator.task_graph_validation import (
+    prd_quality_fingerprint,
     prd_validation_fingerprint,
     task_graph_validation_fingerprint,
 )
@@ -9599,6 +9600,18 @@ def test_job_runner_refines_sparse_prd_before_implementation_when_required(
     assert [
         attempt["passed"] for attempt in record.outputs["prd_quality_attempts"]
     ] == [False, True]
+    assert all(
+        isinstance(attempt["prd_quality_fingerprint"], str)
+        and attempt["prd_quality_fingerprint"]
+        for attempt in record.outputs["prd_quality_attempts"]
+    )
+    assert all(
+        attempt["required_small_part_count"] == 0
+        for attempt in record.outputs["prd_quality_attempts"]
+    )
+    assert record.outputs["prd_quality_attempts"][-1][
+        "prd_quality_fingerprint"
+    ] == prd_quality_fingerprint(record.outputs["prd"])
     assert record.outputs["prd"]["small_parts"] == [
         "Create feature module",
         "Add focused tests",

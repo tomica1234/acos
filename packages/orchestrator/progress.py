@@ -14,6 +14,7 @@ from packages.orchestrator.quality_gates import (
 )
 from packages.orchestrator.task_graph_validation import (
     TASK_GRAPH_VALIDATION_CONTRACT_KEYS,
+    prd_quality_fingerprint,
     prd_validation_fingerprint,
     task_graph_validation_fingerprint,
 )
@@ -1082,6 +1083,11 @@ def _planning_quality(record: JobRecord) -> dict[str, Any]:
     prd_quality = _dict_output(record, "prd_quality")
     task_graph_validation = _dict_output(record, "task_graph_validation")
     prd_attempts = _list_output(record, "prd_quality_attempts")
+    current_prd_attempts = _current_prd_quality_attempts(
+        prd_attempts,
+        record,
+        prd_quality,
+    )
     task_graph_attempts = _list_output(record, "task_graph_validation_attempts")
     current_task_graph_attempts = _current_task_graph_validation_attempts(
         task_graph_attempts,
@@ -1090,7 +1096,9 @@ def _planning_quality(record: JobRecord) -> dict[str, Any]:
     return {
         "prd_quality": prd_quality,
         "prd_quality_attempt_count": len(prd_attempts),
-        "last_prd_quality_attempt": prd_attempts[-1] if prd_attempts else None,
+        "last_prd_quality_attempt": (
+            current_prd_attempts[-1] if current_prd_attempts else None
+        ),
         "task_graph_validation": task_graph_validation,
         "task_graph_validation_attempt_count": len(task_graph_attempts),
         "last_task_graph_validation_attempt": (
@@ -1099,7 +1107,7 @@ def _planning_quality(record: JobRecord) -> dict[str, Any]:
             else None
         ),
         "planning_repair": _planning_repair_summary(
-            prd_attempts,
+            current_prd_attempts,
             current_task_graph_attempts,
         ),
     }
@@ -1219,6 +1227,57 @@ def _planning_repair_summary(
             or consecutive_task_graph_failure_count >= 3
         ),
     }
+
+
+def _current_prd_quality_attempts(
+    attempts: list[dict[str, Any]],
+    record: JobRecord,
+    current_prd_quality: dict[str, Any] | None,
+) -> list[dict[str, Any]]:
+    current_contract = _current_prd_quality_contract(record, current_prd_quality)
+    if not current_contract:
+        return attempts
+    return [
+        attempt
+        for attempt in attempts
+        if _prd_quality_attempt_matches_current_contract(attempt, current_contract)
+    ]
+
+
+def _current_prd_quality_contract(
+    record: JobRecord,
+    current_prd_quality: dict[str, Any] | None,
+) -> dict[str, Any]:
+    contract: dict[str, Any] = {}
+    prd = record.outputs.get("prd")
+    if not isinstance(prd, dict):
+        prd = record.outputs.get("pm")
+    if isinstance(prd, dict):
+        contract["prd_quality_fingerprint"] = prd_quality_fingerprint(prd)
+    if isinstance(current_prd_quality, dict):
+        required_small_part_count = current_prd_quality.get("required_small_part_count")
+        if isinstance(required_small_part_count, int):
+            contract["required_small_part_count"] = required_small_part_count
+    return contract
+
+
+def _prd_quality_attempt_matches_current_contract(
+    attempt: dict[str, Any],
+    current_contract: dict[str, Any],
+) -> bool:
+    for key, current_value in current_contract.items():
+        attempt_value = attempt.get(key)
+        if key == "prd_quality_fingerprint":
+            if not isinstance(attempt_value, str) or not attempt_value:
+                continue
+        elif key == "required_small_part_count":
+            if isinstance(attempt_value, bool) or not isinstance(attempt_value, int):
+                continue
+        else:
+            continue
+        if attempt_value != current_value:
+            return False
+    return True
 
 
 def _current_task_graph_validation_attempts(
