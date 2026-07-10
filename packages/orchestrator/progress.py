@@ -1312,6 +1312,8 @@ def _autonomy_readiness(
         task["id"] for task in planned_tasks if isinstance(task.get("id"), str)
     ]
     duplicate_task_ids = _duplicate_strings(task_ids)
+    unknown_dependencies = _unknown_dependencies(planned_tasks)
+    dependency_cycle_task_ids = _dependency_cycle_task_ids(planned_tasks)
     invalid_task_ids = []
     for task in planned_tasks:
         task_id = task.get("id")
@@ -1483,6 +1485,20 @@ def _autonomy_readiness(
                 "task_ids": duplicate_task_ids,
             }
         )
+    if unknown_dependencies:
+        blocking_items.append(
+            {
+                "type": "unknown_dependencies",
+                "items": unknown_dependencies,
+            }
+        )
+    if dependency_cycle_task_ids:
+        blocking_items.append(
+            {
+                "type": "dependency_cycle",
+                "task_ids": dependency_cycle_task_ids,
+            }
+        )
 
     return {
         "ready": not blocking_items,
@@ -1504,6 +1520,8 @@ def _autonomy_readiness(
             "unsupported_task_role_count": len(unsupported_task_roles),
             "invalid_task_id_count": len(invalid_task_ids),
             "duplicate_task_id_count": len(duplicate_task_ids),
+            "unknown_dependency_count": len(unknown_dependencies),
+            "dependency_cycle_task_count": len(dependency_cycle_task_ids),
             "generic_task_acceptance_criteria_count": len(
                 generic_task_acceptance_criteria
             ),
@@ -1563,6 +1581,66 @@ def _duplicate_strings(items: list[str]) -> list[str]:
             duplicates.add(item)
         seen.add(item)
     return sorted(duplicates)
+
+
+def _task_dependencies(task: dict[str, Any]) -> list[str]:
+    depends_on = task.get("depends_on")
+    if not isinstance(depends_on, list):
+        return []
+    return [
+        dependency
+        for dependency in depends_on
+        if isinstance(dependency, str) and dependency.strip()
+    ]
+
+
+def _unknown_dependencies(planned_tasks: list[dict[str, Any]]) -> list[dict[str, str]]:
+    task_ids = {
+        task["id"] for task in planned_tasks if isinstance(task.get("id"), str)
+    }
+    return [
+        {"task_id": task["id"], "dependency": dependency}
+        for task in planned_tasks
+        if isinstance(task.get("id"), str)
+        for dependency in _task_dependencies(task)
+        if dependency not in task_ids
+    ]
+
+
+def _dependency_cycle_task_ids(planned_tasks: list[dict[str, Any]]) -> list[str]:
+    dependencies = {
+        task["id"]: _task_dependencies(task)
+        for task in planned_tasks
+        if isinstance(task.get("id"), str)
+    }
+    visiting: set[str] = set()
+    visited: set[str] = set()
+    stack: list[str] = []
+
+    def visit(task_id: str) -> list[str] | None:
+        if task_id in visiting:
+            cycle_start = stack.index(task_id) if task_id in stack else 0
+            return [*stack[cycle_start:], task_id]
+        if task_id in visited:
+            return None
+        visiting.add(task_id)
+        stack.append(task_id)
+        for dependency in dependencies.get(task_id, []):
+            if dependency not in dependencies:
+                continue
+            cycle = visit(dependency)
+            if cycle is not None:
+                return cycle
+        visiting.remove(task_id)
+        visited.add(task_id)
+        stack.pop()
+        return None
+
+    for task_id in dependencies:
+        cycle = visit(task_id)
+        if cycle is not None:
+            return cycle
+    return []
 
 
 def _looks_like_generic_task_acceptance_criterion(criterion: str) -> bool:

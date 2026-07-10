@@ -722,6 +722,8 @@ def test_summarize_job_progress_reports_ready_for_large_autonomy(tmp_path) -> No
             "unsupported_task_role_count": 0,
             "invalid_task_id_count": 0,
             "duplicate_task_id_count": 0,
+            "unknown_dependency_count": 0,
+            "dependency_cycle_task_count": 0,
             "generic_task_acceptance_criteria_count": 0,
             "require_prd_quality": True,
             "require_task_acceptance_criteria": True,
@@ -1412,6 +1414,100 @@ def test_summarize_job_progress_blocks_stale_valid_graph_with_duplicate_task_ids
         "task_ids": ["core"],
     } in payload["autonomy_readiness"]["blocking_items"]
     assert payload["autonomy_readiness"]["checks"]["duplicate_task_id_count"] == 1
+
+
+def test_summarize_job_progress_blocks_stale_valid_graph_with_unknown_dependency(
+    tmp_path,
+) -> None:
+    task_graph = TaskGraph(
+        goal="Build incrementally",
+        tasks=[
+            PlannedTask(
+                id="views",
+                title="Views",
+                description="Build views after models.",
+                role="implementer",
+                depends_on=["models"],
+                acceptance_criteria=["Views render model data"],
+                target_files=["views.py"],
+                required_artifacts=["views.py"],
+            ),
+        ],
+    )
+    spec = JobSpec(
+        job_id="autonomy-stale-unknown-dependency-job",
+        request_text="Build it carefully",
+        repo_path=str(tmp_path),
+    )
+    record = JobRecord(job_id=spec.job_id, spec=spec, status=JobStatus.TESTING)
+    record.outputs["task_graph"] = task_graph.model_dump()
+    record.outputs["task_graph_validation"] = {
+        "valid": True,
+        "task_count": 1,
+        "unknown_dependencies": [],
+        "errors": [],
+    }
+
+    payload = summarize_job_progress(record)
+
+    assert payload["autonomy_readiness"]["ready"] is False
+    assert {
+        "type": "unknown_dependencies",
+        "items": [{"task_id": "views", "dependency": "models"}],
+    } in payload["autonomy_readiness"]["blocking_items"]
+    assert payload["autonomy_readiness"]["checks"]["unknown_dependency_count"] == 1
+
+
+def test_summarize_job_progress_blocks_stale_valid_graph_with_dependency_cycle(
+    tmp_path,
+) -> None:
+    task_graph = TaskGraph(
+        goal="Build incrementally",
+        tasks=[
+            PlannedTask(
+                id="a",
+                title="A",
+                description="Build A after B.",
+                role="implementer",
+                depends_on=["b"],
+                acceptance_criteria=["A exists"],
+                target_files=["a.py"],
+                required_artifacts=["a.py"],
+            ),
+            PlannedTask(
+                id="b",
+                title="B",
+                description="Build B after A.",
+                role="implementer",
+                depends_on=["a"],
+                acceptance_criteria=["B exists"],
+                target_files=["b.py"],
+                required_artifacts=["b.py"],
+            ),
+        ],
+    )
+    spec = JobSpec(
+        job_id="autonomy-stale-dependency-cycle-job",
+        request_text="Build it carefully",
+        repo_path=str(tmp_path),
+    )
+    record = JobRecord(job_id=spec.job_id, spec=spec, status=JobStatus.TESTING)
+    record.outputs["task_graph"] = task_graph.model_dump()
+    record.outputs["task_graph_validation"] = {
+        "valid": True,
+        "task_count": 2,
+        "dependency_cycle_task_ids": [],
+        "errors": [],
+    }
+
+    payload = summarize_job_progress(record)
+
+    assert payload["autonomy_readiness"]["ready"] is False
+    assert {
+        "type": "dependency_cycle",
+        "task_ids": ["a", "b", "a"],
+    } in payload["autonomy_readiness"]["blocking_items"]
+    assert payload["autonomy_readiness"]["checks"]["dependency_cycle_task_count"] == 3
 
 
 def test_summarize_job_progress_recommends_planning_repair_for_prd_quality_gate(
