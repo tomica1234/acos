@@ -1368,11 +1368,24 @@ def _autonomy_readiness(
             _current_prd_validation_fingerprint(record),
         )
     )
+    task_graph_validation_constraint_mismatches = (
+        _task_graph_validation_constraint_mismatches(
+            task_graph_validation,
+            {
+                "require_acceptance_criteria": require_acceptance_criteria,
+                "require_task_artifacts": require_task_artifacts,
+                "require_executable_task_roles": (
+                    require_completion_integrity or require_executable_task_roles
+                ),
+            },
+        )
+    )
     task_graph_validation_stale_mismatches = [
         *task_graph_validation_count_mismatches,
         *task_graph_validation_identity_mismatches,
         *task_graph_validation_fingerprint_mismatches,
         *task_graph_validation_prd_fingerprint_mismatches,
+        *task_graph_validation_constraint_mismatches,
     ]
     unsupported_task_roles = [
         {"task_id": task.get("id"), "role": task.get("role")}
@@ -1904,6 +1917,28 @@ def _task_graph_validation_prd_fingerprint_mismatches(
             "current_value": current_fingerprint,
         }
     ]
+
+
+def _task_graph_validation_constraint_mismatches(
+    validation: dict[str, Any] | None,
+    current_constraints: dict[str, bool],
+) -> list[dict[str, Any]]:
+    if validation is None:
+        return []
+    mismatches: list[dict[str, Any]] = []
+    for field, current_value in current_constraints.items():
+        validation_value = validation.get(field)
+        if not isinstance(validation_value, bool):
+            continue
+        if current_value and not validation_value:
+            mismatches.append(
+                {
+                    "field": field,
+                    "validation_value": validation_value,
+                    "current_value": current_value,
+                }
+            )
+    return mismatches
 
 
 def _non_empty_strings(value: object) -> list[str]:

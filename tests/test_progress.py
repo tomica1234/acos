@@ -1795,6 +1795,94 @@ def test_summarize_job_progress_blocks_stale_valid_graph_when_prd_fingerprint_do
     ] == 1
 
 
+def test_summarize_job_progress_blocks_stale_valid_graph_when_validation_constraints_do_not_match(
+    tmp_path,
+) -> None:
+    task_graph = TaskGraph(
+        goal="Build incrementally",
+        tasks=[
+            PlannedTask(
+                id="core",
+                title="Core",
+                description="Build core behavior.",
+                role="implementer",
+                acceptance_criteria=["VALUE equals 1"],
+                target_files=["feature.py"],
+                required_artifacts=["feature.py"],
+            ),
+            PlannedTask(
+                id="core-tests",
+                title="Core tests",
+                description="Cover core behavior.",
+                role="test_writer",
+                depends_on=["core"],
+                acceptance_criteria=["VALUE equals 1"],
+                target_files=["tests/test_feature.py"],
+                required_artifacts=["tests/test_feature.py"],
+            ),
+        ],
+    )
+    spec = JobSpec(
+        job_id="autonomy-stale-validation-constraints-job",
+        request_text="Build it carefully",
+        repo_path=str(tmp_path),
+        metadata={
+            "constraints": {
+                "require_task_acceptance_criteria": True,
+                "require_task_artifacts": True,
+                "require_completion_integrity": True,
+            }
+        },
+    )
+    record = JobRecord(job_id=spec.job_id, spec=spec, status=JobStatus.TESTING)
+    record.outputs["task_graph"] = task_graph.model_dump()
+    record.outputs["task_graph_validation"] = {
+        "valid": True,
+        "task_count": 2,
+        "implementation_task_count": 1,
+        "test_writer_task_count": 1,
+        "executable_task_count": 2,
+        "task_ids": ["core", "core-tests"],
+        "implementation_task_ids": ["core"],
+        "test_writer_task_ids": ["core-tests"],
+        "executable_task_ids": ["core", "core-tests"],
+        "task_graph_fingerprint": task_graph_validation_fingerprint(
+            [task.model_dump(mode="json") for task in task_graph.tasks]
+        ),
+        "require_acceptance_criteria": False,
+        "require_task_artifacts": False,
+        "require_executable_task_roles": False,
+        "errors": [],
+    }
+
+    payload = summarize_job_progress(record)
+
+    assert payload["autonomy_readiness"]["ready"] is False
+    assert {
+        "type": "task_graph_validation_stale",
+        "mismatches": [
+            {
+                "field": "require_acceptance_criteria",
+                "validation_value": False,
+                "current_value": True,
+            },
+            {
+                "field": "require_task_artifacts",
+                "validation_value": False,
+                "current_value": True,
+            },
+            {
+                "field": "require_executable_task_roles",
+                "validation_value": False,
+                "current_value": True,
+            },
+        ],
+    } in payload["autonomy_readiness"]["blocking_items"]
+    assert payload["autonomy_readiness"]["checks"][
+        "task_graph_validation_stale_count"
+    ] == 3
+
+
 def test_summarize_job_progress_does_not_treat_status_or_complexity_only_fingerprint_change_as_stale(
     tmp_path,
 ) -> None:

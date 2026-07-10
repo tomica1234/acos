@@ -5208,10 +5208,7 @@ class JobRunner:
                 record,
                 "require_task_acceptance_criteria",
             ),
-            require_executable_task_roles=self._constraint_flag(
-                record,
-                "require_completion_integrity",
-            ),
+            require_executable_task_roles=self._require_executable_task_roles(record),
             require_task_artifacts=self._constraint_flag(
                 record,
                 "require_task_artifacts",
@@ -5282,10 +5279,7 @@ class JobRunner:
                     record,
                     "require_task_acceptance_criteria",
                 ),
-                require_executable_task_roles=self._constraint_flag(
-                    record,
-                    "require_completion_integrity",
-                ),
+                require_executable_task_roles=self._require_executable_task_roles(record),
                 require_task_artifacts=self._constraint_flag(
                     record,
                     "require_task_artifacts",
@@ -5392,10 +5386,7 @@ class JobRunner:
                 record,
                 "require_task_acceptance_criteria",
             ),
-            require_executable_task_roles=self._constraint_flag(
-                record,
-                "require_completion_integrity",
-            ),
+            require_executable_task_roles=self._require_executable_task_roles(record),
             require_task_artifacts=self._constraint_flag(
                 record,
                 "require_task_artifacts",
@@ -8799,6 +8790,12 @@ class JobRunner:
 
     def _constraint_flag(self, record: JobRecord, key: str) -> bool:
         return bool(self._constraints(record).get(key, False))
+
+    def _require_executable_task_roles(self, record: JobRecord) -> bool:
+        return self._constraint_flag(
+            record,
+            "require_completion_integrity",
+        ) or self._constraint_flag(record, "require_executable_task_roles")
 
     def _constraint_int(self, record: JobRecord, key: str, default: int) -> int:
         value = self._constraints(record).get(key, default)

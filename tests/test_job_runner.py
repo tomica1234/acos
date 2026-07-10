@@ -6339,6 +6339,62 @@ def test_job_runner_blocks_unsupported_autonomous_task_role_before_implementatio
     assert not (workspace / "feature.py").exists()
 
 
+def test_task_graph_validation_honors_explicit_executable_task_role_constraint(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    registry = ModelRegistry.from_paths(
+        provider_path=config_dir() / "model_providers.yaml",
+        agents_path=config_dir() / "agents.yaml",
+        routing_path=config_dir() / "model_routing.yaml",
+    )
+    policy = PolicyEngine.from_path(config_dir() / "policies.yaml")
+    environment = FakeMCPEnvironment(
+        workspace_root=workspace,
+        memory_db_path=workspace / ".memory.sqlite3",
+    )
+    runner = JobRunner(registry=registry, policy=policy, router=environment.build_router())
+    record = runner.store.create(
+        JobSpec(
+            request_text="Create feature",
+            repo_path=str(workspace),
+            target_branch="acos/explicit-role-constraint",
+            metadata={
+                "constraints": {
+                    "require_completion_integrity": False,
+                    "require_executable_task_roles": True,
+                }
+            },
+        )
+    )
+    task_graph = TaskGraph(
+        goal="Build feature",
+        tasks=[
+            PlannedTask(
+                id="release-notes",
+                title="Prepare release notes",
+                description="Document what changed after implementation.",
+                role="release_manager",
+            )
+        ],
+    )
+
+    valid = runner._validate_task_graph_for_autonomy(record, task_graph)
+
+    assert valid is False
+    validation = record.outputs["task_graph_validation"]
+    assert validation["require_executable_task_roles"] is True
+    assert validation["unsupported_task_roles"] == [
+        {"task_id": "release-notes", "role": "release_manager"}
+    ]
+    assert {
+        "type": "unsupported_autonomous_task_roles",
+        "items": [{"task_id": "release-notes", "role": "release_manager"}],
+        "allowed_roles": ["implementer", "scaffold", "test_writer"],
+    } in validation["errors"]
+
+
 def test_job_runner_blocks_invalid_task_graph_before_implementation(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
     workspace.mkdir()
