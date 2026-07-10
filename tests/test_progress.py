@@ -3236,9 +3236,27 @@ def test_summarize_job_progress_respects_explicit_stage_statuses(tmp_path) -> No
                 role="implementer",
             ),
             PlannedTask(
-                id="explicit-pass",
-                title="Explicit pass",
-                description="Explicit status wins.",
+                id="explicit-pass-test-fail",
+                title="Explicit pass with failed test",
+                description="Failed test overrides explicit pass.",
+                role="implementer",
+            ),
+            PlannedTask(
+                id="explicit-pass-post-review-fail",
+                title="Explicit pass with failed post review test",
+                description="Failed post-review test overrides explicit pass.",
+                role="implementer",
+            ),
+            PlannedTask(
+                id="explicit-pass-clean",
+                title="Explicit pass clean",
+                description="Explicit pass is kept when tests pass.",
+                role="implementer",
+            ),
+            PlannedTask(
+                id="explicit-superseded",
+                title="Explicit superseded",
+                description="Explicit superseded is kept.",
                 role="implementer",
             ),
         ],
@@ -3275,6 +3293,29 @@ def test_summarize_job_progress_respects_explicit_stage_statuses(tmp_path) -> No
             "test_run": {"success": False},
             "change_summary": {"changed_files": ["explicit.py"], "patch_count": 1},
         },
+        {
+            "stage": 4,
+            "task": task_graph.tasks[3].model_dump(),
+            "status": "passed",
+            "test_run": {"success": True},
+            "post_review_test_run": {"success": False},
+            "change_summary": {"changed_files": ["review-tests.py"], "patch_count": 1},
+        },
+        {
+            "stage": 5,
+            "task": task_graph.tasks[4].model_dump(),
+            "status": "passed",
+            "test_run": {"success": True},
+            "post_review_test_run": {"success": True},
+            "change_summary": {"changed_files": ["clean.py"], "patch_count": 1},
+        },
+        {
+            "stage": 6,
+            "task": task_graph.tasks[5].model_dump(),
+            "status": "superseded",
+            "test_run": {"success": False},
+            "change_summary": {"changed_files": ["superseded.py"], "patch_count": 1},
+        },
     ]
 
     payload = summarize_job_progress(record)
@@ -3283,11 +3324,15 @@ def test_summarize_job_progress_respects_explicit_stage_statuses(tmp_path) -> No
     assert statuses == {
         "no-change": "failed",
         "review-rejected": "failed",
-        "explicit-pass": "passed",
+        "explicit-pass-test-fail": "failed",
+        "explicit-pass-post-review-fail": "failed",
+        "explicit-pass-clean": "passed",
+        "explicit-superseded": "superseded",
     }
-    assert payload["failed_stage"]["stage"] == 2
-    assert payload["failed_stage_task_ids"] == ["no-change", "review-rejected"]
-    assert payload["successful_stage_task_ids"] == ["explicit-pass"]
+    assert payload["failed_stage"]["stage"] == 4
+    assert "explicit-pass-post-review-fail" in payload["failed_stage_task_ids"]
+    assert payload["successful_stage_task_ids"] == ["explicit-pass-clean"]
+    assert payload["recovered_stage_task_ids"] == ["explicit-superseded"]
 
 
 def test_summarize_job_progress_legacy_stage_without_status_uses_test_fallback(

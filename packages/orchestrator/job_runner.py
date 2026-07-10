@@ -7236,6 +7236,8 @@ class JobRunner:
                         logs=["stage review applied fixes"],
                     )
                     stage_result["post_review_test_run"] = last_test_result.model_dump()
+                    self._annotate_stage_status_for_recovery(record, stage_result)
+                    self._recover_failed_stage_if_needed(record, stage_result)
                     self.store.update(record)
                     if (
                         self._should_pause_for_recovery(record)
@@ -7340,6 +7342,8 @@ class JobRunner:
                     logs=["stage review applied fixes"],
                 )
                 stage_result["post_review_test_run"] = last_test_result.model_dump()
+                self._annotate_stage_status_for_recovery(record, stage_result)
+                self._recover_failed_stage_if_needed(record, stage_result)
                 self.store.update(record)
                 if (
                     self._should_pause_for_recovery(record)
@@ -8438,8 +8442,18 @@ class JobRunner:
         }:
             stage_result["status"] = "failed_for_recovery"
             stage_result["failure_reason"] = "review_rejected"
+        test_run = stage_result.get("test_run")
+        post_review_test_run = stage_result.get("post_review_test_run")
+        test_success = test_run.get("success") if isinstance(test_run, dict) else None
+        post_review_success = (
+            post_review_test_run.get("success")
+            if isinstance(post_review_test_run, dict)
+            else None
+        )
+        if test_success is False or post_review_success is False:
+            stage_result["status"] = "failed_for_recovery"
+            stage_result["failure_reason"] = "tests_failed"
         if "status" not in stage_result:
-            test_run = stage_result.get("test_run")
             if isinstance(test_run, dict) and test_run.get("success") is True:
                 stage_result["status"] = "passed"
             else:

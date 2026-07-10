@@ -8202,8 +8202,120 @@ def test_job_runner_can_review_and_fix_each_stage_before_completion(tmp_path: Pa
     stage = record.outputs["autonomous_stages"][0]
     assert stage["stage_review"]["review"]["decision"] == "approve"
     assert stage["post_review_test_run"]["success"] is True
+    assert stage["status"] == "passed"
     assert record.completed_task_ids == ["core"]
     assert "Return value plus one." in (workspace / "feature.py").read_text(encoding="utf-8")
+
+
+def test_job_runner_marks_stage_failed_after_post_review_test_failure(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    registry = ModelRegistry.from_paths(
+        provider_path=config_dir() / "model_providers.yaml",
+        agents_path=config_dir() / "agents.yaml",
+        routing_path=config_dir() / "model_routing.yaml",
+    )
+    attach_mock_adapter(
+        registry,
+        {
+            "pm": PRD(title="Feature", problem_statement="Need feature").model_dump(),
+            "architect": ArchitecturePlan(summary="Simple architecture").model_dump(),
+            "planner": TaskGraph(
+                goal="Build feature incrementally",
+                tasks=[
+                    PlannedTask(
+                        id="core",
+                        title="Create core helper",
+                        description="Create the smallest working helper.",
+                        role="implementer",
+                    )
+                ],
+            ).model_dump(),
+            "implementer": ImplementationResult(
+                status=ImplementationStatus.IMPLEMENTED,
+                summary="Created core helper",
+                patches=[
+                    {
+                        "path": "feature.py",
+                        "content": "def add_one(value: int) -> int:\n    return value + 1\n",
+                        "operation": "create",
+                    }
+                ],
+            ).model_dump(),
+            "test_writer": TestWriterOutput(
+                summary="Add core tests",
+                patches=[
+                    {
+                        "path": "tests/test_feature.py",
+                        "content": (
+                            "from feature import add_one\n\n\n"
+                            "def test_add_one() -> None:\n"
+                            "    assert add_one(2) == 3\n"
+                        ),
+                        "operation": "create",
+                    }
+                ],
+            ).model_dump(),
+            "reviewer": ReviewResult(
+                decision=ReviewDecision.APPROVE,
+                summary="Stage is review-clean",
+            ).model_dump(),
+            "security_reviewer": SecurityReviewResult(
+                decision=ReviewDecision.APPROVE,
+                summary="Safe",
+            ).model_dump(),
+            "fixer": FixResult(
+                status=FixStatus.FAILED,
+                summary="Could not fix post-review test failure.",
+                patches=[],
+            ).model_dump(),
+        },
+    )
+    policy = PolicyEngine.from_path(config_dir() / "policies.yaml")
+    environment = FakeMCPEnvironment(
+        workspace_root=workspace,
+        memory_db_path=workspace / ".memory.sqlite3",
+        scripted_test_results=[
+            TestRunResult(
+                success=True,
+                command=["pytest"],
+                output_excerpt="1 passed",
+                exit_code=0,
+                executed_test_count=1,
+            ),
+            TestRunResult(
+                success=False,
+                command=["pytest"],
+                output_excerpt="test_add_one failed after review",
+                exit_code=1,
+                executed_test_count=1,
+            ),
+        ],
+    )
+    runner = JobRunner(registry=registry, policy=policy, router=environment.build_router())
+    spec = JobSpec(
+        request_text="Create feature with tests",
+        repo_path=str(workspace),
+        target_branch="acos/stage-review-post-test-failed",
+        metadata={
+            "constraints": {
+                "skip_review": True,
+                "skip_release": True,
+                "stage_review": True,
+            }
+        },
+    )
+
+    record = runner.run_job(spec)
+
+    stage = record.outputs["autonomous_stages"][0]
+    assert stage["stage_review"]["review"]["decision"] == "approve"
+    assert stage["post_review_test_run"]["success"] is False
+    assert stage["status"] == "failed_for_recovery"
+    assert stage["failure_reason"] == "tests_failed"
+    assert record.completed_task_ids == []
 
 
 def test_job_runner_stops_stage_review_when_fixer_reports_failed(tmp_path: Path) -> None:
