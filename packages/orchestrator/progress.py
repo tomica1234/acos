@@ -12,6 +12,7 @@ from packages.orchestrator.quality_gates import (
     looks_like_placeholder_planning_item,
     valid_planning_artifact_paths,
 )
+from packages.orchestrator.task_graph_validation import task_graph_validation_fingerprint
 from packages.schemas.jobs import JobRecord
 
 _PROJECT_SETUP_REQUIRED_ARTIFACTS = {
@@ -1352,9 +1353,16 @@ def _autonomy_readiness(
             },
         )
     )
+    task_graph_validation_fingerprint_mismatches = (
+        _task_graph_validation_fingerprint_mismatches(
+            task_graph_validation,
+            task_graph_validation_fingerprint(planned_tasks),
+        )
+    )
     task_graph_validation_stale_mismatches = [
         *task_graph_validation_count_mismatches,
         *task_graph_validation_identity_mismatches,
+        *task_graph_validation_fingerprint_mismatches,
     ]
     unsupported_task_roles = [
         {"task_id": task.get("id"), "role": task.get("role")}
@@ -1839,6 +1847,26 @@ def _task_graph_validation_identity_mismatches(
                 }
             )
     return mismatches
+
+
+def _task_graph_validation_fingerprint_mismatches(
+    validation: dict[str, Any] | None,
+    current_fingerprint: str,
+) -> list[dict[str, Any]]:
+    if validation is None:
+        return []
+    validation_fingerprint = validation.get("task_graph_fingerprint")
+    if not isinstance(validation_fingerprint, str) or not validation_fingerprint:
+        return []
+    if validation_fingerprint == current_fingerprint:
+        return []
+    return [
+        {
+            "field": "task_graph_fingerprint",
+            "validation_value": validation_fingerprint,
+            "current_value": current_fingerprint,
+        }
+    ]
 
 
 def _non_empty_strings(value: object) -> list[str]:

@@ -2,6 +2,7 @@ from datetime import datetime, timedelta, timezone
 
 from packages.orchestrator.job_constraints import STRICT_JOB_CONSTRAINTS
 from packages.orchestrator.progress import summarize_job_progress
+from packages.orchestrator.task_graph_validation import task_graph_validation_fingerprint
 from packages.schemas.audit import AuditEvent
 from packages.schemas.jobs import JobRecord, JobSpec
 from packages.schemas.models import JobStatus
@@ -1625,6 +1626,87 @@ def test_summarize_job_progress_blocks_stale_valid_graph_when_validation_task_id
     assert payload["autonomy_readiness"]["checks"][
         "task_graph_validation_stale_count"
     ] == 4
+
+
+def test_summarize_job_progress_blocks_stale_valid_graph_when_fingerprint_does_not_match(
+    tmp_path,
+) -> None:
+    task_graph = TaskGraph(
+        goal="Build incrementally",
+        tasks=[
+            PlannedTask(
+                id="core",
+                title="Core",
+                description="Build core behavior.",
+                role="implementer",
+                acceptance_criteria=["Core behavior returns VALUE"],
+                target_files=["feature.py"],
+                required_artifacts=["feature.py"],
+            ),
+            PlannedTask(
+                id="core-tests",
+                title="Core tests",
+                description="Cover core behavior.",
+                role="test_writer",
+                depends_on=["core"],
+                acceptance_criteria=["Core behavior has regression tests"],
+                target_files=["tests/test_feature.py"],
+                required_artifacts=["tests/test_feature.py"],
+            ),
+        ],
+    )
+    stale_tasks = [
+        {
+            **task.model_dump(mode="json"),
+            "target_files": ["old_feature.py"],
+            "required_artifacts": ["old_feature.py"],
+        }
+        if task.id == "core"
+        else task.model_dump(mode="json")
+        for task in task_graph.tasks
+    ]
+    stale_fingerprint = task_graph_validation_fingerprint(stale_tasks)
+    current_fingerprint = task_graph_validation_fingerprint(
+        [task.model_dump(mode="json") for task in task_graph.tasks]
+    )
+    spec = JobSpec(
+        job_id="autonomy-stale-validation-fingerprint-job",
+        request_text="Build it carefully",
+        repo_path=str(tmp_path),
+        metadata={"constraints": {"require_task_artifacts": True}},
+    )
+    record = JobRecord(job_id=spec.job_id, spec=spec, status=JobStatus.TESTING)
+    record.outputs["task_graph"] = task_graph.model_dump()
+    record.outputs["task_graph_validation"] = {
+        "valid": True,
+        "task_count": 2,
+        "implementation_task_count": 1,
+        "test_writer_task_count": 1,
+        "executable_task_count": 2,
+        "task_ids": ["core", "core-tests"],
+        "implementation_task_ids": ["core"],
+        "test_writer_task_ids": ["core-tests"],
+        "executable_task_ids": ["core", "core-tests"],
+        "task_graph_fingerprint": stale_fingerprint,
+        "errors": [],
+    }
+
+    payload = summarize_job_progress(record)
+
+    assert payload["autonomy_readiness"]["ready"] is False
+    assert {
+        "type": "task_graph_validation_stale",
+        "mismatches": [
+            {
+                "field": "task_graph_fingerprint",
+                "validation_value": stale_fingerprint,
+                "current_value": current_fingerprint,
+            },
+        ],
+    } in payload["autonomy_readiness"]["blocking_items"]
+    assert payload["autonomy_readiness"]["checks"][
+        "task_graph_validation_stale_count"
+    ] == 1
 
 
 def test_summarize_job_progress_blocks_stale_valid_graph_with_duplicate_task_ids(

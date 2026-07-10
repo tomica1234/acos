@@ -10,6 +10,7 @@ from packages.orchestrator.completion_verifier import DefinitionOfDoneVerifier
 from packages.orchestrator.job_runner import JobRunner
 from packages.orchestrator.job_store import InMemoryJobStore
 from packages.orchestrator.policy import PolicyEngine
+from packages.orchestrator.task_graph_validation import task_graph_validation_fingerprint
 from packages.schemas.agent_outputs import (
     ArchitecturePlan,
     FixResult,
@@ -3014,6 +3015,9 @@ def test_task_graph_validation_requires_task_artifacts_when_requested() -> None:
     assert validation["implementation_task_ids"] == ["core"]
     assert validation["test_writer_task_ids"] == []
     assert validation["executable_task_ids"] == ["core"]
+    assert validation["task_graph_fingerprint"] == task_graph_validation_fingerprint(
+        [task.model_dump(mode="json") for task in task_graph.tasks]
+    )
     assert validation["implementation_task_artifact_count"] == 0
     assert validation["executable_task_artifact_count"] == 0
     assert validation["errors"] == [

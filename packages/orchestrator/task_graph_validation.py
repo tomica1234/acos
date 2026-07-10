@@ -1,4 +1,10 @@
-"""Shared task graph validation context keys."""
+"""Shared task graph validation helpers."""
+
+from __future__ import annotations
+
+import hashlib
+import json
+from typing import Any, Iterable, Mapping
 
 TASK_GRAPH_VALIDATION_DETAIL_KEYS = (
     "unassigned_required_artifacts",
@@ -39,7 +45,63 @@ TASK_GRAPH_VALIDATION_CONTEXT_KEYS = (
     *TASK_GRAPH_VALIDATION_DETAIL_KEYS,
 )
 
+_TASK_GRAPH_FINGERPRINT_FIELDS = (
+    "id",
+    "title",
+    "description",
+    "role",
+    "status",
+    "complexity",
+    "depends_on",
+    "acceptance_criteria",
+    "target_files",
+    "required_artifacts",
+)
+_MISSING = object()
+
+
+def task_graph_validation_fingerprint(
+    tasks: Iterable[Mapping[str, Any]],
+) -> str:
+    """Return a stable fingerprint for task fields covered by validation."""
+    canonical_tasks = [
+        {
+            field: _fingerprint_value(task.get(field))
+            for field in _TASK_GRAPH_FINGERPRINT_FIELDS
+        }
+        for task in tasks
+    ]
+    payload = json.dumps(
+        canonical_tasks,
+        ensure_ascii=True,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _fingerprint_value(value: Any) -> Any:
+    if isinstance(value, list):
+        return [_fingerprint_value(item) for item in value]
+    if isinstance(value, tuple):
+        return [_fingerprint_value(item) for item in value]
+    if isinstance(value, dict):
+        return {
+            str(key): _fingerprint_value(item)
+            for key, item in sorted(value.items(), key=lambda item: str(item[0]))
+        }
+    if isinstance(value, (str, int, float, bool)) or value is None:
+        return value
+    enum_value = getattr(value, "value", _MISSING)
+    if enum_value is not _MISSING and (
+        isinstance(enum_value, (str, int, float, bool)) or enum_value is None
+    ):
+        return enum_value
+    return str(value)
+
+
 __all__ = [
     "TASK_GRAPH_VALIDATION_CONTEXT_KEYS",
     "TASK_GRAPH_VALIDATION_DETAIL_KEYS",
+    "task_graph_validation_fingerprint",
 ]
