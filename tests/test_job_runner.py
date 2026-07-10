@@ -3258,6 +3258,86 @@ def test_task_graph_validation_rejects_placeholder_task_artifacts() -> None:
     } in validation["errors"]
 
 
+def test_task_graph_validation_rejects_directory_like_implementation_artifacts() -> None:
+    task_graph = TaskGraph(
+        goal="Build frontend feature",
+        tasks=[
+            PlannedTask(
+                id="frontend-ui",
+                title="Build frontend UI",
+                description="Create the vocabulary UI screen.",
+                role="implementer",
+                acceptance_criteria=["Vocabulary UI renders study cards"],
+                target_files=["frontend/src"],
+                required_artifacts=["frontend/src"],
+            )
+        ],
+    )
+
+    validation = JobRunner._build_task_graph_validation(
+        task_graph,
+        require_acceptance_criteria=True,
+        require_task_artifacts=True,
+    )
+
+    assert validation["valid"] is False
+    assert validation["implementation_task_artifact_count"] == 0
+    assert validation["implementation_tasks_missing_target_files"] == ["frontend-ui"]
+    assert validation["executable_tasks_missing_required_artifacts"] == ["frontend-ui"]
+    assert validation["invalid_task_artifacts"] == [
+        {"task_id": "frontend-ui", "paths": ["frontend/src"]}
+    ]
+    assert {
+        "type": "invalid_task_artifacts",
+        "items": validation["invalid_task_artifacts"],
+    } in validation["errors"]
+
+
+def test_task_graph_validation_rejects_directory_like_test_artifacts() -> None:
+    task_graph = TaskGraph(
+        goal="Build test suite",
+        tasks=[
+            PlannedTask(
+                id="core",
+                title="Build core module",
+                description="Create the vocabulary data model.",
+                role="implementer",
+                acceptance_criteria=["Core module exposes vocabulary words"],
+                target_files=["backend/main.py"],
+                required_artifacts=["backend/main.py"],
+            ),
+            PlannedTask(
+                id="core-tests",
+                title="Write core tests",
+                description="Verify the vocabulary data model.",
+                role="test_writer",
+                depends_on=["core"],
+                acceptance_criteria=["Tests cover vocabulary words"],
+                target_files=["tests"],
+                required_artifacts=["tests"],
+            ),
+        ],
+    )
+
+    validation = JobRunner._build_task_graph_validation(
+        task_graph,
+        require_acceptance_criteria=True,
+        require_task_artifacts=True,
+    )
+
+    assert validation["valid"] is False
+    assert validation["executable_task_artifact_count"] == 1
+    assert validation["test_writer_tasks_missing_target_files"] == ["core-tests"]
+    assert validation["executable_tasks_missing_required_artifacts"] == ["core-tests"]
+    assert validation["invalid_task_artifacts"] == [
+        {"task_id": "core-tests", "paths": ["tests"]}
+    ]
+    assert {
+        "type": "invalid_task_artifacts",
+        "items": validation["invalid_task_artifacts"],
+    } in validation["errors"]
+
+
 def test_task_graph_validation_requires_test_writer_artifacts_when_requested() -> None:
     task_graph = TaskGraph(
         goal="Build feature",
@@ -10248,6 +10328,32 @@ def test_prd_quality_rejects_invalid_required_artifact_paths() -> None:
     assert report["test_required_artifact_count"] == 0
     assert report["test_required_artifacts"] == []
     assert report["invalid_required_artifacts"] == ["../outside.py", "C:\\outside.py"]
+
+
+def test_prd_quality_rejects_directory_like_required_artifact_paths() -> None:
+    prd = PRD(
+        title="Feature",
+        problem_statement="Need feature",
+        smallest_working_core=["Expose a feature module"],
+        small_parts=["Create feature module"],
+        incremental_milestones=["Module exists"],
+        acceptance_tests=["Feature module exists"],
+        definition_of_done=["All tests pass"],
+        required_artifacts=["backend", "tests"],
+    )
+
+    report = JobRunner._build_prd_quality_report(prd)
+
+    assert report["passed"] is False
+    assert report["missing"] == [
+        "required_artifacts",
+        "required_artifacts_valid_paths",
+    ]
+    assert report["required_artifact_count"] == 0
+    assert report["required_artifacts"] == []
+    assert report["source_required_artifact_count"] == 0
+    assert report["test_required_artifact_count"] == 0
+    assert report["invalid_required_artifacts"] == ["backend", "tests"]
 
 
 def test_prd_quality_rejects_placeholder_required_artifact_paths() -> None:

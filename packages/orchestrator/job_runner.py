@@ -116,6 +116,32 @@ class JobRunner:
         "README.md",
         ".env.example",
     ]
+    EXTENSIONLESS_PLANNING_ARTIFACT_FILENAMES = {
+        ".dockerignore",
+        ".editorconfig",
+        ".env",
+        ".eslintignore",
+        ".eslintrc",
+        ".gitattributes",
+        ".gitignore",
+        ".gitkeep",
+        ".npmrc",
+        ".nvmrc",
+        ".prettierignore",
+        ".prettierrc",
+        "Brewfile",
+        "Dockerfile",
+        "Gemfile",
+        "Justfile",
+        "LICENSE",
+        "Makefile",
+        "NOTICE",
+        "Procfile",
+        "Rakefile",
+        "README",
+        "Taskfile",
+        "Vagrantfile",
+    }
     PROJECT_SETUP_KEYWORDS = (
         "project-scaffold",
         "project scaffold",
@@ -8749,6 +8775,7 @@ class JobRunner:
         invalid = [
             *invalid_artifact_paths(paths),
             *cls._placeholder_artifact_paths(paths),
+            *cls._directory_like_planning_artifact_paths(paths),
         ]
         return cls._unique_paths(invalid)
 
@@ -8758,6 +8785,7 @@ class JobRunner:
             item
             for item in cls._non_empty_items(paths)
             if not cls._looks_like_placeholder_artifact_path(item)
+            and not cls._looks_like_directory_artifact_path(item)
         ]
 
     @classmethod
@@ -8767,6 +8795,31 @@ class JobRunner:
             for item in cls._non_empty_items(paths)
             if cls._looks_like_placeholder_artifact_path(item)
         ]
+
+    @classmethod
+    def _directory_like_planning_artifact_paths(cls, paths: list[str]) -> list[str]:
+        return [
+            cls._normalized_planning_artifact_path(item)
+            for item in cls._non_empty_items(paths)
+            if not cls._looks_like_placeholder_artifact_path(item)
+            and cls._looks_like_directory_artifact_path(item)
+        ]
+
+    @staticmethod
+    def _normalized_planning_artifact_path(path: str) -> str:
+        return str(path).replace("\\", "/").strip()
+
+    @classmethod
+    def _looks_like_directory_artifact_path(cls, path: str) -> bool:
+        value = cls._normalized_planning_artifact_path(path)
+        if not value or invalid_artifact_paths([value]):
+            return False
+        name = value.rsplit("/", 1)[-1].strip()
+        if not name:
+            return False
+        if name in cls.EXTENSIONLESS_PLANNING_ARTIFACT_FILENAMES:
+            return False
+        return "." not in name
 
     @staticmethod
     def _looks_like_placeholder_artifact_path(path: str) -> bool:
