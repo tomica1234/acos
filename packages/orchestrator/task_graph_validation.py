@@ -9,6 +9,7 @@ TASK_GRAPH_VALIDATION_DETAIL_KEYS = (
     "role_mismatched_required_artifacts",
     "required_artifacts_missing_target_files",
     "target_files_missing_required_artifacts",
+    "unordered_target_file_owner_conflicts",
     "duplicate_task_ids",
     "unknown_dependencies",
     "dependency_cycle_task_ids",

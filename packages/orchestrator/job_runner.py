@@ -5358,6 +5358,12 @@ class JobRunner:
                             "expected_roles": sorted(expected_roles),
                         }
                     )
+        unordered_target_file_owner_conflicts = (
+            JobRunner._unordered_target_file_owner_conflicts(
+                task_graph,
+                executable_tasks,
+            )
+        )
         invalid_task_titles = [
             {
                 "task_id": task.id,
@@ -5588,6 +5594,13 @@ class JobRunner:
                 {
                     "type": "target_files_missing_required_artifacts",
                     "items": target_files_missing_required_artifacts,
+                }
+            )
+        if require_task_artifacts and unordered_target_file_owner_conflicts:
+            errors.append(
+                {
+                    "type": "unordered_target_file_owner_conflicts",
+                    "items": unordered_target_file_owner_conflicts,
                 }
             )
         strict_executable_task_validation = (
@@ -5824,6 +5837,9 @@ class JobRunner:
             "target_files_missing_required_artifacts": (
                 target_files_missing_required_artifacts
             ),
+            "unordered_target_file_owner_conflicts": (
+                unordered_target_file_owner_conflicts
+            ),
             "duplicate_task_ids": duplicate_ids,
             "unknown_dependencies": unknown_dependencies,
             "dependency_cycle_task_ids": cycle,
@@ -5876,6 +5892,70 @@ class JobRunner:
             ),
             "errors": errors,
         }
+
+    @staticmethod
+    def _unordered_target_file_owner_conflicts(
+        task_graph: TaskGraph,
+        executable_tasks: list[PlannedTask],
+    ) -> list[dict[str, Any]]:
+        target_owners: dict[str, list[PlannedTask]] = {}
+        for task in executable_tasks:
+            for path in JobRunner._valid_unique_planning_artifact_paths(
+                task.target_files
+            ):
+                target_owners.setdefault(path, []).append(task)
+
+        conflicts: list[dict[str, Any]] = []
+        for path, owners in sorted(target_owners.items()):
+            if len(owners) < 2:
+                continue
+            unordered_pairs: list[dict[str, str]] = []
+            for left_index, left in enumerate(owners):
+                for right in owners[left_index + 1 :]:
+                    if left.id == right.id:
+                        continue
+                    if (
+                        JobRunner._task_depends_on(task_graph, left.id, right.id)
+                        or JobRunner._task_depends_on(task_graph, right.id, left.id)
+                    ):
+                        continue
+                    unordered_pairs.append(
+                        {"first_task_id": left.id, "second_task_id": right.id}
+                    )
+            if unordered_pairs:
+                conflicts.append(
+                    {
+                        "path": path,
+                        "task_ids": [task.id for task in owners],
+                        "unordered_task_pairs": unordered_pairs,
+                    }
+                )
+        return conflicts
+
+    @staticmethod
+    def _task_depends_on(
+        task_graph: TaskGraph,
+        task_id: str,
+        dependency_id: str,
+    ) -> bool:
+        task_by_id = {task.id: task for task in task_graph.tasks}
+        visited: set[str] = set()
+
+        def visit(current_id: str) -> bool:
+            if current_id in visited:
+                return False
+            visited.add(current_id)
+            current = task_by_id.get(current_id)
+            if current is None:
+                return False
+            for dependency in current.depends_on:
+                if dependency == dependency_id:
+                    return True
+                if dependency in task_by_id and visit(dependency):
+                    return True
+            return False
+
+        return visit(task_id)
 
     @staticmethod
     def _test_writer_dependency_semantic_mismatches(

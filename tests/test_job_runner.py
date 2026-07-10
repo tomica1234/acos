@@ -3060,6 +3060,89 @@ def test_task_graph_validation_rejects_target_files_not_required() -> None:
     } in validation["errors"]
 
 
+def test_task_graph_validation_rejects_unordered_shared_target_files() -> None:
+    task_graph = TaskGraph(
+        goal="Build feature",
+        tasks=[
+            PlannedTask(
+                id="api-core",
+                title="Build API core",
+                description="Create API core behavior.",
+                role="implementer",
+                acceptance_criteria=["API core returns VALUE"],
+                target_files=["backend/main.py"],
+                required_artifacts=["backend/main.py"],
+            ),
+            PlannedTask(
+                id="api-routes",
+                title="Build API routes",
+                description="Create API route behavior.",
+                role="implementer",
+                acceptance_criteria=["API route returns VALUE"],
+                target_files=["backend/main.py"],
+                required_artifacts=["backend/main.py"],
+            ),
+        ],
+    )
+
+    validation = JobRunner._build_task_graph_validation(
+        task_graph,
+        require_acceptance_criteria=True,
+        require_task_artifacts=True,
+    )
+
+    assert validation["valid"] is False
+    assert validation["unordered_target_file_owner_conflicts"] == [
+        {
+            "path": "backend/main.py",
+            "task_ids": ["api-core", "api-routes"],
+            "unordered_task_pairs": [
+                {"first_task_id": "api-core", "second_task_id": "api-routes"}
+            ],
+        }
+    ]
+    assert {
+        "type": "unordered_target_file_owner_conflicts",
+        "items": validation["unordered_target_file_owner_conflicts"],
+    } in validation["errors"]
+
+
+def test_task_graph_validation_allows_ordered_shared_target_files() -> None:
+    task_graph = TaskGraph(
+        goal="Build feature",
+        tasks=[
+            PlannedTask(
+                id="project-scaffold",
+                title="Create project scaffold",
+                description="Create the base app scaffold.",
+                role="scaffold",
+                acceptance_criteria=["Base app scaffold exists"],
+                target_files=["frontend/src/App.tsx"],
+                required_artifacts=["frontend/src/App.tsx"],
+            ),
+            PlannedTask(
+                id="frontend-ui",
+                title="Build frontend UI",
+                description="Implement frontend UI behavior.",
+                role="implementer",
+                depends_on=["project-scaffold"],
+                acceptance_criteria=["Frontend UI renders VALUE"],
+                target_files=["frontend/src/App.tsx"],
+                required_artifacts=["frontend/src/App.tsx"],
+            ),
+        ],
+    )
+
+    validation = JobRunner._build_task_graph_validation(
+        task_graph,
+        require_acceptance_criteria=True,
+        require_task_artifacts=True,
+    )
+
+    assert validation["valid"] is True
+    assert validation["unordered_target_file_owner_conflicts"] == []
+
+
 def test_task_graph_validation_rejects_placeholder_task_artifacts() -> None:
     task_graph = TaskGraph(
         goal="Build feature",
