@@ -55,6 +55,11 @@ _TASK_GRAPH_FINGERPRINT_FIELDS = (
     "target_files",
     "required_artifacts",
 )
+_PRD_VALIDATION_FINGERPRINT_FIELDS = (
+    "small_parts",
+    "acceptance_tests",
+    "required_artifacts",
+)
 _MISSING = object()
 
 
@@ -71,6 +76,20 @@ def task_graph_validation_fingerprint(
     ]
     payload = json.dumps(
         canonical_tasks,
+        ensure_ascii=True,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def prd_validation_fingerprint(prd: Mapping[str, Any]) -> str:
+    """Return a stable fingerprint for PRD fields covered by task validation."""
+    payload = json.dumps(
+        {
+            field: _fingerprint_value(prd.get(field))
+            for field in _PRD_VALIDATION_FINGERPRINT_FIELDS
+        },
         ensure_ascii=True,
         separators=(",", ":"),
         sort_keys=True,
@@ -101,5 +120,6 @@ def _fingerprint_value(value: Any) -> Any:
 __all__ = [
     "TASK_GRAPH_VALIDATION_CONTEXT_KEYS",
     "TASK_GRAPH_VALIDATION_DETAIL_KEYS",
+    "prd_validation_fingerprint",
     "task_graph_validation_fingerprint",
 ]

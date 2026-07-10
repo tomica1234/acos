@@ -10,7 +10,10 @@ from packages.orchestrator.completion_verifier import DefinitionOfDoneVerifier
 from packages.orchestrator.job_runner import JobRunner
 from packages.orchestrator.job_store import InMemoryJobStore
 from packages.orchestrator.policy import PolicyEngine
-from packages.orchestrator.task_graph_validation import task_graph_validation_fingerprint
+from packages.orchestrator.task_graph_validation import (
+    prd_validation_fingerprint,
+    task_graph_validation_fingerprint,
+)
 from packages.schemas.agent_outputs import (
     ArchitecturePlan,
     FixResult,
@@ -3025,6 +3028,52 @@ def test_task_graph_validation_requires_task_artifacts_when_requested() -> None:
         {"type": "missing_required_artifacts", "task_ids": ["core"]},
         {"type": "missing_implementation_target_files", "task_ids": ["core"]},
     ]
+
+
+def test_task_graph_validation_records_prd_fingerprint_when_prd_is_present() -> None:
+    prd = PRD(
+        title="Feature",
+        problem_statement="Need feature",
+        small_parts=["Build the core feature"],
+        acceptance_tests=["VALUE equals 1"],
+        required_artifacts=["feature.py", "tests/test_feature.py"],
+    )
+    task_graph = TaskGraph(
+        goal="Build feature",
+        tasks=[
+            PlannedTask(
+                id="core",
+                title="Build core",
+                description="Build the smallest feature.",
+                role="implementer",
+                acceptance_criteria=["VALUE equals 1"],
+                target_files=["feature.py"],
+                required_artifacts=["feature.py"],
+            ),
+            PlannedTask(
+                id="core-tests",
+                title="Core tests",
+                description="Cover the core feature.",
+                role="test_writer",
+                depends_on=["core"],
+                acceptance_criteria=["VALUE equals 1"],
+                target_files=["tests/test_feature.py"],
+                required_artifacts=["tests/test_feature.py"],
+            ),
+        ],
+    )
+
+    validation = JobRunner._build_task_graph_validation(
+        task_graph,
+        prd=prd,
+        require_acceptance_criteria=True,
+        require_task_artifacts=True,
+    )
+
+    assert validation["valid"] is True
+    assert validation["prd_fingerprint"] == prd_validation_fingerprint(
+        prd.model_dump(mode="json")
+    )
 
 
 def test_task_graph_validation_rejects_implementation_artifacts_without_targets() -> None:

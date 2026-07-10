@@ -52,6 +52,7 @@ from packages.orchestrator.states import apply_transition
 from packages.orchestrator.task_graph_validation import (
     TASK_GRAPH_VALIDATION_CONTEXT_KEYS as TASK_GRAPH_VALIDATION_CONTEXT_KEYS_SOURCE,
     TASK_GRAPH_VALIDATION_DETAIL_KEYS as TASK_GRAPH_VALIDATION_DETAIL_KEYS_SOURCE,
+    prd_validation_fingerprint,
     task_graph_validation_fingerprint,
 )
 from packages.schemas.approvals import ApprovalStatus, PolicyAction
@@ -6089,6 +6090,11 @@ class JobRunner:
             "implementation_task_ids": implementation_task_ids,
             "test_writer_task_ids": test_writer_task_ids,
             "executable_task_ids": executable_task_ids,
+            "prd_fingerprint": (
+                prd_validation_fingerprint(prd.model_dump(mode="json"))
+                if prd is not None
+                else None
+            ),
             "task_graph_fingerprint": task_graph_validation_fingerprint(
                 [task.model_dump(mode="json") for task in task_graph.tasks]
             ),
