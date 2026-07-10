@@ -720,6 +720,8 @@ def test_summarize_job_progress_reports_ready_for_large_autonomy(tmp_path) -> No
             "executable_tasks_have_artifacts": True,
             "invalid_task_artifact_count": 0,
             "unsupported_task_role_count": 0,
+            "invalid_task_id_count": 0,
+            "duplicate_task_id_count": 0,
             "generic_task_acceptance_criteria_count": 0,
             "require_prd_quality": True,
             "require_task_acceptance_criteria": True,
@@ -1310,6 +1312,106 @@ def test_summarize_job_progress_blocks_stale_valid_graph_with_unsupported_role(
     assert payload["autonomy_readiness"]["checks"][
         "require_executable_task_roles"
     ] is True
+
+
+def test_summarize_job_progress_blocks_stale_valid_graph_with_invalid_task_id(
+    tmp_path,
+) -> None:
+    task_graph = TaskGraph(
+        goal="Build incrementally",
+        tasks=[
+            PlannedTask(
+                id="Task 1",
+                title="Core",
+                description="Build core",
+                role="implementer",
+                acceptance_criteria=["VALUE equals 1"],
+                target_files=["feature.py"],
+                required_artifacts=["feature.py"],
+            ),
+        ],
+    )
+    spec = JobSpec(
+        job_id="autonomy-stale-invalid-task-id-job",
+        request_text="Build it carefully",
+        repo_path=str(tmp_path),
+        metadata={"constraints": {"require_task_acceptance_criteria": True}},
+    )
+    record = JobRecord(job_id=spec.job_id, spec=spec, status=JobStatus.TESTING)
+    record.outputs["task_graph"] = task_graph.model_dump()
+    record.outputs["task_graph_validation"] = {
+        "valid": True,
+        "task_count": 1,
+        "implementation_task_count": 1,
+        "invalid_task_ids": [],
+        "errors": [],
+    }
+
+    payload = summarize_job_progress(record)
+
+    assert payload["autonomy_readiness"]["ready"] is False
+    assert {
+        "type": "invalid_task_ids",
+        "items": [
+            {
+                "task_id": "Task 1",
+                "role": "implementer",
+                "reason": "unsafe_task_id_format",
+            }
+        ],
+    } in payload["autonomy_readiness"]["blocking_items"]
+    assert payload["autonomy_readiness"]["checks"]["invalid_task_id_count"] == 1
+
+
+def test_summarize_job_progress_blocks_stale_valid_graph_with_duplicate_task_ids(
+    tmp_path,
+) -> None:
+    task_graph = TaskGraph(
+        goal="Build incrementally",
+        tasks=[
+            PlannedTask(
+                id="core",
+                title="Core",
+                description="Build core",
+                role="implementer",
+                acceptance_criteria=["VALUE equals 1"],
+                target_files=["feature.py"],
+                required_artifacts=["feature.py"],
+            ),
+            PlannedTask(
+                id="core",
+                title="Extra core",
+                description="Build another core task.",
+                role="implementer",
+                acceptance_criteria=["VALUE equals 2"],
+                target_files=["extra.py"],
+                required_artifacts=["extra.py"],
+            ),
+        ],
+    )
+    spec = JobSpec(
+        job_id="autonomy-stale-duplicate-task-id-job",
+        request_text="Build it carefully",
+        repo_path=str(tmp_path),
+        metadata={"constraints": {"require_completion_integrity": True}},
+    )
+    record = JobRecord(job_id=spec.job_id, spec=spec, status=JobStatus.TESTING)
+    record.outputs["task_graph"] = task_graph.model_dump()
+    record.outputs["task_graph_validation"] = {
+        "valid": True,
+        "task_count": 2,
+        "duplicate_task_ids": [],
+        "errors": [],
+    }
+
+    payload = summarize_job_progress(record)
+
+    assert payload["autonomy_readiness"]["ready"] is False
+    assert {
+        "type": "duplicate_task_ids",
+        "task_ids": ["core"],
+    } in payload["autonomy_readiness"]["blocking_items"]
+    assert payload["autonomy_readiness"]["checks"]["duplicate_task_id_count"] == 1
 
 
 def test_summarize_job_progress_recommends_planning_repair_for_prd_quality_gate(

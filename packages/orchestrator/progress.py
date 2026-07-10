@@ -1308,6 +1308,26 @@ def _autonomy_readiness(
         and isinstance(task.get("role"), str)
         and task.get("role") not in executable_roles
     ]
+    task_ids = [
+        task["id"] for task in planned_tasks if isinstance(task.get("id"), str)
+    ]
+    duplicate_task_ids = _duplicate_strings(task_ids)
+    invalid_task_ids = []
+    for task in planned_tasks:
+        task_id = task.get("id")
+        if not isinstance(task_id, str):
+            continue
+        reason = _invalid_task_id_reason(task_id)
+        if reason:
+            invalid_task_ids.append(
+                {
+                    "task_id": task_id,
+                    "role": (
+                        task.get("role") if isinstance(task.get("role"), str) else ""
+                    ),
+                    "reason": reason,
+                }
+            )
     generic_task_acceptance_criteria = []
     for task in executable_tasks:
         task_id = task.get("id")
@@ -1449,6 +1469,20 @@ def _autonomy_readiness(
                 "allowed_roles": sorted(executable_roles),
             }
         )
+    if strict_controls_enabled and invalid_task_ids:
+        blocking_items.append(
+            {
+                "type": "invalid_task_ids",
+                "items": invalid_task_ids,
+            }
+        )
+    if duplicate_task_ids:
+        blocking_items.append(
+            {
+                "type": "duplicate_task_ids",
+                "task_ids": duplicate_task_ids,
+            }
+        )
 
     return {
         "ready": not blocking_items,
@@ -1468,6 +1502,8 @@ def _autonomy_readiness(
             "executable_tasks_have_artifacts": executable_tasks_have_artifacts,
             "invalid_task_artifact_count": len(invalid_task_artifacts),
             "unsupported_task_role_count": len(unsupported_task_roles),
+            "invalid_task_id_count": len(invalid_task_ids),
+            "duplicate_task_id_count": len(duplicate_task_ids),
             "generic_task_acceptance_criteria_count": len(
                 generic_task_acceptance_criteria
             ),
@@ -1507,6 +1543,26 @@ def _meaningful_task_acceptance_criteria(value: object) -> list[str]:
 
 def _looks_like_placeholder_planning_item(item: str) -> bool:
     return looks_like_placeholder_planning_item(item)
+
+
+def _invalid_task_id_reason(task_id: str) -> str | None:
+    raw = str(task_id)
+    value = raw.strip()
+    if _looks_like_placeholder_planning_item(value):
+        return "placeholder"
+    if raw != value or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]*", value):
+        return "unsafe_task_id_format"
+    return None
+
+
+def _duplicate_strings(items: list[str]) -> list[str]:
+    seen: set[str] = set()
+    duplicates: set[str] = set()
+    for item in items:
+        if item in seen:
+            duplicates.add(item)
+        seen.add(item)
+    return sorted(duplicates)
 
 
 def _looks_like_generic_task_acceptance_criterion(criterion: str) -> bool:
