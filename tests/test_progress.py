@@ -719,6 +719,7 @@ def test_summarize_job_progress_reports_ready_for_large_autonomy(tmp_path) -> No
             "implementation_tasks_have_artifacts": True,
             "executable_tasks_have_artifacts": True,
             "invalid_task_artifact_count": 0,
+            "generic_task_acceptance_criteria_count": 0,
             "require_prd_quality": True,
             "require_task_acceptance_criteria": True,
             "require_task_artifacts": True,
@@ -817,6 +818,76 @@ def test_summarize_job_progress_blocks_autonomy_without_test_writer_acceptance(
     assert payload["autonomy_readiness"]["checks"][
         "implementation_tasks_have_acceptance_criteria"
     ] is True
+    assert payload["autonomy_readiness"]["checks"][
+        "test_writer_tasks_have_acceptance_criteria"
+    ] is False
+
+
+def test_summarize_job_progress_blocks_stale_valid_graph_with_generic_acceptance(
+    tmp_path,
+) -> None:
+    task_graph = TaskGraph(
+        goal="Build incrementally",
+        tasks=[
+            PlannedTask(
+                id="core",
+                title="Core",
+                description="Build core",
+                role="implementer",
+                acceptance_criteria=["All tests pass"],
+                target_files=["feature.py"],
+                required_artifacts=["feature.py"],
+            ),
+            PlannedTask(
+                id="tests",
+                title="Regression tests",
+                description="Test core",
+                role="test_writer",
+                depends_on=["core"],
+                acceptance_criteria=["Tests pass"],
+                target_files=["tests/test_feature.py"],
+                required_artifacts=["tests/test_feature.py"],
+            ),
+        ],
+    )
+    spec = JobSpec(
+        job_id="autonomy-generic-acceptance-job",
+        request_text="Build it carefully",
+        repo_path=str(tmp_path),
+        metadata={"constraints": {"require_task_acceptance_criteria": True}},
+    )
+    record = JobRecord(job_id=spec.job_id, spec=spec, status=JobStatus.TESTING)
+    record.outputs["task_graph"] = task_graph.model_dump()
+    record.outputs["task_graph_validation"] = {
+        "valid": True,
+        "task_count": 2,
+        "implementation_task_count": 1,
+        "implementation_task_acceptance_criteria_count": 1,
+        "test_writer_task_acceptance_criteria_count": 1,
+        "errors": [],
+    }
+
+    payload = summarize_job_progress(record)
+
+    assert payload["autonomy_readiness"]["ready"] is False
+    assert {
+        "type": "generic_task_acceptance_criteria",
+        "items": [
+            {
+                "task_id": "core",
+                "role": "implementer",
+                "acceptance_criteria": "All tests pass",
+            },
+            {
+                "task_id": "tests",
+                "role": "test_writer",
+                "acceptance_criteria": "Tests pass",
+            },
+        ],
+    } in payload["autonomy_readiness"]["blocking_items"]
+    assert payload["autonomy_readiness"]["checks"][
+        "implementation_tasks_have_acceptance_criteria"
+    ] is False
     assert payload["autonomy_readiness"]["checks"][
         "test_writer_tasks_have_acceptance_criteria"
     ] is False

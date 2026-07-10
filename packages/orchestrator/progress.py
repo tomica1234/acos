@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import re
 from typing import Any
 
 from packages.orchestrator.job_constraints import STRICT_JOB_CONSTRAINTS
@@ -1295,11 +1296,28 @@ def _autonomy_readiness(
     executable_tasks = [
         task for task in planned_tasks if task.get("role") in executable_roles
     ]
+    generic_task_acceptance_criteria = []
+    for task in executable_tasks:
+        task_id = task.get("id")
+        role = task.get("role")
+        if not isinstance(task_id, str) or not isinstance(role, str):
+            continue
+        for criterion in _non_empty_strings(task.get("acceptance_criteria")):
+            if _looks_like_placeholder_planning_item(criterion):
+                continue
+            if _looks_like_generic_task_acceptance_criterion(criterion):
+                generic_task_acceptance_criteria.append(
+                    {
+                        "task_id": task_id,
+                        "role": role,
+                        "acceptance_criteria": criterion,
+                    }
+                )
     missing_acceptance_task_ids = [
         task["id"]
         for task in implementation_tasks
         if isinstance(task.get("id"), str)
-        and not _non_empty_strings(task.get("acceptance_criteria"))
+        and not _meaningful_task_acceptance_criteria(task.get("acceptance_criteria"))
     ]
     implementation_tasks_have_acceptance_criteria = (
         None if not implementation_tasks else not missing_acceptance_task_ids
@@ -1308,7 +1326,7 @@ def _autonomy_readiness(
         task["id"]
         for task in test_writer_tasks
         if isinstance(task.get("id"), str)
-        and not _non_empty_strings(task.get("acceptance_criteria"))
+        and not _meaningful_task_acceptance_criteria(task.get("acceptance_criteria"))
     ]
     test_writer_tasks_have_acceptance_criteria = (
         None
@@ -1390,6 +1408,13 @@ def _autonomy_readiness(
                 "task_ids": missing_test_writer_acceptance_task_ids,
             }
         )
+    if require_acceptance_criteria and generic_task_acceptance_criteria:
+        blocking_items.append(
+            {
+                "type": "generic_task_acceptance_criteria",
+                "items": generic_task_acceptance_criteria,
+            }
+        )
     if require_task_artifacts and missing_artifact_task_ids:
         blocking_items.append(
             {
@@ -1422,6 +1447,9 @@ def _autonomy_readiness(
             "implementation_tasks_have_artifacts": implementation_tasks_have_artifacts,
             "executable_tasks_have_artifacts": executable_tasks_have_artifacts,
             "invalid_task_artifact_count": len(invalid_task_artifacts),
+            "generic_task_acceptance_criteria_count": len(
+                generic_task_acceptance_criteria
+            ),
             "require_prd_quality": require_prd_quality,
             "require_task_acceptance_criteria": require_acceptance_criteria,
             "require_task_artifacts": require_task_artifacts,
@@ -1444,6 +1472,116 @@ def _non_empty_strings(value: object) -> list[str]:
     if not isinstance(value, list):
         return []
     return [item.strip() for item in value if isinstance(item, str) and item.strip()]
+
+
+def _meaningful_task_acceptance_criteria(value: object) -> list[str]:
+    return [
+        item
+        for item in _non_empty_strings(value)
+        if not _looks_like_placeholder_planning_item(item)
+        and not _looks_like_generic_task_acceptance_criterion(item)
+    ]
+
+
+def _looks_like_placeholder_planning_item(item: str) -> bool:
+    value = " ".join(str(item).split())
+    if not value:
+        return True
+    lowered = value.lower().strip(" .:-_[]()")
+    compact = re.sub(r"[^a-z0-9]+", "", lowered)
+    if not compact:
+        return True
+    exact_placeholders = {
+        "coming soon",
+        "fill in later",
+        "fill me in",
+        "fixme",
+        "n/a",
+        "na",
+        "none",
+        "none known",
+        "not applicable",
+        "not specified",
+        "placeholder",
+        "tbd",
+        "to be decided",
+        "to be defined",
+        "to be determined",
+        "todo",
+        "unknown",
+        "unspecified",
+    }
+    compact_placeholders = {
+        "comingsoon",
+        "fillinlater",
+        "fillmein",
+        "fixme",
+        "na",
+        "none",
+        "noneknown",
+        "notapplicable",
+        "notspecified",
+        "placeholder",
+        "tbd",
+        "tobedecided",
+        "tobedefined",
+        "tobedetermined",
+        "todo",
+        "unknown",
+        "unspecified",
+    }
+    return lowered in exact_placeholders or compact in compact_placeholders
+
+
+def _looks_like_generic_task_acceptance_criterion(criterion: str) -> bool:
+    tokens = set(re.findall(r"[a-z0-9_]+", criterion.lower()))
+    if not tokens:
+        return True
+    generic_tokens = {
+        "a",
+        "all",
+        "an",
+        "app",
+        "application",
+        "as",
+        "acceptance",
+        "automated",
+        "be",
+        "behavior",
+        "behaviour",
+        "check",
+        "checks",
+        "code",
+        "complete",
+        "completed",
+        "correctly",
+        "criteria",
+        "done",
+        "expected",
+        "feature",
+        "functionality",
+        "generated",
+        "implementation",
+        "is",
+        "it",
+        "module",
+        "pass",
+        "passes",
+        "passing",
+        "properly",
+        "should",
+        "screen",
+        "service",
+        "system",
+        "task",
+        "test",
+        "tests",
+        "the",
+        "work",
+        "working",
+        "works",
+    }
+    return tokens <= generic_tokens
 
 
 def _task_artifact_paths(task: dict[str, Any]) -> list[str]:
