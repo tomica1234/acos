@@ -1252,7 +1252,7 @@ class JobRunner:
                 ),
                 "acceptance_criteria": self._unique_paths(
                     [
-                        *task.acceptance_criteria,
+                        *self._meaningful_planning_items(task.acceptance_criteria),
                         f"{missing_target_file} exists and was created with patch.operation=create.",
                     ]
                 ),
@@ -3873,6 +3873,10 @@ class JobRunner:
 
     @classmethod
     def _meaningful_prd_items(cls, items: list[str]) -> list[str]:
+        return cls._meaningful_planning_items(items)
+
+    @classmethod
+    def _meaningful_planning_items(cls, items: list[str]) -> list[str]:
         return [
             item
             for item in cls._non_empty_items(items)
@@ -4180,7 +4184,7 @@ class JobRunner:
                 continue
             updates: dict[str, Any] = {}
             if (
-                not self._non_empty_items(task.acceptance_criteria)
+                not self._meaningful_planning_items(task.acceptance_criteria)
                 and (acceptance_tests or definition_of_done)
             ):
                 criteria = self._criteria_for_task_from_prd(
@@ -4487,7 +4491,7 @@ class JobRunner:
                             "role": "scaffold",
                             "target_files": artifacts,
                             "required_artifacts": artifacts,
-                            "acceptance_criteria": self._non_empty_items(
+                            "acceptance_criteria": self._meaningful_planning_items(
                                 task.acceptance_criteria
                             )
                             or [
@@ -5561,7 +5565,7 @@ class JobRunner:
             task.id
             for task in task_graph.tasks
             if task.role in JobRunner.IMPLEMENTATION_TASK_ROLES
-            and not JobRunner._non_empty_items(task.acceptance_criteria)
+            and not JobRunner._meaningful_planning_items(task.acceptance_criteria)
         ]
         if require_acceptance_criteria and tasks_missing_acceptance_criteria:
             errors.append(
@@ -5574,7 +5578,7 @@ class JobRunner:
             task.id
             for task in task_graph.tasks
             if task.role in JobRunner.TEST_TASK_ROLES
-            and not JobRunner._non_empty_items(task.acceptance_criteria)
+            and not JobRunner._meaningful_planning_items(task.acceptance_criteria)
         ]
         if require_acceptance_criteria and test_writer_tasks_missing_acceptance_criteria:
             errors.append(
@@ -5904,7 +5908,7 @@ class JobRunner:
             ]
             uncovered_criteria: list[dict[str, Any]] = []
             for index, criterion in enumerate(
-                JobRunner._non_empty_items(task.acceptance_criteria),
+                JobRunner._meaningful_planning_items(task.acceptance_criteria),
                 start=1,
             ):
                 criterion_tokens = JobRunner._test_writer_acceptance_dependency_tokens(
@@ -6457,7 +6461,9 @@ class JobRunner:
                 task.id,
                 task.title,
                 task.description,
-                " ".join(task.acceptance_criteria),
+                " ".join(
+                    JobRunner._meaningful_planning_items(task.acceptance_criteria)
+                ),
                 " ".join(task.target_files),
                 " ".join(task.required_artifacts),
             ]

@@ -2305,6 +2305,59 @@ def test_job_runner_enriches_multi_task_graph_with_prd_acceptance_criteria(
     assert record.outputs["implementation_task_count"] == 2
 
 
+def test_job_runner_replaces_placeholder_acceptance_criteria_when_enriching(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    registry = ModelRegistry.from_paths(
+        provider_path=config_dir() / "model_providers.yaml",
+        agents_path=config_dir() / "agents.yaml",
+        routing_path=config_dir() / "model_routing.yaml",
+    )
+    policy = PolicyEngine.from_path(config_dir() / "policies.yaml")
+    environment = FakeMCPEnvironment(
+        workspace_root=workspace,
+        memory_db_path=workspace / ".memory.sqlite3",
+    )
+    runner = JobRunner(registry=registry, policy=policy, router=environment.build_router())
+    record = JobRecord(
+        job_id="placeholder-task-criteria-enrichment",
+        spec=JobSpec(
+            job_id="placeholder-task-criteria-enrichment",
+            request_text="Create feature",
+            repo_path=str(workspace),
+        ),
+    )
+    prd = PRD(
+        title="Feature",
+        problem_statement="Need feature",
+        acceptance_tests=["VALUE equals 1"],
+        definition_of_done=["All tests pass"],
+    )
+    task_graph = TaskGraph(
+        goal="Build feature",
+        tasks=[
+            PlannedTask(
+                id="core",
+                title="Build core",
+                description="Build the smallest feature.",
+                role="implementer",
+                acceptance_criteria=["TBD"],
+            )
+        ],
+    )
+
+    refined = runner._enrich_task_graph_acceptance_criteria(record, prd, task_graph)
+
+    assert refined.tasks[0].acceptance_criteria == ["VALUE equals 1"]
+    assert record.outputs["task_graph_acceptance_enrichment"] == {
+        "applied": True,
+        "reason": "filled_missing_task_acceptance_criteria_from_prd",
+        "updated_task_ids": ["core"],
+    }
+
+
 def test_job_runner_preserves_existing_acceptance_criteria_when_enriching_later_tasks(
     tmp_path: Path,
 ) -> None:
@@ -3355,6 +3408,49 @@ def test_task_graph_validation_requires_test_writer_acceptance_criteria() -> Non
         "type": "missing_test_writer_acceptance_criteria",
         "task_ids": ["tests"],
     } in validation["errors"]
+
+
+def test_task_graph_validation_treats_placeholder_acceptance_criteria_as_missing() -> None:
+    task_graph = TaskGraph(
+        goal="Build feature",
+        tasks=[
+            PlannedTask(
+                id="core",
+                title="Build core",
+                description="Build the smallest feature.",
+                role="implementer",
+                acceptance_criteria=["TBD"],
+                target_files=["feature.py"],
+                required_artifacts=["feature.py"],
+            ),
+            PlannedTask(
+                id="tests",
+                title="Test core",
+                description="Add focused regression tests.",
+                role="test_writer",
+                depends_on=["core"],
+                acceptance_criteria=["placeholder"],
+                target_files=["tests/test_feature.py"],
+                required_artifacts=["tests/test_feature.py"],
+            ),
+        ],
+    )
+
+    validation = JobRunner._build_task_graph_validation(
+        task_graph,
+        require_acceptance_criteria=True,
+    )
+
+    assert validation["valid"] is False
+    assert validation["implementation_task_acceptance_criteria_count"] == 0
+    assert validation["test_writer_task_acceptance_criteria_count"] == 0
+    assert validation["executable_task_acceptance_criteria_count"] == 0
+    assert validation["implementation_task_count"] == 1
+    assert validation["test_writer_task_count"] == 1
+    assert validation["errors"] == [
+        {"type": "missing_acceptance_criteria", "task_ids": ["core"]},
+        {"type": "missing_test_writer_acceptance_criteria", "task_ids": ["tests"]},
+    ]
 
 
 def test_task_graph_validation_requires_test_writer_to_cover_prd_acceptance() -> None:
