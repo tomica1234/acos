@@ -653,6 +653,7 @@ class JobRunner:
         if not isinstance(metadata_constraints, dict):
             metadata_constraints = {}
         file_recovery_marker_keys = {
+            "empty_artifacts",
             "missing_target_file",
             "patch_operation_hint",
             "failed_patch_path",
@@ -666,8 +667,15 @@ class JobRunner:
         ):
             return False
         missing_artifacts = plan_constraints.get("missing_artifacts")
-        if isinstance(missing_artifacts, list):
-            return len(missing_artifacts) == 0
+        empty_artifacts = plan_constraints.get("empty_artifacts")
+        if isinstance(missing_artifacts, list) or isinstance(empty_artifacts, list):
+            missing_resolved = (
+                not isinstance(missing_artifacts, list) or len(missing_artifacts) == 0
+            )
+            empty_resolved = (
+                not isinstance(empty_artifacts, list) or len(empty_artifacts) == 0
+            )
+            return missing_resolved and empty_resolved
         candidates: list[str] = []
         for source in (
             plan_constraints.get("missing_target_file"),

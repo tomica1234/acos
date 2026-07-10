@@ -204,6 +204,86 @@ def test_consume_completed_recovery_plan_clears_resolved_file_recovery_constrain
     assert record.spec.metadata["constraints"] == {"max_autonomous_stages": 12}
 
 
+def test_consume_completed_recovery_plan_clears_resolved_empty_artifact_context(
+    tmp_path: Path,
+) -> None:
+    target = "frontend/test/project_scaffold.test.tsx"
+    (tmp_path / target).parent.mkdir(parents=True)
+    (tmp_path / target).write_text(
+        "import { describe, expect, it } from 'vitest'\n",
+        encoding="utf-8",
+    )
+    spec = JobSpec(
+        job_id="consume-resolved-empty-artifact-recovery",
+        request_text="Build it",
+        repo_path=str(tmp_path),
+        workspace_root=str(tmp_path),
+        metadata={
+            "constraints": {
+                "recovery_mode": "required_artifacts_replan",
+                "recovery_strategy": "REPLAN_TASK_WITH_REQUIRED_ARTIFACTS",
+                "recovery_next_actor": "test_writer",
+                "recovery_next_status": JobStatus.WRITING_TESTS.value,
+                "required_artifacts": [target],
+                "target_files": [target],
+                "missing_artifacts": [],
+                "empty_artifacts": [],
+                "max_autonomous_stages": 12,
+            }
+        },
+    )
+    record = JobRecord(job_id=spec.job_id, spec=spec, status=JobStatus.WRITING_TESTS)
+    record.last_error = f"completion_integrity_failed:target_file_empty:{target}"
+    record.runtime_state.update(
+        {
+            "current_recovery_event": {
+                "error": f"completion_integrity_failed:target_file_empty:{target}",
+            },
+            "last_recoverable_error": (
+                f"completion_integrity_failed:target_file_empty:{target}"
+            ),
+            "empty_artifacts": [],
+            "missing_artifacts": [],
+            "recovery_plan": {
+                "status": "completed",
+                "next_status": JobStatus.WRITING_TESTS.value,
+                "constraints": {
+                    "required_artifacts": [target],
+                    "target_files": [target],
+                    "missing_artifacts": [],
+                    "empty_artifacts": [],
+                    "deterministic_creation_attempted": True,
+                    "deterministically_created_files": [target],
+                },
+            },
+        }
+    )
+    record.outputs["last_recoverable_error"] = (
+        f"completion_integrity_failed:target_file_empty:{target}"
+    )
+
+    JobRunner._consume_completed_recovery_plan(record)
+
+    assert record.last_error is None
+    assert record.runtime_state["recovery_plan"]["consumed_by_runner"] is True
+    assert "current_recovery_event" not in record.runtime_state
+    assert "last_recoverable_error" not in record.runtime_state
+    assert "last_recoverable_error" not in record.outputs
+    for stale_key in (
+        "empty_artifacts",
+        "missing_artifacts",
+        "deterministic_creation_attempted",
+        "deterministically_created_files",
+    ):
+        assert stale_key not in record.runtime_state
+        assert stale_key not in record.spec.metadata["constraints"]
+    assert record.spec.metadata["constraints"] == {
+        "required_artifacts": [target],
+        "target_files": [target],
+        "max_autonomous_stages": 12,
+    }
+
+
 def test_consume_completed_recovery_plan_keeps_unresolved_missing_file_context(
     tmp_path: Path,
 ) -> None:
