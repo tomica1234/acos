@@ -1330,6 +1330,30 @@ def _autonomy_readiness(
                     "reason": reason,
                 }
             )
+    invalid_task_titles = [
+        {
+            "task_id": task["id"],
+            "role": task["role"],
+            "title": task["title"],
+        }
+        for task in executable_tasks
+        if isinstance(task.get("id"), str)
+        and isinstance(task.get("role"), str)
+        and isinstance(task.get("title"), str)
+        and _looks_like_placeholder_planning_item(task["title"])
+    ]
+    invalid_task_descriptions = [
+        {
+            "task_id": task["id"],
+            "role": task["role"],
+            "description": task["description"],
+        }
+        for task in executable_tasks
+        if isinstance(task.get("id"), str)
+        and isinstance(task.get("role"), str)
+        and isinstance(task.get("description"), str)
+        and _looks_like_placeholder_planning_item(task["description"])
+    ]
     generic_task_acceptance_criteria = []
     for task in executable_tasks:
         task_id = task.get("id")
@@ -1478,6 +1502,20 @@ def _autonomy_readiness(
                 "items": invalid_task_ids,
             }
         )
+    if strict_controls_enabled and invalid_task_titles:
+        blocking_items.append(
+            {
+                "type": "invalid_task_titles",
+                "items": invalid_task_titles,
+            }
+        )
+    if strict_controls_enabled and invalid_task_descriptions:
+        blocking_items.append(
+            {
+                "type": "invalid_task_descriptions",
+                "items": invalid_task_descriptions,
+            }
+        )
     if duplicate_task_ids:
         blocking_items.append(
             {
@@ -1519,6 +1557,8 @@ def _autonomy_readiness(
             "invalid_task_artifact_count": len(invalid_task_artifacts),
             "unsupported_task_role_count": len(unsupported_task_roles),
             "invalid_task_id_count": len(invalid_task_ids),
+            "invalid_task_title_count": len(invalid_task_titles),
+            "invalid_task_description_count": len(invalid_task_descriptions),
             "duplicate_task_id_count": len(duplicate_task_ids),
             "unknown_dependency_count": len(unknown_dependencies),
             "dependency_cycle_task_count": len(dependency_cycle_task_ids),
