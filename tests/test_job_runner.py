@@ -9082,6 +9082,77 @@ def test_job_runner_blocks_prd_quality_when_acceptance_tests_are_not_observable(
     assert "architect" not in record.outputs
 
 
+def test_job_runner_blocks_prd_quality_when_acceptance_tests_only_say_can_use_app(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    registry = ModelRegistry.from_paths(
+        provider_path=config_dir() / "model_providers.yaml",
+        agents_path=config_dir() / "agents.yaml",
+        routing_path=config_dir() / "model_routing.yaml",
+    )
+    attach_mock_adapter(
+        registry,
+        {
+            "pm": PRD(
+                title="Vocabulary practice",
+                problem_statement="Need a vocabulary practice session.",
+                smallest_working_core=["Vocabulary practice session"],
+                small_parts=["Build vocabulary practice session"],
+                incremental_milestones=[
+                    "Vocabulary practice session works and is ready for focused tests"
+                ],
+                acceptance_tests=["User can use the vocabulary practice session"],
+                definition_of_done=["All tests pass"],
+                required_artifacts=[
+                    "frontend/src/vocabulary_practice.tsx",
+                    "frontend/test/vocabulary_practice.test.tsx",
+                ],
+            ).model_dump(),
+            "architect": ArchitecturePlan(summary="Should not run").model_dump(),
+        },
+    )
+    policy = PolicyEngine.from_path(config_dir() / "policies.yaml")
+    environment = FakeMCPEnvironment(
+        workspace_root=workspace,
+        memory_db_path=workspace / ".memory.sqlite3",
+    )
+    runner = JobRunner(registry=registry, policy=policy, router=environment.build_router())
+    spec = JobSpec(
+        request_text="Create a vocabulary practice app",
+        repo_path=str(workspace),
+        target_branch="acos/weak-modal-acceptance",
+        metadata={
+            "constraints": {
+                "require_prd_quality": True,
+                "prd_quality_refinement_attempts": 0,
+            }
+        },
+    )
+
+    record = runner.run_job(spec)
+
+    assert_recovery_plan(
+        record,
+        status=JobStatus.ANALYZING,
+        strategy="REVISE_PRD_AND_ARCHITECTURE",
+    )
+    assert_recoverable_error(
+        record,
+        "prd_quality_gate_failed:acceptance_tests_observable",
+    )
+    report = record.outputs["prd_quality"]
+    assert report["missing"] == ["acceptance_tests_observable"]
+    assert report["non_observable_acceptance_tests"] == [
+        {
+            "acceptance_test_index": 1,
+            "acceptance_test": "User can use the vocabulary practice session",
+        }
+    ]
+    assert "architect" not in record.outputs
+
+
 def test_job_runner_blocks_prd_quality_when_incremental_milestones_do_not_cover_parts(
     tmp_path: Path,
 ) -> None:

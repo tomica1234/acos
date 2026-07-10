@@ -3183,14 +3183,13 @@ class JobRunner:
         tokens = set(re.findall(r"[a-z0-9_]+", lowered))
         if JobRunner._looks_like_generic_acceptance_test(tokens):
             return False
-        observable_tokens = {
+        strong_observable_tokens = {
             "accepts",
             "assert",
             "asserts",
-            "available",
-            "can",
             "contains",
             "created",
+            "creates",
             "delete",
             "deletes",
             "display",
@@ -3212,6 +3211,8 @@ class JobRunner:
             "persists",
             "read",
             "rejects",
+            "register",
+            "registers",
             "render",
             "rendered",
             "renders",
@@ -3221,16 +3222,72 @@ class JobRunner:
             "shows",
             "stores",
             "successfully",
-            "supports",
             "tracks",
             "update",
             "updates",
             "validates",
             "verified",
             "verify",
+        }
+        weak_modal_tokens = {
+            "available",
+            "can",
+            "support",
+            "supports",
+            "use",
+            "uses",
+            "using",
             "visible",
         }
-        if tokens & observable_tokens:
+        concrete_user_action_tokens = {
+            "answer",
+            "answers",
+            "authenticate",
+            "authenticates",
+            "choose",
+            "chooses",
+            "complete",
+            "completes",
+            "crud",
+            "download",
+            "downloads",
+            "filter",
+            "filters",
+            "finish",
+            "finishes",
+            "login",
+            "logout",
+            "manage",
+            "manages",
+            "navigate",
+            "navigates",
+            "open",
+            "opens",
+            "perform",
+            "performs",
+            "register",
+            "registers",
+            "save",
+            "saves",
+            "search",
+            "searches",
+            "select",
+            "selects",
+            "sign",
+            "signin",
+            "signup",
+            "start",
+            "starts",
+            "submit",
+            "submits",
+            "take",
+            "takes",
+            "upload",
+            "uploads",
+        }
+        if tokens & strong_observable_tokens:
+            return True
+        if tokens & weak_modal_tokens and tokens & concrete_user_action_tokens:
             return True
         return False
 
