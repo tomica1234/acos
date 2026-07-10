@@ -583,8 +583,12 @@ def _resolved_stage_status(
     post_review_success: Any,
 ) -> str:
     explicit_status = _explicit_stage_status(stage)
-    if explicit_status is not None:
+    if explicit_status in {"failed", "superseded"}:
         return explicit_status
+    if test_success is False or post_review_success is False:
+        return "failed"
+    if explicit_status == "passed":
+        return "passed"
     return _stage_status(test_success, post_review_success)
 
 
