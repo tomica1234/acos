@@ -5531,6 +5531,19 @@ class JobRunner:
             for task in executable_tasks
             if JobRunner._looks_like_placeholder_prd_item(task.description)
         ]
+        duplicate_task_acceptance_criteria = [
+            {
+                "task_id": task.id,
+                "role": task.role,
+                "duplicates": duplicates,
+            }
+            for task in executable_tasks
+            if (
+                duplicates := JobRunner._duplicate_planning_items(
+                    JobRunner._meaningful_planning_items(task.acceptance_criteria)
+                )
+            )
+        ]
         small_part_coverage = JobRunner._semantic_task_coverage(
             implementation_small_parts,
             implementation_tasks,
@@ -5810,6 +5823,13 @@ class JobRunner:
                     "task_ids": test_writer_tasks_missing_acceptance_criteria,
                 }
             )
+        if require_acceptance_criteria and duplicate_task_acceptance_criteria:
+            errors.append(
+                {
+                    "type": "duplicate_task_acceptance_criteria",
+                    "items": duplicate_task_acceptance_criteria,
+                }
+            )
         tasks_missing_artifacts = [
             task.id
             for task in task_graph.tasks
@@ -6005,6 +6025,9 @@ class JobRunner:
             ),
             "test_writer_tasks_missing_acceptance_criteria": (
                 test_writer_tasks_missing_acceptance_criteria
+            ),
+            "duplicate_task_acceptance_criteria": (
+                duplicate_task_acceptance_criteria
             ),
             "implementation_tasks_missing_target_files": (
                 implementation_tasks_missing_target_files

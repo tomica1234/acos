@@ -3571,6 +3571,51 @@ def test_task_graph_validation_treats_placeholder_acceptance_criteria_as_missing
     ]
 
 
+def test_task_graph_validation_rejects_duplicate_task_acceptance_criteria() -> None:
+    task_graph = TaskGraph(
+        goal="Build feature",
+        tasks=[
+            PlannedTask(
+                id="core",
+                title="Build core",
+                description="Create feature module.",
+                role="implementer",
+                acceptance_criteria=[
+                    "VALUE equals 1",
+                    "value equals 1",
+                ],
+                target_files=["feature.py"],
+                required_artifacts=["feature.py"],
+            )
+        ],
+    )
+
+    validation = JobRunner._build_task_graph_validation(
+        task_graph,
+        require_acceptance_criteria=True,
+        require_task_artifacts=True,
+    )
+
+    assert validation["valid"] is False
+    assert validation["duplicate_task_acceptance_criteria"] == [
+        {
+            "task_id": "core",
+            "role": "implementer",
+            "duplicates": [
+                {
+                    "item": "VALUE equals 1",
+                    "first_index": 1,
+                    "duplicate_indices": [2],
+                }
+            ],
+        }
+    ]
+    assert {
+        "type": "duplicate_task_acceptance_criteria",
+        "items": validation["duplicate_task_acceptance_criteria"],
+    } in validation["errors"]
+
+
 def test_task_graph_validation_rejects_placeholder_task_title_and_description() -> None:
     task_graph = TaskGraph(
         goal="Build feature",
