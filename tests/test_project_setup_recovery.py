@@ -1733,6 +1733,147 @@ def test_failed_stage_enters_recovery_without_marking_task_complete(
     )
 
 
+def test_completed_task_missing_artifact_recovers_before_test_writer(
+    tmp_path: Path,
+) -> None:
+    test_path = "tests/test_feature.py"
+    runner, _environment, record = _runner(
+        tmp_path,
+        scenario={
+            "test_writer": TestWriterResult(
+                summary="Should not run while completed implementation artifact is missing.",
+                changed_files=[test_path],
+                patches=[
+                    FilePatch(
+                        path=test_path,
+                        operation="create",
+                        content=(
+                            "def test_should_not_be_written() -> None:\n"
+                            "    assert 'missing artifact' in 'missing artifact'\n"
+                        ),
+                    )
+                ],
+            ).model_dump(),
+        },
+        scripted_test_results=[TestRunResult(success=True)],
+    )
+    core = PlannedTask(
+        id="core",
+        title="Core feature",
+        description="Create the feature implementation.",
+        role="implementer",
+        target_files=["feature.py"],
+        required_artifacts=["feature.py"],
+    )
+    core_tests = PlannedTask(
+        id="core-tests",
+        title="Core feature tests",
+        description="Test the feature implementation.",
+        role="test_writer",
+        depends_on=["core"],
+        target_files=[test_path],
+        required_artifacts=[test_path],
+    )
+    task_graph = TaskGraph(goal="Build feature", tasks=[core, core_tests])
+    record.completed_task_ids = ["core"]
+
+    runner._active_record = record
+    try:
+        implementation_results, test_writer_results, _test_result, stages = (
+            runner._run_autonomous_task_loop(record, task_graph)
+        )
+    finally:
+        runner._active_record = None
+
+    assert implementation_results == []
+    assert test_writer_results == []
+    assert stages == []
+    assert not (tmp_path / test_path).exists()
+    assert record.completed_task_ids == []
+    assert record.runtime_state["invalidated_completed_task_ids"] == ["core"]
+    assert record.status == JobStatus.REPLANNING
+    plan = record.runtime_state["recovery_plan"]
+    assert plan["trigger"] == "required_artifacts_missing"
+    assert plan["strategy"] == "REPLAN_TASK_WITH_REQUIRED_ARTIFACTS"
+    assert plan["constraints"]["failed_task_id"] == "core"
+    assert plan["constraints"]["missing_artifacts"] == ["feature.py"]
+
+
+def test_recorded_implementation_missing_artifact_recovers_before_test_writer(
+    tmp_path: Path,
+) -> None:
+    test_path = "tests/test_feature.py"
+    runner, _environment, record = _runner(
+        tmp_path,
+        scenario={
+            "test_writer": TestWriterResult(
+                summary="Should not run while recorded implementation artifact is missing.",
+                changed_files=[test_path],
+                patches=[
+                    FilePatch(
+                        path=test_path,
+                        operation="create",
+                        content=(
+                            "def test_should_not_be_written() -> None:\n"
+                            "    assert 'recorded missing' in 'recorded missing'\n"
+                        ),
+                    )
+                ],
+            ).model_dump(),
+        },
+        scripted_test_results=[TestRunResult(success=True)],
+    )
+    core = PlannedTask(
+        id="core",
+        title="Core feature",
+        description="Create the feature implementation.",
+        role="implementer",
+        target_files=["feature.py"],
+        required_artifacts=["feature.py"],
+    )
+    core_tests = PlannedTask(
+        id="core-tests",
+        title="Core feature tests",
+        description="Test the feature implementation.",
+        role="test_writer",
+        depends_on=["core"],
+        target_files=[test_path],
+        required_artifacts=[test_path],
+    )
+    record.outputs["implementation_tasks"] = [
+        {
+            "task": core.model_dump(),
+            "result": ImplementationResult(
+                status=ImplementationStatus.IMPLEMENTED,
+                summary="Previously recorded implementation.",
+                changed_files=["feature.py"],
+            ).model_dump(),
+        }
+    ]
+    task_graph = TaskGraph(goal="Build feature", tasks=[core, core_tests])
+
+    runner._active_record = record
+    try:
+        implementation_results, test_writer_results, _test_result, stages = (
+            runner._run_autonomous_task_loop(record, task_graph)
+        )
+    finally:
+        runner._active_record = None
+
+    assert [item.summary for item in implementation_results] == [
+        "Previously recorded implementation."
+    ]
+    assert test_writer_results == []
+    assert stages == []
+    assert not (tmp_path / test_path).exists()
+    assert record.status == JobStatus.REPLANNING
+    plan = record.runtime_state["recovery_plan"]
+    assert plan["trigger"] == "required_artifacts_missing"
+    assert plan["strategy"] == "REPLAN_TASK_WITH_REQUIRED_ARTIFACTS"
+    assert plan["constraints"]["failed_task_id"] == "core"
+    assert plan["constraints"]["missing_artifacts"] == ["feature.py"]
+
+
 def test_zero_patch_implementation_stage_is_failed_for_recovery_even_if_tests_pass(
     tmp_path: Path,
 ) -> None:

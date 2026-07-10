@@ -6938,14 +6938,20 @@ class JobRunner:
             list(raw_stage_results) if isinstance(raw_stage_results, list) else []
         )
         completed_task_ids: set[str] = set(record.completed_task_ids)
-        ready_task_ids: set[str] = set(completed_task_ids)
         recorded_implementation_task_ids = self._recorded_task_ids(
             record,
             "implementation_tasks",
             allowed_result_statuses={ImplementationStatus.IMPLEMENTED.value},
         )
-        pending_test_tasks = [task for task in pending_test_tasks if task.id not in completed_task_ids]
         last_test_result = self._synthetic_test_result(success=True, output="No tests run yet.")
+        if not self._ensure_completed_task_artifacts_available(
+            record,
+            task_graph,
+            completed_task_ids,
+        ):
+            return implementation_results, test_writer_results, last_test_result, stage_results
+        ready_task_ids: set[str] = set(completed_task_ids)
+        pending_test_tasks = [task for task in pending_test_tasks if task.id not in completed_task_ids]
 
         if not implementation_tasks and not pending_test_tasks:
             implementation_results = self._run_implementation_tasks(record, task_graph)
@@ -7035,6 +7041,12 @@ class JobRunner:
                         task,
                         unmet_dependencies,
                     )
+                    return implementation_results, test_writer_results, last_test_result, stage_results
+                if not self._ensure_resumed_task_artifacts_available(
+                    record,
+                    task,
+                    source="recorded_implementation_task",
+                ):
                     return implementation_results, test_writer_results, last_test_result, stage_results
                 stage_test_pairs: list[tuple[PlannedTask, TestWriterResult]] = []
                 ready_task_ids.add(task.id)
@@ -7331,6 +7343,138 @@ class JobRunner:
                 "failed_task_id": task.id,
                 "unmet_dependencies": list(unmet_dependencies),
             },
+        )
+
+    def _ensure_completed_task_artifacts_available(
+        self,
+        record: JobRecord,
+        task_graph: TaskGraph,
+        completed_task_ids: set[str],
+    ) -> bool:
+        if not completed_task_ids:
+            return True
+        for task in task_graph.tasks:
+            if task.id not in completed_task_ids:
+                continue
+            if self._unmet_dependencies_for_task(task, completed_task_ids):
+                continue
+            if not self._ensure_resumed_task_artifacts_available(
+                record,
+                task,
+                source="completed_task_id",
+            ):
+                return False
+        return True
+
+    def _ensure_resumed_task_artifacts_available(
+        self,
+        record: JobRecord,
+        task: PlannedTask,
+        *,
+        source: str,
+    ) -> bool:
+        report = self._resumed_task_artifact_report(record, task)
+        if not (
+            report["missing_artifacts"]
+            or report["non_file_artifacts"]
+            or report["empty_artifacts"]
+            or report["invalid_artifacts"]
+        ):
+            return True
+        checks = record.outputs.setdefault("resumed_task_artifact_checks", [])
+        if isinstance(checks, list):
+            checks.append(
+                {
+                    "task_id": task.id,
+                    "role": task.role,
+                    "source": source,
+                    **report,
+                }
+            )
+        runtime_state: dict[str, Any] = {
+            **record.runtime_state,
+            "failed_task_id": task.id,
+            "resumed_task_artifact_source": source,
+        }
+        if report["required_artifacts"]:
+            runtime_state["required_artifacts"] = report["required_artifacts"]
+        if report["target_files"]:
+            runtime_state["target_files"] = report["target_files"]
+        if report["missing_artifacts"]:
+            runtime_state["missing_artifacts"] = report["missing_artifacts"]
+        if report["non_file_artifacts"]:
+            runtime_state["non_file_artifacts"] = report["non_file_artifacts"]
+        if report["empty_artifacts"]:
+            runtime_state["empty_artifacts"] = report["empty_artifacts"]
+        if report["invalid_artifacts"]:
+            runtime_state["invalid_artifacts"] = report["invalid_artifacts"]
+        artifact_failures = self._unique_paths(
+            [
+                *report["missing_artifacts"],
+                *report["non_file_artifacts"],
+                *report["empty_artifacts"],
+                *report["invalid_artifacts"],
+            ]
+        )
+        if self._is_project_setup_task(task) or (
+            artifact_failures
+            and all(path in self.PROJECT_SETUP_REQUIRED_ARTIFACTS for path in artifact_failures)
+        ):
+            runtime_state["force_project_setup_scaffold"] = True
+        self._recover_record(
+            record,
+            error="required_artifacts_missing:resumed_task_artifacts_missing",
+            runtime_state=runtime_state,
+        )
+        return False
+
+    def _resumed_task_artifact_report(
+        self,
+        record: JobRecord,
+        task: PlannedTask,
+    ) -> dict[str, list[str]]:
+        required_artifacts = self._clean_declared_artifact_paths(task.required_artifacts)
+        target_files = self._clean_declared_artifact_paths(task.target_files)
+        declared = self._unique_paths([*required_artifacts, *target_files])
+        invalid_artifacts = self._invalid_planning_artifact_paths(declared)
+        invalid_set = set(invalid_artifacts)
+        root = self._workspace_root(record)
+        missing_artifacts: list[str] = []
+        non_file_artifacts: list[str] = []
+        empty_artifacts: list[str] = []
+        for path in declared:
+            normalized = path.replace("\\", "/").removeprefix("./")
+            if path in invalid_set or normalized in invalid_set:
+                continue
+            target = root / normalized
+            if not target.exists():
+                missing_artifacts.append(normalized)
+                continue
+            if not target.is_file():
+                non_file_artifacts.append(normalized)
+                continue
+            if (
+                target.stat().st_size == 0
+                and Path(normalized).name not in RecoveryExecutor.ALLOW_EMPTY_ARTIFACT_NAMES
+            ):
+                empty_artifacts.append(normalized)
+        return {
+            "required_artifacts": required_artifacts,
+            "target_files": target_files,
+            "missing_artifacts": self._unique_paths(missing_artifacts),
+            "non_file_artifacts": self._unique_paths(non_file_artifacts),
+            "empty_artifacts": self._unique_paths(empty_artifacts),
+            "invalid_artifacts": invalid_artifacts,
+        }
+
+    @staticmethod
+    def _clean_declared_artifact_paths(paths: list[str]) -> list[str]:
+        return JobRunner._unique_paths(
+            [
+                str(path).replace("\\", "/").removeprefix("./").strip()
+                for path in paths
+                if str(path).strip()
+            ]
         )
 
     def _run_ready_test_tasks(
