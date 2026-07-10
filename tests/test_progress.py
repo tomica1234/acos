@@ -836,6 +836,89 @@ def test_summarize_job_progress_ignores_stale_prd_quality_attempts_for_repair(
     }
 
 
+def test_summarize_job_progress_ignores_prd_quality_attempts_from_old_min_small_parts_contract(
+    tmp_path,
+) -> None:
+    prd = {
+        "title": "Feature",
+        "problem_statement": "Need feature",
+        "smallest_working_core": ["Expose VALUE"],
+        "small_parts": ["Create feature module"],
+        "incremental_milestones": ["Module exists"],
+        "acceptance_tests": ["VALUE equals 1"],
+        "definition_of_done": [],
+        "required_artifacts": ["feature.py", "tests/test_feature.py"],
+        "open_questions": [],
+    }
+    fingerprint = prd_quality_fingerprint(prd)
+    spec = JobSpec(
+        job_id="planning-repair-stale-prd-quality-min-parts-job",
+        request_text="Build it carefully",
+        repo_path=str(tmp_path),
+        metadata={"constraints": {"min_prd_small_parts": 0}},
+    )
+    record = JobRecord(job_id=spec.job_id, spec=spec, status=JobStatus.ANALYZING)
+    record.outputs["prd"] = prd
+    record.outputs["prd_quality"] = {
+        "passed": False,
+        "missing": ["definition_of_done"],
+        "warnings": [],
+    }
+    record.outputs["prd_quality_attempts"] = [
+        {
+            "attempt": 0,
+            "action": "initial",
+            "passed": False,
+            "missing": ["small_parts_split_for_autonomy"],
+            "warnings": [],
+            "prd_quality_fingerprint": fingerprint,
+            "required_small_part_count": 2,
+        },
+        {
+            "attempt": 1,
+            "action": "refine",
+            "passed": False,
+            "missing": ["small_parts_split_for_autonomy"],
+            "warnings": [],
+            "prd_quality_fingerprint": fingerprint,
+            "required_small_part_count": 2,
+        },
+        {
+            "attempt": 2,
+            "action": "refine",
+            "passed": False,
+            "missing": ["small_parts_split_for_autonomy"],
+            "warnings": [],
+            "prd_quality_fingerprint": fingerprint,
+            "required_small_part_count": 2,
+        },
+        {
+            "attempt": 3,
+            "action": "refine",
+            "passed": False,
+            "missing": ["definition_of_done"],
+            "warnings": [],
+            "prd_quality_fingerprint": fingerprint,
+            "required_small_part_count": 0,
+        },
+    ]
+
+    payload = summarize_job_progress(record)
+
+    assert payload["planning_quality"]["last_prd_quality_attempt"]["missing"] == [
+        "definition_of_done"
+    ]
+    assert payload["planning_quality"]["planning_repair"] == {
+        "consecutive_prd_failure_count": 1,
+        "consecutive_task_graph_failure_count": 0,
+        "last_prd_missing": ["definition_of_done"],
+        "last_task_graph_error_types": [],
+        "repeated_prd_missing": [],
+        "repeated_task_graph_error_types": [],
+        "strategy_change_recommended": False,
+    }
+
+
 def test_summarize_job_progress_reports_ready_for_large_autonomy(tmp_path) -> None:
     task_graph = TaskGraph(
         goal="Build incrementally",

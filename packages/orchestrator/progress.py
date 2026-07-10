@@ -1254,11 +1254,29 @@ def _current_prd_quality_contract(
         prd = record.outputs.get("pm")
     if isinstance(prd, dict):
         contract["prd_quality_fingerprint"] = prd_quality_fingerprint(prd)
-    if isinstance(current_prd_quality, dict):
+    min_small_parts = _constraint_int(record, "min_prd_small_parts", 0)
+    contract["required_small_part_count"] = min_small_parts
+    if (
+        min_small_parts <= 0
+        and isinstance(current_prd_quality, dict)
+    ):
         required_small_part_count = current_prd_quality.get("required_small_part_count")
         if isinstance(required_small_part_count, int):
             contract["required_small_part_count"] = required_small_part_count
     return contract
+
+
+def _constraint_int(record: JobRecord, key: str, default: int) -> int:
+    constraints = record.spec.metadata.get("constraints", {})
+    if not isinstance(constraints, dict):
+        return default
+    value = constraints.get(key, default)
+    try:
+        if isinstance(value, bool):
+            return default
+        return int(value)
+    except (TypeError, ValueError):
+        return default
 
 
 def _prd_quality_attempt_matches_current_contract(
