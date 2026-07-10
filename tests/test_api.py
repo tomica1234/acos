@@ -127,6 +127,8 @@ def test_supervised_api_can_plan_first_then_supervise(
                         description="Build core",
                         role="implementer",
                         acceptance_criteria=["core works"],
+                        target_files=["src/core.py"],
+                        required_artifacts=["src/core.py"],
                     )
                 ],
             ).model_dump()
@@ -140,7 +142,10 @@ def test_supervised_api_can_plan_first_then_supervise(
                 "task_count": 1,
                 "implementation_task_count": 1,
                 "implementation_task_acceptance_criteria_count": 1,
+                "implementation_task_artifact_count": 1,
+                "executable_task_artifact_count": 1,
                 "require_acceptance_criteria": True,
+                "require_task_artifacts": True,
                 "require_executable_task_roles": True,
                 "unsupported_task_role_count": 0,
                 "small_part_count": 1,

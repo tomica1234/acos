@@ -1241,8 +1241,18 @@ def planning_result_payload(
         payload["next_supervise_cli_args"] = supervise_args
         payload["next_supervise_command"] = _acos_command(supervise_args)
     planning_only = record.outputs.get("planning_only")
+    summary = payload.get("summary")
+    planning_summary = (
+        summary.get("planning_summary") if isinstance(summary, dict) else None
+    )
+    ready_for_implementation = (
+        planning_summary.get("ready_for_implementation") is True
+        if isinstance(planning_summary, dict)
+        else False
+    )
     planning_complete = (
         isinstance(planning_only, dict) and planning_only.get("complete") is True
+        and (record.status == JobStatus.DONE or ready_for_implementation)
     )
     payload["planning_complete"] = planning_complete
     if planning_complete:

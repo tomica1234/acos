@@ -14,6 +14,7 @@ from apps.cli import (
     build_job_spec_from_request,
     load_job_spec_from_file,
     main,
+    planning_result_payload,
     probe_provider,
     supervised_model_timeout_seconds,
     supervised_model_timeout_deadline_epoch,
@@ -97,6 +98,50 @@ def _copy_configs(tmp_path: Path) -> Path:
     ]:
         (target / name).write_text((config_dir() / name).read_text(encoding="utf-8"), encoding="utf-8")
     return target
+
+
+def test_planning_result_payload_requires_ready_planning_summary(
+    tmp_path: Path,
+) -> None:
+    task_graph = TaskGraph(
+        goal="Build it",
+        tasks=[
+            PlannedTask(
+                id="core",
+                title="Core",
+                description="Build core",
+                role="implementer",
+                acceptance_criteria=["All tests pass"],
+                target_files=["src/core.py"],
+                required_artifacts=["src/core.py"],
+            )
+        ],
+    )
+    spec = JobSpec(
+        job_id="stale-planning-ready",
+        request_text="Build it",
+        repo_path=str(tmp_path),
+        metadata={"constraints": {"require_task_acceptance_criteria": True}},
+    )
+    record = JobRecord(job_id=spec.job_id, spec=spec, status=JobStatus.PLANNING)
+    record.outputs["task_graph"] = task_graph.model_dump()
+    record.outputs["planning_only"] = {
+        "complete": True,
+        "ready_for_implementation": True,
+    }
+    record.outputs["task_graph_validation"] = {
+        "valid": True,
+        "errors": [],
+        "implementation_task_acceptance_criteria_count": 1,
+    }
+
+    payload = planning_result_payload(record, started=True)
+
+    assert payload["summary"]["planning_summary"]["complete"] is True
+    assert payload["summary"]["planning_summary"]["ready_for_implementation"] is False
+    assert payload["planning_complete"] is False
+    assert payload["terminal_reason"] != "planned"
+    assert payload["stop_summary"]["terminal_reason"] != "planned"
 
 
 def test_validate_config_succeeds(capsys) -> None:
