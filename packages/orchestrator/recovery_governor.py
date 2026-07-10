@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from typing import Any
 from uuid import uuid4
 
-from packages.orchestrator.quality_gates import invalid_artifact_paths
+from packages.orchestrator.quality_gates import invalid_planning_artifact_paths
 from packages.orchestrator.statuses import (
     HARD_TERMINAL_STATUSES,
     RECOVERABLE_STATUSES,
@@ -460,7 +460,11 @@ class RecoveryGovernor:
             missing_path = self._missing_patch_path(last_error, runtime_state)
             invalid_artifacts = runtime_state.get("invalid_artifacts")
             if not isinstance(invalid_artifacts, list):
-                invalid_artifacts = invalid_artifact_paths([missing_path]) if missing_path else []
+                invalid_artifacts = (
+                    invalid_planning_artifact_paths([missing_path])
+                    if missing_path
+                    else []
+                )
             if invalid_artifacts:
                 return RecoveryPlan(
                     trigger=trigger,

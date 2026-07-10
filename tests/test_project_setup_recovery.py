@@ -1075,6 +1075,48 @@ def test_recreate_target_files_recovery_replans_invalid_artifact_paths(
     assert not (tmp_path.parent / "outside.py").exists()
 
 
+def test_recreate_target_files_replans_strict_invalid_artifact_paths(
+    tmp_path: Path,
+) -> None:
+    spec = JobSpec(
+        request_text="Build it",
+        repo_path=str(tmp_path),
+        workspace_root=str(tmp_path),
+        target_branch="acos/recovery-strict-invalid-artifacts",
+    )
+    record = JobRecord(job_id=spec.job_id, spec=spec, status=JobStatus.RECOVERING)
+    record.runtime_state["recovery_plan"] = {
+        "id": "plan-strict-invalid",
+        "trigger": "target_files_missing",
+        "strategy": "RETURN_TO_IMPLEMENTER",
+        "next_status": JobStatus.IMPLEMENTING.value,
+        "next_actor": "implementer",
+        "steps": ["RETURN_TO_IMPLEMENTER", "RECREATE_TARGET_FILES"],
+        "current_step_index": 0,
+        "status": "pending",
+        "constraints": {
+            "required_artifacts": ["frontend/src", ".github"],
+            "target_files": ["frontend/src", ".github"],
+            "missing_target_file": ".github",
+        },
+    }
+
+    RecoveryExecutor().execute_until_ready(record)
+
+    plan = record.runtime_state["recovery_plan"]
+    assert plan["status"] == "completed"
+    assert plan["strategy"] == "REPLAN_TASK_WITH_REQUIRED_ARTIFACTS"
+    assert plan["next_actor"] == "planner"
+    assert plan["next_status"] == JobStatus.REPLANNING.value
+    assert plan["constraints"]["recovery_mode"] == "invalid_artifacts_replan"
+    assert plan["constraints"]["invalid_artifacts"] == ["frontend/src", ".github"]
+    assert plan["constraints"]["missing_artifacts"] == []
+    assert "deterministic_creation_attempted" not in plan["constraints"]
+    assert not (tmp_path / ".github").exists()
+    assert record.runtime_state["planner_repair_requested"] is True
+    assert record.status == JobStatus.REPLANNING
+
+
 def test_recovery_executor_sync_drops_stale_file_recovery_metadata(
     tmp_path: Path,
 ) -> None:

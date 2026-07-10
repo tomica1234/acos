@@ -531,6 +531,24 @@ def test_recovery_governor_routes_case_insensitive_missing_test_target() -> None
     assert plan["constraints"]["missing_target_file"] == missing
 
 
+def test_recovery_governor_replans_strict_invalid_missing_targets() -> None:
+    for missing in ("frontend/src", ".github"):
+        record = _record(f"target_files_missing:update target does not exist: {missing}")
+
+        RecoveryGovernor().recover(record)
+
+        plan = record.runtime_state["recovery_plan"]
+        constraints = plan["constraints"]
+        assert record.status == JobStatus.REPLANNING
+        assert plan["strategy"] == "REPLAN_TASK_WITH_REQUIRED_ARTIFACTS"
+        assert plan["next_actor"] == "planner"
+        assert plan["steps"] == ["REPLAN_TASK_WITH_REQUIRED_ARTIFACTS"]
+        assert constraints["recovery_mode"] == "invalid_artifacts_replan"
+        assert constraints["invalid_artifacts"] == [missing]
+        assert "missing_target_file" not in constraints
+        assert "patch_operation_hint" not in constraints
+
+
 def test_quality_gate_error_is_recoverable_unless_policy_denied(tmp_path: Path) -> None:
     runner, _environment = _runner(tmp_path)
     record = _record(status=JobStatus.TESTING)

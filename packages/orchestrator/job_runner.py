@@ -33,7 +33,9 @@ from packages.orchestrator.quality_gates import (
     ensure_reviews_pass,
     ensure_test_patch_quality,
     invalid_artifact_paths,
+    invalid_planning_artifact_paths,
     valid_artifact_paths,
+    valid_planning_artifact_paths,
 )
 from packages.orchestrator.recovery_executor import RecoveryExecutor
 from packages.orchestrator.recovery_governor import (
@@ -116,38 +118,6 @@ class JobRunner:
         "README.md",
         ".env.example",
     ]
-    EXTENSIONLESS_PLANNING_ARTIFACT_FILENAMES = {
-        ".dockerignore",
-        ".editorconfig",
-        ".env",
-        ".eslintignore",
-        ".eslintrc",
-        ".gitattributes",
-        ".gitignore",
-        ".gitkeep",
-        ".npmrc",
-        ".nvmrc",
-        ".prettierignore",
-        ".prettierrc",
-        ".pylintrc",
-        ".python-version",
-        ".ruby-version",
-        ".tool-versions",
-        ".watchmanconfig",
-        ".yarnrc",
-        "Brewfile",
-        "Dockerfile",
-        "Gemfile",
-        "Justfile",
-        "LICENSE",
-        "Makefile",
-        "NOTICE",
-        "Procfile",
-        "Rakefile",
-        "README",
-        "Taskfile",
-        "Vagrantfile",
-    }
     PROJECT_SETUP_KEYWORDS = (
         "project-scaffold",
         "project scaffold",
@@ -8774,14 +8744,23 @@ class JobRunner:
 
     @classmethod
     def _valid_unique_planning_artifact_paths(cls, paths: list[str]) -> list[str]:
-        return cls._valid_unique_artifact_paths(cls._meaningful_artifact_items(paths))
+        seen: set[str] = set()
+        unique: list[str] = []
+        for path in cls._meaningful_artifact_items(paths):
+            normalized_paths = valid_planning_artifact_paths([path])
+            if not normalized_paths:
+                continue
+            normalized = next(iter(normalized_paths))
+            if normalized not in seen:
+                unique.append(normalized)
+                seen.add(normalized)
+        return unique
 
     @classmethod
     def _invalid_planning_artifact_paths(cls, paths: list[str]) -> list[str]:
         invalid = [
-            *invalid_artifact_paths(paths),
+            *invalid_planning_artifact_paths(paths),
             *cls._placeholder_artifact_paths(paths),
-            *cls._directory_like_planning_artifact_paths(paths),
         ]
         return cls._unique_paths(invalid)
 
@@ -8791,7 +8770,6 @@ class JobRunner:
             item
             for item in cls._non_empty_items(paths)
             if not cls._looks_like_placeholder_artifact_path(item)
-            and not cls._looks_like_directory_artifact_path(item)
         ]
 
     @classmethod
@@ -8801,33 +8779,6 @@ class JobRunner:
             for item in cls._non_empty_items(paths)
             if cls._looks_like_placeholder_artifact_path(item)
         ]
-
-    @classmethod
-    def _directory_like_planning_artifact_paths(cls, paths: list[str]) -> list[str]:
-        return [
-            cls._normalized_planning_artifact_path(item)
-            for item in cls._non_empty_items(paths)
-            if not cls._looks_like_placeholder_artifact_path(item)
-            and cls._looks_like_directory_artifact_path(item)
-        ]
-
-    @staticmethod
-    def _normalized_planning_artifact_path(path: str) -> str:
-        return str(path).replace("\\", "/").strip()
-
-    @classmethod
-    def _looks_like_directory_artifact_path(cls, path: str) -> bool:
-        value = cls._normalized_planning_artifact_path(path)
-        if not value or invalid_artifact_paths([value]):
-            return False
-        name = value.rsplit("/", 1)[-1].strip()
-        if not name:
-            return False
-        if name in cls.EXTENSIONLESS_PLANNING_ARTIFACT_FILENAMES:
-            return False
-        if name.startswith(".") and "." not in name[1:]:
-            return True
-        return "." not in name
 
     @staticmethod
     def _looks_like_placeholder_artifact_path(path: str) -> bool:

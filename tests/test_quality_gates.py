@@ -7,7 +7,9 @@ from packages.orchestrator.quality_gates import (
     ensure_required_artifacts_exist,
     ensure_test_patch_quality,
     invalid_artifact_paths,
+    invalid_planning_artifact_paths,
     valid_artifact_paths,
+    valid_planning_artifact_paths,
 )
 from packages.schemas.agent_outputs import FilePatch
 
@@ -33,6 +35,27 @@ def test_artifact_path_helpers_validate_cross_platform_paths() -> None:
 
     assert valid_artifact_paths(paths) == {"feature.py", "tests/test_feature.py"}
     assert invalid_artifact_paths(paths) == ["../outside.py", "C:\\outside.py"]
+
+
+def test_planning_artifact_path_helpers_reject_directory_like_files() -> None:
+    paths = [
+        "frontend/src",
+        ".github",
+        ".gitignore",
+        ".env.example",
+        ".github/workflows/ci.yml",
+        "Dockerfile",
+        "tests/test_feature.py",
+    ]
+
+    assert valid_planning_artifact_paths(paths) == {
+        ".gitignore",
+        ".env.example",
+        ".github/workflows/ci.yml",
+        "Dockerfile",
+        "tests/test_feature.py",
+    }
+    assert invalid_planning_artifact_paths(paths) == ["frontend/src", ".github"]
 
 
 def test_artifact_path_exists_requires_file_inside_workspace(tmp_path) -> None:

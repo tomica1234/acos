@@ -6,7 +6,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from packages.orchestrator.quality_gates import artifact_path_exists, invalid_artifact_paths
+from packages.orchestrator.quality_gates import (
+    artifact_path_exists,
+    invalid_artifact_paths,
+    invalid_planning_artifact_paths,
+)
 from packages.orchestrator.statuses import is_hard_terminal_status, is_waiting_status
 from packages.schemas.checkpoints import CheckpointRecord
 from packages.schemas.jobs import JobRecord
@@ -126,7 +130,7 @@ class RecoveryExecutor:
         paths = self._recreate_target_paths(record, constraints)
         if not paths:
             return True
-        invalid = invalid_artifact_paths(paths)
+        invalid = invalid_planning_artifact_paths(paths)
         if invalid:
             constraints["invalid_artifacts"] = invalid
             constraints["missing_artifacts"] = []
@@ -209,7 +213,7 @@ class RecoveryExecutor:
         non_files: list[str] = []
         for path in paths:
             normalized = path.replace("\\", "/").removeprefix("./")
-            if invalid_artifact_paths([normalized]):
+            if invalid_planning_artifact_paths([normalized]):
                 continue
             target = root / normalized
             if target.exists() and not target.is_file():
@@ -221,7 +225,7 @@ class RecoveryExecutor:
         empty_files: list[str] = []
         for path in paths:
             normalized = path.replace("\\", "/").removeprefix("./")
-            if invalid_artifact_paths([normalized]):
+            if invalid_planning_artifact_paths([normalized]):
                 continue
             if Path(normalized).name in cls.ALLOW_EMPTY_ARTIFACT_NAMES:
                 continue
@@ -364,7 +368,7 @@ class RecoveryExecutor:
         created: list[str] = []
         for path in missing:
             normalized = path.replace("\\", "/").removeprefix("./")
-            if invalid_artifact_paths([normalized]):
+            if invalid_planning_artifact_paths([normalized]):
                 continue
             content = self._deterministic_content_for_path(normalized)
             if content is None:

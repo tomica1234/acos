@@ -17,6 +17,42 @@ class QualityGateError(Exception):
     """Raised when a quality gate fails."""
 
 
+EXTENSIONLESS_ARTIFACT_FILENAMES = frozenset(
+    {
+        ".dockerignore",
+        ".editorconfig",
+        ".env",
+        ".eslintignore",
+        ".eslintrc",
+        ".gitattributes",
+        ".gitignore",
+        ".gitkeep",
+        ".npmrc",
+        ".nvmrc",
+        ".prettierignore",
+        ".prettierrc",
+        ".pylintrc",
+        ".python-version",
+        ".ruby-version",
+        ".tool-versions",
+        ".watchmanconfig",
+        ".yarnrc",
+        "Brewfile",
+        "Dockerfile",
+        "Gemfile",
+        "Justfile",
+        "LICENSE",
+        "Makefile",
+        "NOTICE",
+        "Procfile",
+        "Rakefile",
+        "README",
+        "Taskfile",
+        "Vagrantfile",
+    }
+)
+
+
 def ensure_reviews_pass(
     review: ReviewResult, security_review: SecurityReviewResult
 ) -> None:
@@ -200,6 +236,49 @@ def valid_artifact_paths(paths: Iterable[str]) -> set[str]:
 def invalid_artifact_paths(paths: Iterable[str]) -> list[str]:
     _normalized, invalid = _normalize_artifact_paths(paths)
     return invalid
+
+
+def valid_planning_artifact_paths(paths: Iterable[str]) -> set[str]:
+    normalized, _invalid = _normalize_artifact_paths(paths)
+    invalid_planning = set(_directory_like_artifact_paths(normalized))
+    return {path for path in normalized if path not in invalid_planning}
+
+
+def invalid_planning_artifact_paths(paths: Iterable[str]) -> list[str]:
+    invalid: list[str] = []
+    for raw_path in paths:
+        normalized_paths, invalid_paths = _normalize_artifact_paths([raw_path])
+        if invalid_paths:
+            invalid.extend(invalid_paths)
+            continue
+        if not normalized_paths:
+            continue
+        normalized = next(iter(normalized_paths))
+        if _looks_like_directory_artifact_path(normalized):
+            invalid.append(normalized)
+    return invalid
+
+
+def _directory_like_artifact_paths(paths: Iterable[str]) -> list[str]:
+    return [
+        path
+        for path in paths
+        if _looks_like_directory_artifact_path(path)
+    ]
+
+
+def _looks_like_directory_artifact_path(path: str) -> bool:
+    value = str(path).replace("\\", "/").strip()
+    if not value or invalid_artifact_paths([value]):
+        return False
+    name = value.rsplit("/", 1)[-1].strip()
+    if not name:
+        return False
+    if name in EXTENSIONLESS_ARTIFACT_FILENAMES:
+        return False
+    if name.startswith(".") and "." not in name[1:]:
+        return True
+    return "." not in name
 
 
 def _looks_like_test_path(path: str) -> bool:
