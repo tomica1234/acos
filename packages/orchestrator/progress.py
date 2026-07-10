@@ -14,6 +14,21 @@ from packages.orchestrator.quality_gates import (
 )
 from packages.schemas.jobs import JobRecord
 
+_PROJECT_SETUP_REQUIRED_ARTIFACTS = {
+    "backend/main.py",
+    "backend/requirements.txt",
+    "backend/tests/test_project_setup.py",
+    "frontend/package.json",
+    "frontend/vite.config.js",
+    "frontend/src/main.tsx",
+    "frontend/src/App.tsx",
+    "shared/.gitkeep",
+    ".gitignore",
+    "package.json",
+    "README.md",
+    ".env.example",
+}
+
 
 def summarize_job_progress(record: JobRecord) -> dict[str, Any]:
     """Return a compact, machine-readable progress summary for a job."""
@@ -1420,6 +1435,81 @@ def _autonomy_readiness(
             invalid_task_artifacts.append(
                 {"task_id": task["id"], "paths": invalid_paths}
             )
+    required_artifacts_missing_target_files = []
+    target_files_missing_required_artifacts = []
+    role_mismatched_target_files = []
+    role_mismatched_required_artifacts = []
+    for task in executable_tasks:
+        task_id = task.get("id")
+        role = task.get("role")
+        if not isinstance(task_id, str) or not isinstance(role, str):
+            continue
+        target_files = set(_valid_artifact_paths(_non_empty_strings(task.get("target_files"))))
+        required_artifacts = set(
+            _valid_artifact_paths(_non_empty_strings(task.get("required_artifacts")))
+        )
+        missing_target_files = sorted(required_artifacts - target_files)
+        if missing_target_files:
+            required_artifacts_missing_target_files.append(
+                {
+                    "task_id": task_id,
+                    "role": role,
+                    "paths": missing_target_files,
+                }
+            )
+        missing_required_artifacts = sorted(target_files - required_artifacts)
+        if missing_required_artifacts:
+            target_files_missing_required_artifacts.append(
+                {
+                    "task_id": task_id,
+                    "role": role,
+                    "paths": missing_required_artifacts,
+                }
+            )
+        for path in sorted(target_files):
+            expected_roles = _artifact_owner_roles(path)
+            if role not in expected_roles:
+                role_mismatched_target_files.append(
+                    {
+                        "task_id": task_id,
+                        "role": role,
+                        "path": path,
+                        "expected_roles": sorted(expected_roles),
+                    }
+                )
+        for path in sorted(required_artifacts):
+            expected_roles = _artifact_owner_roles(path)
+            if role not in expected_roles:
+                role_mismatched_required_artifacts.append(
+                    {
+                        "task_id": task_id,
+                        "role": role,
+                        "path": path,
+                        "expected_roles": sorted(expected_roles),
+                    }
+                )
+    implementation_task_id_set = {
+        task["id"] for task in implementation_tasks if isinstance(task.get("id"), str)
+    }
+    test_writer_missing_implementation_dependencies = [
+        {
+            "task_id": task["id"],
+            "depends_on": _task_dependencies(task),
+            "required_dependency_roles": sorted(implementation_roles),
+        }
+        for task in test_writer_tasks
+        if isinstance(task.get("id"), str)
+        and implementation_task_id_set
+        and not any(
+            dependency in implementation_task_id_set
+            for dependency in _task_dependencies(task)
+        )
+    ]
+    executor_order_dependency_violations = (
+        []
+        if dependency_cycle_task_ids
+        else _executor_order_dependency_violations(planned_tasks)
+    )
 
     blocking_items: list[dict[str, Any]] = []
     warnings: list[dict[str, Any]] = []
@@ -1487,6 +1577,48 @@ def _autonomy_readiness(
             {
                 "type": "invalid_task_artifacts",
                 "items": invalid_task_artifacts,
+            }
+        )
+    if require_task_artifacts and role_mismatched_target_files:
+        blocking_items.append(
+            {
+                "type": "role_mismatched_target_files",
+                "items": role_mismatched_target_files,
+            }
+        )
+    if require_task_artifacts and role_mismatched_required_artifacts:
+        blocking_items.append(
+            {
+                "type": "role_mismatched_required_artifacts",
+                "items": role_mismatched_required_artifacts,
+            }
+        )
+    if require_task_artifacts and required_artifacts_missing_target_files:
+        blocking_items.append(
+            {
+                "type": "required_artifacts_missing_target_files",
+                "items": required_artifacts_missing_target_files,
+            }
+        )
+    if require_task_artifacts and target_files_missing_required_artifacts:
+        blocking_items.append(
+            {
+                "type": "target_files_missing_required_artifacts",
+                "items": target_files_missing_required_artifacts,
+            }
+        )
+    if require_task_artifacts and test_writer_missing_implementation_dependencies:
+        blocking_items.append(
+            {
+                "type": "test_writer_missing_implementation_dependency",
+                "items": test_writer_missing_implementation_dependencies,
+            }
+        )
+    if require_task_artifacts and executor_order_dependency_violations:
+        blocking_items.append(
+            {
+                "type": "executor_order_dependency_violations",
+                "items": executor_order_dependency_violations,
             }
         )
     if strict_controls_enabled and unsupported_task_roles:
@@ -1558,6 +1690,22 @@ def _autonomy_readiness(
             "implementation_tasks_have_artifacts": implementation_tasks_have_artifacts,
             "executable_tasks_have_artifacts": executable_tasks_have_artifacts,
             "invalid_task_artifact_count": len(invalid_task_artifacts),
+            "role_mismatched_target_file_count": len(role_mismatched_target_files),
+            "role_mismatched_required_artifact_count": len(
+                role_mismatched_required_artifacts
+            ),
+            "required_artifacts_missing_target_file_count": len(
+                required_artifacts_missing_target_files
+            ),
+            "target_files_missing_required_artifact_count": len(
+                target_files_missing_required_artifacts
+            ),
+            "test_writer_missing_implementation_dependency_count": len(
+                test_writer_missing_implementation_dependencies
+            ),
+            "executor_order_dependency_violation_count": len(
+                executor_order_dependency_violations
+            ),
             "unsupported_task_role_count": len(unsupported_task_roles),
             "invalid_task_id_count": len(invalid_task_ids),
             "invalid_task_title_count": len(invalid_task_titles),
@@ -1756,6 +1904,198 @@ def _invalid_artifact_paths(paths: list[str]) -> list[str]:
             unique.append(path)
             seen.add(path)
     return unique
+
+
+def _looks_like_test_path(path: str) -> bool:
+    normalized = str(path).replace("\\", "/").lower()
+    name = normalized.rsplit("/", 1)[-1]
+    return (
+        "/tests/" in f"/{normalized}"
+        or "/test/" in f"/{normalized}"
+        or name.startswith("test_")
+        or ".test." in name
+        or ".spec." in name
+    )
+
+
+def _artifact_owner_roles(path: str) -> set[str]:
+    if _looks_like_test_path(path):
+        if path in _PROJECT_SETUP_REQUIRED_ARTIFACTS:
+            return {"scaffold", "test_writer"}
+        return {"test_writer"}
+    if path in _PROJECT_SETUP_REQUIRED_ARTIFACTS:
+        return {"implementer", "scaffold"}
+    return {"implementer"}
+
+
+def _executor_order_dependency_violations(
+    planned_tasks: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    task_by_id = {
+        task["id"]: task for task in planned_tasks if isinstance(task.get("id"), str)
+    }
+    implementation_tasks = _order_tasks_by_dependencies(
+        [
+            task
+            for task in planned_tasks
+            if task.get("role") in {"implementer", "scaffold"}
+            and isinstance(task.get("id"), str)
+        ]
+    )
+    implementation_tasks = [
+        task
+        for _index, task in sorted(
+            enumerate(implementation_tasks),
+            key=lambda item: (
+                0 if _is_project_setup_task(item[1]) else 1,
+                item[0],
+            ),
+        )
+    ]
+    pending_test_tasks = _order_tasks_by_dependencies(
+        [
+            task
+            for task in planned_tasks
+            if task.get("role") == "test_writer" and isinstance(task.get("id"), str)
+        ]
+    )
+    completed_task_ids: set[str] = set()
+    violations: list[dict[str, Any]] = []
+
+    def known_unmet_dependencies(task: dict[str, Any]) -> list[str]:
+        return [
+            dependency
+            for dependency in _task_dependencies(task)
+            if dependency in task_by_id and dependency not in completed_task_ids
+        ]
+
+    def append_violation(
+        task: dict[str, Any],
+        phase: str,
+        unmet: list[str],
+    ) -> None:
+        violations.append(
+            {
+                "task_id": task["id"],
+                "role": task.get("role"),
+                "executor_phase": phase,
+                "unmet_dependencies": unmet,
+                "dependency_roles": [
+                    {
+                        "task_id": dependency,
+                        "role": task_by_id[dependency].get("role"),
+                    }
+                    for dependency in unmet
+                ],
+            }
+        )
+
+    def complete_ready_tests() -> None:
+        while True:
+            ready_tasks: list[dict[str, Any]] = []
+            for task in list(pending_test_tasks):
+                local_dependencies = [
+                    dependency
+                    for dependency in _task_dependencies(task)
+                    if any(
+                        dependency == pending_task["id"]
+                        for pending_task in pending_test_tasks
+                    )
+                    or dependency not in completed_task_ids
+                ]
+                if not local_dependencies or all(
+                    dependency in completed_task_ids
+                    for dependency in _task_dependencies(task)
+                ):
+                    ready_tasks.append(task)
+                    pending_test_tasks.remove(task)
+            if not ready_tasks:
+                return
+            completed_task_ids.update(task["id"] for task in ready_tasks)
+
+    for task in implementation_tasks:
+        unmet = known_unmet_dependencies(task)
+        if unmet:
+            append_violation(task, "implementation", unmet)
+            continue
+        completed_task_ids.add(task["id"])
+        complete_ready_tests()
+
+    for task in pending_test_tasks:
+        unmet = known_unmet_dependencies(task)
+        if unmet:
+            append_violation(task, "test_writer", unmet)
+
+    return violations
+
+
+def _order_tasks_by_dependencies(tasks: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    if len(tasks) < 2:
+        return tasks
+    remaining = list(tasks)
+    remaining_ids = {task["id"] for task in remaining}
+    completed: set[str] = set()
+    ordered: list[dict[str, Any]] = []
+    while remaining:
+        progressed = False
+        for task in list(remaining):
+            local_dependencies = [
+                dependency
+                for dependency in _task_dependencies(task)
+                if dependency in remaining_ids
+            ]
+            if all(dependency in completed for dependency in local_dependencies):
+                ordered.append(task)
+                completed.add(task["id"])
+                remaining.remove(task)
+                progressed = True
+        if not progressed:
+            ordered.extend(remaining)
+            break
+    return ordered
+
+
+def _is_project_setup_task(task: dict[str, Any]) -> bool:
+    if task.get("role") == "test_writer":
+        return False
+    artifacts = _valid_artifact_paths(_task_artifact_paths(task))
+    artifact_text = " ".join(artifacts).lower()
+    identity = " ".join(
+        [
+            str(task.get("id") or ""),
+            str(task.get("title") or ""),
+        ]
+    ).lower()
+    description = str(task.get("description") or "").lower()
+    haystack = " ".join([identity, description, artifact_text])
+    declares_project_setup_artifacts = any(
+        artifact in _PROJECT_SETUP_REQUIRED_ARTIFACTS for artifact in artifacts
+    )
+    has_no_declared_artifacts = not artifacts
+    strong_identity = any(
+        keyword in identity
+        for keyword in (
+            "project-scaffold",
+            "project scaffold",
+            "project-setup",
+            "project setup",
+            "verify-project-setup",
+        )
+    )
+    structural_setup = (
+        "monorepo" in haystack
+        or "backend/frontend/shared" in haystack
+        or all(token in haystack for token in ("backend", "frontend", "shared"))
+    )
+    if strong_identity and (
+        has_no_declared_artifacts
+        or declares_project_setup_artifacts
+        or structural_setup
+    ):
+        return True
+    return structural_setup and (
+        has_no_declared_artifacts or declares_project_setup_artifacts
+    )
 
 
 def _execution_limits(record: JobRecord) -> dict[str, Any]:

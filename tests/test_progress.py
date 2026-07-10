@@ -661,6 +661,7 @@ def test_summarize_job_progress_reports_ready_for_large_autonomy(tmp_path) -> No
                 role="implementer",
                 acceptance_criteria=["VALUE equals 1"],
                 target_files=["feature.py"],
+                required_artifacts=["feature.py"],
             ),
             PlannedTask(
                 id="tests",
@@ -670,6 +671,7 @@ def test_summarize_job_progress_reports_ready_for_large_autonomy(tmp_path) -> No
                 depends_on=["core"],
                 acceptance_criteria=["VALUE is covered by a regression test"],
                 target_files=["tests/test_feature.py"],
+                required_artifacts=["tests/test_feature.py"],
             ),
         ],
     )
@@ -720,6 +722,12 @@ def test_summarize_job_progress_reports_ready_for_large_autonomy(tmp_path) -> No
             "implementation_tasks_have_artifacts": True,
             "executable_tasks_have_artifacts": True,
             "invalid_task_artifact_count": 0,
+            "role_mismatched_target_file_count": 0,
+            "role_mismatched_required_artifact_count": 0,
+            "required_artifacts_missing_target_file_count": 0,
+            "target_files_missing_required_artifact_count": 0,
+            "test_writer_missing_implementation_dependency_count": 0,
+            "executor_order_dependency_violation_count": 0,
             "unsupported_task_role_count": 0,
             "invalid_task_id_count": 0,
             "invalid_task_title_count": 0,
@@ -960,6 +968,7 @@ def test_summarize_job_progress_blocks_autonomy_without_test_writer_artifacts(
                 role="implementer",
                 acceptance_criteria=["VALUE equals 1"],
                 target_files=["feature.py"],
+                required_artifacts=["feature.py"],
             ),
             PlannedTask(
                 id="tests",
@@ -1555,6 +1564,275 @@ def test_summarize_job_progress_blocks_stale_valid_graph_with_unknown_dependency
         "items": [{"task_id": "views", "dependency": "models"}],
     } in payload["autonomy_readiness"]["blocking_items"]
     assert payload["autonomy_readiness"]["checks"]["unknown_dependency_count"] == 1
+
+
+def test_summarize_job_progress_blocks_stale_valid_graph_with_role_mismatched_artifacts(
+    tmp_path,
+) -> None:
+    task_graph = TaskGraph(
+        goal="Build incrementally",
+        tasks=[
+            PlannedTask(
+                id="core",
+                title="Core",
+                description="Build core behavior.",
+                role="implementer",
+                acceptance_criteria=["Core behavior returns VALUE"],
+                target_files=["frontend/test/core.test.tsx"],
+                required_artifacts=["frontend/test/core.test.tsx"],
+            ),
+            PlannedTask(
+                id="ui-tests",
+                title="UI tests",
+                description="Cover UI behavior.",
+                role="test_writer",
+                depends_on=["core"],
+                acceptance_criteria=["UI behavior is covered by tests"],
+                target_files=["frontend/src/App.tsx"],
+                required_artifacts=["frontend/src/App.tsx"],
+            ),
+        ],
+    )
+    spec = JobSpec(
+        job_id="autonomy-stale-role-mismatched-artifacts-job",
+        request_text="Build it carefully",
+        repo_path=str(tmp_path),
+        metadata={"constraints": {"require_task_artifacts": True}},
+    )
+    record = JobRecord(job_id=spec.job_id, spec=spec, status=JobStatus.TESTING)
+    record.outputs["task_graph"] = task_graph.model_dump()
+    record.outputs["task_graph_validation"] = {
+        "valid": True,
+        "task_count": 2,
+        "implementation_task_count": 1,
+        "role_mismatched_target_files": [],
+        "role_mismatched_required_artifacts": [],
+        "errors": [],
+    }
+
+    payload = summarize_job_progress(record)
+
+    assert payload["autonomy_readiness"]["ready"] is False
+    assert {
+        "type": "role_mismatched_target_files",
+        "items": [
+            {
+                "task_id": "core",
+                "role": "implementer",
+                "path": "frontend/test/core.test.tsx",
+                "expected_roles": ["test_writer"],
+            },
+            {
+                "task_id": "ui-tests",
+                "role": "test_writer",
+                "path": "frontend/src/App.tsx",
+                "expected_roles": ["implementer", "scaffold"],
+            },
+        ],
+    } in payload["autonomy_readiness"]["blocking_items"]
+    assert payload["autonomy_readiness"]["checks"][
+        "role_mismatched_target_file_count"
+    ] == 2
+
+
+def test_summarize_job_progress_blocks_stale_valid_graph_with_artifact_shape_mismatch(
+    tmp_path,
+) -> None:
+    task_graph = TaskGraph(
+        goal="Build incrementally",
+        tasks=[
+            PlannedTask(
+                id="core",
+                title="Core",
+                description="Build core behavior.",
+                role="implementer",
+                acceptance_criteria=["Core behavior returns VALUE"],
+                target_files=["feature.py"],
+                required_artifacts=["feature.py", "config.py"],
+            ),
+            PlannedTask(
+                id="core-tests",
+                title="Core tests",
+                description="Cover core behavior.",
+                role="test_writer",
+                depends_on=["core"],
+                acceptance_criteria=["Core behavior has regression tests"],
+                target_files=["tests/test_feature.py", "tests/test_extra.py"],
+                required_artifacts=["tests/test_feature.py"],
+            ),
+        ],
+    )
+    spec = JobSpec(
+        job_id="autonomy-stale-artifact-shape-mismatch-job",
+        request_text="Build it carefully",
+        repo_path=str(tmp_path),
+        metadata={"constraints": {"require_task_artifacts": True}},
+    )
+    record = JobRecord(job_id=spec.job_id, spec=spec, status=JobStatus.TESTING)
+    record.outputs["task_graph"] = task_graph.model_dump()
+    record.outputs["task_graph_validation"] = {
+        "valid": True,
+        "task_count": 2,
+        "implementation_task_count": 1,
+        "required_artifacts_missing_target_files": [],
+        "target_files_missing_required_artifacts": [],
+        "errors": [],
+    }
+
+    payload = summarize_job_progress(record)
+
+    assert payload["autonomy_readiness"]["ready"] is False
+    assert {
+        "type": "required_artifacts_missing_target_files",
+        "items": [
+            {
+                "task_id": "core",
+                "role": "implementer",
+                "paths": ["config.py"],
+            },
+        ],
+    } in payload["autonomy_readiness"]["blocking_items"]
+    assert {
+        "type": "target_files_missing_required_artifacts",
+        "items": [
+            {
+                "task_id": "core-tests",
+                "role": "test_writer",
+                "paths": ["tests/test_extra.py"],
+            },
+        ],
+    } in payload["autonomy_readiness"]["blocking_items"]
+    assert payload["autonomy_readiness"]["checks"][
+        "required_artifacts_missing_target_file_count"
+    ] == 1
+    assert payload["autonomy_readiness"]["checks"][
+        "target_files_missing_required_artifact_count"
+    ] == 1
+
+
+def test_summarize_job_progress_blocks_stale_valid_graph_with_executor_order_violation(
+    tmp_path,
+) -> None:
+    task_graph = TaskGraph(
+        goal="Build incrementally",
+        tasks=[
+            PlannedTask(
+                id="feature",
+                title="Feature",
+                description="Build feature after test preparation.",
+                role="implementer",
+                depends_on=["feature-tests"],
+                acceptance_criteria=["Feature returns VALUE"],
+                target_files=["feature.py"],
+                required_artifacts=["feature.py"],
+            ),
+            PlannedTask(
+                id="feature-tests",
+                title="Feature tests",
+                description="Prepare feature tests.",
+                role="test_writer",
+                acceptance_criteria=["Feature has regression tests"],
+                target_files=["tests/test_feature.py"],
+                required_artifacts=["tests/test_feature.py"],
+            ),
+        ],
+    )
+    spec = JobSpec(
+        job_id="autonomy-stale-executor-order-job",
+        request_text="Build it carefully",
+        repo_path=str(tmp_path),
+        metadata={"constraints": {"require_task_artifacts": True}},
+    )
+    record = JobRecord(job_id=spec.job_id, spec=spec, status=JobStatus.TESTING)
+    record.outputs["task_graph"] = task_graph.model_dump()
+    record.outputs["task_graph_validation"] = {
+        "valid": True,
+        "task_count": 2,
+        "implementation_task_count": 1,
+        "executor_order_dependency_violations": [],
+        "errors": [],
+    }
+
+    payload = summarize_job_progress(record)
+
+    assert payload["autonomy_readiness"]["ready"] is False
+    assert {
+        "type": "executor_order_dependency_violations",
+        "items": [
+            {
+                "task_id": "feature",
+                "role": "implementer",
+                "executor_phase": "implementation",
+                "unmet_dependencies": ["feature-tests"],
+                "dependency_roles": [
+                    {"task_id": "feature-tests", "role": "test_writer"},
+                ],
+            },
+        ],
+    } in payload["autonomy_readiness"]["blocking_items"]
+    assert payload["autonomy_readiness"]["checks"][
+        "executor_order_dependency_violation_count"
+    ] == 1
+
+
+def test_summarize_job_progress_blocks_stale_valid_graph_with_test_writer_without_implementation_dependency(
+    tmp_path,
+) -> None:
+    task_graph = TaskGraph(
+        goal="Build incrementally",
+        tasks=[
+            PlannedTask(
+                id="feature",
+                title="Feature",
+                description="Build feature behavior.",
+                role="implementer",
+                acceptance_criteria=["Feature returns VALUE"],
+                target_files=["feature.py"],
+                required_artifacts=["feature.py"],
+            ),
+            PlannedTask(
+                id="feature-tests",
+                title="Feature tests",
+                description="Cover feature behavior.",
+                role="test_writer",
+                acceptance_criteria=["Feature behavior has regression tests"],
+                target_files=["tests/test_feature.py"],
+                required_artifacts=["tests/test_feature.py"],
+            ),
+        ],
+    )
+    spec = JobSpec(
+        job_id="autonomy-stale-test-writer-dependency-job",
+        request_text="Build it carefully",
+        repo_path=str(tmp_path),
+        metadata={"constraints": {"require_task_artifacts": True}},
+    )
+    record = JobRecord(job_id=spec.job_id, spec=spec, status=JobStatus.TESTING)
+    record.outputs["task_graph"] = task_graph.model_dump()
+    record.outputs["task_graph_validation"] = {
+        "valid": True,
+        "task_count": 2,
+        "implementation_task_count": 1,
+        "test_writer_missing_implementation_dependencies": [],
+        "errors": [],
+    }
+
+    payload = summarize_job_progress(record)
+
+    assert payload["autonomy_readiness"]["ready"] is False
+    assert {
+        "type": "test_writer_missing_implementation_dependency",
+        "items": [
+            {
+                "task_id": "feature-tests",
+                "depends_on": [],
+                "required_dependency_roles": ["implementer", "scaffold"],
+            },
+        ],
+    } in payload["autonomy_readiness"]["blocking_items"]
+    assert payload["autonomy_readiness"]["checks"][
+        "test_writer_missing_implementation_dependency_count"
+    ] == 1
 
 
 def test_summarize_job_progress_blocks_stale_valid_graph_with_dependency_cycle(

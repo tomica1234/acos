@@ -472,6 +472,7 @@ def test_plan_job_from_direct_request_stops_before_implementation(
                         role="implementer",
                         acceptance_criteria=["core works"],
                         target_files=["feature.py"],
+                        required_artifacts=["feature.py"],
                     )
                 ],
             ).model_dump()
@@ -686,6 +687,7 @@ def test_plan_job_can_suggest_supervised_execution_after_planning(
                         role="implementer",
                         acceptance_criteria=["core works"],
                         target_files=["feature.py"],
+                        required_artifacts=["feature.py"],
                     )
                 ],
             ).model_dump()
@@ -1234,6 +1236,7 @@ def test_run_supervised_can_plan_first_then_supervise(
                         role="implementer",
                         acceptance_criteria=["core works"],
                         target_files=["feature.py"],
+                        required_artifacts=["feature.py"],
                     )
                 ],
             ).model_dump()
