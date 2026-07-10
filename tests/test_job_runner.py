@@ -4565,6 +4565,38 @@ def test_task_graph_validation_rejects_invalid_artifact_paths() -> None:
     assert "invalid_task_artifacts" in error_types
 
 
+def test_task_graph_validation_rejects_invalid_artifact_paths_under_any_strict_gate() -> None:
+    task_graph = TaskGraph(
+        goal="Build feature",
+        tasks=[
+            PlannedTask(
+                id="core",
+                title="Build core",
+                description="Build the smallest feature.",
+                role="implementer",
+                acceptance_criteria=["VALUE equals 1"],
+                target_files=["../outside.py"],
+            ),
+        ],
+    )
+
+    validation = JobRunner._build_task_graph_validation(
+        task_graph,
+        require_acceptance_criteria=True,
+        require_task_artifacts=False,
+    )
+
+    assert validation["valid"] is False
+    assert validation["invalid_task_artifact_count"] == 1
+    assert validation["invalid_task_artifacts"] == [
+        {"task_id": "core", "paths": ["../outside.py"]}
+    ]
+    assert {
+        "type": "invalid_task_artifacts",
+        "items": validation["invalid_task_artifacts"],
+    } in validation["errors"]
+
+
 def test_task_graph_validation_requires_prd_artifacts_assigned_to_tasks() -> None:
     prd = PRD(
         title="Feature",

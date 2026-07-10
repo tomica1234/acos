@@ -6051,7 +6051,7 @@ class JobRunner:
                 invalid_task_artifacts.append(
                     {"task_id": task.id, "paths": invalid_paths}
                 )
-        if require_task_artifacts and invalid_task_artifacts:
+        if strict_executable_task_validation and invalid_task_artifacts:
             errors.append(
                 {
                     "type": "invalid_task_artifacts",

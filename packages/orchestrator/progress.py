@@ -1423,7 +1423,7 @@ def _autonomy_readiness(
                 "task_ids": missing_artifact_task_ids,
             }
         )
-    if require_task_artifacts and invalid_task_artifacts:
+    if strict_controls_enabled and invalid_task_artifacts:
         blocking_items.append(
             {
                 "type": "invalid_task_artifacts",
