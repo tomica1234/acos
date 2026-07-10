@@ -1274,6 +1274,142 @@ def test_recreate_target_files_treats_directory_target_as_missing(
     assert record.status == JobStatus.REPLANNING
 
 
+def test_recreate_target_files_rewrites_empty_test_file_deterministically(
+    tmp_path: Path,
+) -> None:
+    test_path = "frontend/test/project_scaffold.test.tsx"
+    (tmp_path / test_path).parent.mkdir(parents=True)
+    (tmp_path / test_path).write_text("", encoding="utf-8")
+    spec = JobSpec(
+        request_text="Build it",
+        repo_path=str(tmp_path),
+        workspace_root=str(tmp_path),
+        target_branch="acos/recovery-empty-test-target",
+    )
+    record = JobRecord(job_id=spec.job_id, spec=spec, status=JobStatus.RECOVERING)
+    record.runtime_state["recovery_plan"] = {
+        "id": "plan-empty-test-target",
+        "trigger": "completion_integrity_failed",
+        "strategy": "RETURN_TO_TEST_WRITER",
+        "next_status": JobStatus.WRITING_TESTS.value,
+        "next_actor": "test_writer",
+        "steps": ["RETURN_TO_TEST_WRITER", "RECREATE_TARGET_FILES"],
+        "current_step_index": 0,
+        "status": "pending",
+        "constraints": {
+            "required_artifacts": [test_path],
+            "target_files": [test_path],
+            "empty_artifacts": [test_path],
+        },
+    }
+    executor = RecoveryExecutor()
+
+    executor.execute_until_ready(record)
+    first_plan = record.runtime_state["recovery_plan"]
+    assert first_plan["status"] == "running"
+    assert first_plan["constraints"]["missing_artifacts"] == [test_path]
+    assert first_plan["constraints"]["empty_artifacts"] == [test_path]
+    assert (tmp_path / test_path).read_text(encoding="utf-8") == ""
+
+    executor.execute_until_ready(record)
+
+    plan = record.runtime_state["recovery_plan"]
+    content = (tmp_path / test_path).read_text(encoding="utf-8")
+    assert plan["status"] == "completed"
+    assert plan["constraints"]["deterministic_creation_attempted"] is True
+    assert plan["constraints"]["deterministically_created_files"] == [test_path]
+    assert plan["constraints"]["missing_artifacts"] == []
+    assert plan["constraints"]["empty_artifacts"] == []
+    assert "describe('project scaffold'" in content
+    assert record.status == JobStatus.WRITING_TESTS
+
+
+def test_recreate_target_files_returns_empty_source_file_to_owner_after_attempt(
+    tmp_path: Path,
+) -> None:
+    source_path = "src/app.py"
+    (tmp_path / source_path).parent.mkdir(parents=True)
+    (tmp_path / source_path).write_text("", encoding="utf-8")
+    spec = JobSpec(
+        request_text="Build it",
+        repo_path=str(tmp_path),
+        workspace_root=str(tmp_path),
+        target_branch="acos/recovery-empty-source-target",
+    )
+    record = JobRecord(job_id=spec.job_id, spec=spec, status=JobStatus.RECOVERING)
+    record.runtime_state["recovery_plan"] = {
+        "id": "plan-empty-source-target",
+        "trigger": "completion_integrity_failed",
+        "strategy": "RETURN_TO_IMPLEMENTER",
+        "next_status": JobStatus.IMPLEMENTING.value,
+        "next_actor": "implementer",
+        "steps": ["RETURN_TO_IMPLEMENTER", "RECREATE_TARGET_FILES"],
+        "current_step_index": 0,
+        "status": "pending",
+        "constraints": {
+            "required_artifacts": [source_path],
+            "target_files": [source_path],
+            "empty_artifacts": [source_path],
+        },
+    }
+    executor = RecoveryExecutor()
+
+    executor.execute_until_ready(record)
+    assert record.runtime_state["recovery_plan"]["status"] == "running"
+
+    executor.execute_until_ready(record)
+
+    plan = record.runtime_state["recovery_plan"]
+    assert (tmp_path / source_path).read_text(encoding="utf-8") == ""
+    assert plan["status"] == "completed"
+    assert plan["next_actor"] == "implementer"
+    assert plan["next_status"] == JobStatus.IMPLEMENTING.value
+    assert plan["constraints"]["deterministic_creation_attempted"] is True
+    assert plan["constraints"]["deterministically_created_files"] == []
+    assert plan["constraints"]["missing_artifacts"] == [source_path]
+    assert plan["constraints"]["empty_artifacts"] == [source_path]
+    assert record.spec.metadata["constraints"]["empty_artifacts"] == [source_path]
+    assert record.status == JobStatus.IMPLEMENTING
+
+
+def test_recreate_target_files_allows_empty_marker_artifacts(
+    tmp_path: Path,
+) -> None:
+    marker_path = "shared/.gitkeep"
+    (tmp_path / marker_path).parent.mkdir(parents=True)
+    (tmp_path / marker_path).write_text("", encoding="utf-8")
+    spec = JobSpec(
+        request_text="Build it",
+        repo_path=str(tmp_path),
+        workspace_root=str(tmp_path),
+        target_branch="acos/recovery-empty-marker",
+    )
+    record = JobRecord(job_id=spec.job_id, spec=spec, status=JobStatus.RECOVERING)
+    record.runtime_state["recovery_plan"] = {
+        "id": "plan-empty-marker",
+        "trigger": "completion_integrity_failed",
+        "strategy": "RETURN_TO_IMPLEMENTER",
+        "next_status": JobStatus.IMPLEMENTING.value,
+        "next_actor": "scaffold",
+        "steps": ["RETURN_TO_IMPLEMENTER", "RECREATE_TARGET_FILES"],
+        "current_step_index": 0,
+        "status": "pending",
+        "constraints": {
+            "required_artifacts": [marker_path],
+            "target_files": [marker_path],
+            "empty_artifacts": [marker_path],
+        },
+    }
+
+    RecoveryExecutor().execute_until_ready(record)
+
+    plan = record.runtime_state["recovery_plan"]
+    assert plan["status"] == "completed"
+    assert plan["constraints"]["missing_artifacts"] == []
+    assert plan["constraints"]["empty_artifacts"] == []
+    assert record.status == JobStatus.IMPLEMENTING
+
+
 def test_recreate_target_files_returns_uncreated_implementation_file_to_owner(
     tmp_path: Path,
 ) -> None:

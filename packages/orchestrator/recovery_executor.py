@@ -16,6 +16,8 @@ from packages.schemas.models import JobStatus
 class RecoveryExecutor:
     """Consume RecoveryGovernor plans and make them actionable."""
 
+    ALLOW_EMPTY_ARTIFACT_NAMES = frozenset({".gitkeep", ".keep", "__init__.py"})
+
     PROJECT_SETUP_TARGET_PATHS = frozenset(
         {
             "backend/main.py",
@@ -150,23 +152,27 @@ class RecoveryExecutor:
                 non_file_artifacts,
             )
             return True
+        empty_artifacts = self._empty_file_artifacts(root, paths)
         missing = [
             path for path in paths if not artifact_path_exists(path, workspace_root=root)
         ]
-        if not missing:
+        unresolved = self._unique_paths([*missing, *empty_artifacts])
+        if not unresolved:
             constraints["missing_artifacts"] = []
+            constraints["empty_artifacts"] = []
             return True
 
-        constraints["missing_artifacts"] = missing
-        self._assign_missing_file_owner(record, plan, constraints, missing)
+        constraints["missing_artifacts"] = unresolved
+        constraints["empty_artifacts"] = empty_artifacts
+        self._assign_missing_file_owner(record, plan, constraints, unresolved)
         runtime = record.runtime_state
         attempts = runtime.setdefault("recreate_target_files_attempts", {})
         if isinstance(attempts, dict):
-            key = "|".join(missing)
+            key = "|".join(unresolved)
             attempts[key] = int(attempts.get(key, 0)) + 1
             constraints["recreate_target_files_attempt"] = attempts[key]
             if attempts[key] >= 2:
-                attempted = self._attempt_deterministic_creation(root, missing)
+                attempted = self._attempt_deterministic_creation(root, unresolved)
                 constraints["deterministic_creation_attempted"] = True
                 constraints["deterministically_created_files"] = attempted
                 non_file_artifacts = self._non_file_artifacts(root, paths)
@@ -178,16 +184,23 @@ class RecoveryExecutor:
                         non_file_artifacts,
                     )
                     return True
+                empty_artifacts = self._empty_file_artifacts(root, paths)
                 missing = [
                     path
                     for path in paths
                     if not artifact_path_exists(path, workspace_root=root)
                 ]
-                constraints["missing_artifacts"] = missing
-                if not missing:
+                unresolved = self._unique_paths([*missing, *empty_artifacts])
+                constraints["missing_artifacts"] = unresolved
+                constraints["empty_artifacts"] = empty_artifacts
+                if not unresolved:
                     return True
-                self._assign_missing_file_owner(record, plan, constraints, missing)
-                self._force_project_setup_scaffold_when_needed(record, constraints, missing)
+                self._assign_missing_file_owner(record, plan, constraints, unresolved)
+                self._force_project_setup_scaffold_when_needed(
+                    record,
+                    constraints,
+                    unresolved,
+                )
                 return True
         return False
 
@@ -202,6 +215,20 @@ class RecoveryExecutor:
             if target.exists() and not target.is_file():
                 non_files.append(normalized)
         return non_files
+
+    @classmethod
+    def _empty_file_artifacts(cls, root: Path, paths: list[str]) -> list[str]:
+        empty_files: list[str] = []
+        for path in paths:
+            normalized = path.replace("\\", "/").removeprefix("./")
+            if invalid_artifact_paths([normalized]):
+                continue
+            if Path(normalized).name in cls.ALLOW_EMPTY_ARTIFACT_NAMES:
+                continue
+            target = root / normalized
+            if target.is_file() and target.stat().st_size == 0:
+                empty_files.append(normalized)
+        return cls._unique_paths(empty_files)
 
     @staticmethod
     def _route_non_file_artifacts_to_planner(
@@ -347,9 +374,12 @@ class RecoveryExecutor:
                 target.parent.mkdir(parents=True, exist_ok=True)
                 if target.exists() and not target.is_file():
                     continue
-                if not target.exists():
+                if not target.exists() or target.stat().st_size == 0:
                     target.write_text(content, encoding="utf-8")
-                if artifact_path_exists(normalized, workspace_root=root):
+                if (
+                    artifact_path_exists(normalized, workspace_root=root)
+                    and normalized not in self._empty_file_artifacts(root, [normalized])
+                ):
                     created.append(normalized)
             except OSError:
                 continue
@@ -432,7 +462,12 @@ class RecoveryExecutor:
         constraints: dict[str, Any],
     ) -> list[str]:
         paths: list[str] = []
-        for key in ("required_artifacts", "target_files", "missing_artifacts"):
+        for key in (
+            "required_artifacts",
+            "target_files",
+            "missing_artifacts",
+            "empty_artifacts",
+        ):
             value = constraints.get(key)
             if isinstance(value, list):
                 paths.extend(str(item) for item in value if str(item).strip())
@@ -450,6 +485,16 @@ class RecoveryExecutor:
             if normalized and normalized not in seen:
                 unique.append(normalized)
                 seen.add(normalized)
+        return unique
+
+    @staticmethod
+    def _unique_paths(paths: list[str]) -> list[str]:
+        seen: set[str] = set()
+        unique: list[str] = []
+        for path in paths:
+            if path and path not in seen:
+                unique.append(path)
+                seen.add(path)
         return unique
 
     def _apply_step(self, record: JobRecord, plan: dict[str, Any], step: str) -> None:
