@@ -4,39 +4,27 @@
 
 `packages.orchestrator.job_runner.JobRunner` is the control plane. It advances a
 job through explicit states and owns retries, policy checks, quality gates,
-tool execution, approval pauses, and model selection inputs.
+tool execution, and model selection inputs.
+
+`packages.orchestrator.autonomy_governor.AutonomyGovernor` decides how ACOS
+recovers from non-policy stops. Its default is to keep the job moving by
+recording a PM strategy change, adding recovery constraints to the job record,
+and passing that plan into the next agent context. Only policy hard stops are
+converted into human inspection paths.
 
 ## Data Plane
 
 - `packages.schemas.*` define every durable and agent-facing structure.
 - `packages.llm.registry.ModelRegistry` loads provider, model, and role config.
-- `packages.llm.budget.TokenBudgetPolicy` resolves prompt and completion
-  budgets with safety margins, minimum output, and optional hard caps.
 - `packages.llm.routing.ModelRouter` selects the model for each role.
-- `packages.orchestrator.job_store.SQLiteJobStore` persists jobs, tasks,
-  approvals, checkpoints, runtime issues, heartbeats, leases, and notifications.
-- `packages.orchestrator.policy.PolicyEngine` classifies every tool request as
-  `allow`, `allow_and_audit`, `require_approval`, or `deny`.
-- `packages.orchestrator.workspace.WorkspacePolicy` enforces workspace-root
-  confinement, symlink escape blocking, and forbidden path checks.
-- `packages.orchestrator.approval.ApprovalGateway` persists approval requests in
-  SQLite and issues one-time approval links.
-- `packages.orchestrator.checkpoint.CheckpointStore` tracks durable step
-  completion.
-- `packages.orchestrator.leases.LeaseManager` prevents multiple workers from
-  executing the same job concurrently.
-- `packages.orchestrator.provider_health.ProviderHealthChecker` probes provider
-  reachability and model availability.
-- `packages.orchestrator.runtime.RuntimeManager` classifies provider failures and
-  converts them into `waiting_runtime` / `resuming` transitions.
-- `packages.orchestrator.worker_daemon.WorkerDaemon` is the autonomous durable
-  runtime loop.
+- `configs/model_routing.yaml` escalates repeated implementation and fixer
+  failures from the default Ornith model to `ncmoe40_q4`; config validation
+  rejects no-op escalation rules that point back to the role primary model.
 - `packages.agents.runner.AgentRunner` reads the role config, asks
   `ModelRouter` for a `ModelSelection`, resolves the concrete adapter through
-  `ModelRegistry`, estimates prompt tokens from the message array, resolves an
-  integer API `max_tokens`, executes policy-approved MCP tools, retries invalid
-  JSON once with a repair prompt, and distinguishes `output_truncated` from
-  ordinary `invalid_json`.
+  `ModelRegistry`, executes policy-approved MCP tools, retries invalid JSON once
+  with a repair prompt, then falls back or escalates according to routing
+  policy.
 - `packages.mcp_client.router.MCPRouter` invokes only registered MCP tools.
 - `packages.memory.store.SQLiteMemoryStore` persists redacted memory entries.
 
@@ -53,86 +41,44 @@ tool execution, approval pauses, and model selection inputs.
 9. Release Manager proposes the release artifact and commit message.
 10. Summarizer stores memory and prepares a user-facing summary.
 
+When tests, planning quality gates, completion integrity, stage limits, or
+supervision stalls fail, ACOS records `failure_analysis`,
+`failure_diagnosis` when available, `autonomous_recovery_plan`, and
+`pm_interventions`. The next run uses those records as context instead of
+asking the user to choose a recovery path.
+
+The runtime separates status classes:
+
+- hard terminal: `DONE`, `CANCELLED`, `POLICY_HARD_STOP`
+- waiting: `WAITING_APPROVAL`, `WAITING_RUNTIME`, `PROVIDER_UNAVAILABLE`, `PAUSED`
+- recoverable: `BLOCKED`, `STUCK`, `FAILED`
+- runnable: submitted, queued, running, planning, implementing, testing,
+  recovering, replanning, diagnosing, strategy-change, and provider retry states
+
+`RecoveryGovernor` decides the strategy. `RecoveryExecutor` executes the saved
+steps, writes checkpoints, updates constraints, and returns the job to the next
+actor. This keeps `max_attempts_exceeded`, repeated failures, bad task graphs,
+review rejection, and completion integrity failures inside ACOS instead of
+turning them into human-facing terminal states.
+
+`SQLiteJobStore` persists job records, recovery plans, checkpoints, runtime
+issues, worker heartbeats, leases, tasks, and notifications. `WorkerDaemon`
+polls runnable jobs, acquires a lease, normalizes recoverable statuses to
+`RECOVERING`, and resumes after stale heartbeat or provider recovery.
+
 ## Tooling Boundary
 
 Agents do not edit the file system directly. They return structured outputs
 that the orchestrator turns into MCP tool calls. This keeps tool execution
 auditable and policy-gated.
 
-## Token Budget Flow
-
-1. `ContextBuilder` starts from the role budget in
-   `AgentModelConfig.context_budget_tokens`.
-2. `TokenBudgetPolicy` reserves `safety_margin_tokens` plus
-   `minimum_output_tokens`.
-3. `ContextBuilder` truncates or summarizes files, diffs, logs, and memory if
-   the estimated prompt would exceed the selected model window.
-4. `AgentRunner` re-estimates tokens from the actual message array and resolves
-   the final API `max_tokens` integer immediately before the adapter call.
-5. If there is not enough room for the minimum output after safety margin,
-   ACOS raises `ContextBudgetExceededError` rather than silently clipping the
-   completion budget.
-6. If a provider returns `finish_reason=length` before valid JSON is produced,
-   ACOS records `output_truncated` and surfaces that separately from
-   `invalid_json`.
-
-## Approval Flow
-
-1. A role or orchestrator stage requests an MCP tool.
-2. `PolicyEngine.classify_tool_call()` evaluates the request against the
-   workspace sandbox and risk rules.
-3. `ALLOW` executes immediately.
-4. `ALLOW_AND_AUDIT` executes immediately and records an explicit policy event.
-5. `REQUIRE_APPROVAL` creates an `ApprovalRequest`, stores it in SQLite, sends a
-   notification, and moves the job to `waiting_approval`.
-6. CLI or HTTP approval resolves the request.
-7. `JobRunner.resume_job()` consumes the approved operation once and resumes from
-   the stored phase. Rejected or expired approvals transition the job to
-   `blocked`.
-
-Current MVP behavior is job-level pause and resume. Task-level parallel progress
-while another task waits for approval is not implemented yet.
-
-## Durable Runtime Flow
-
-1. `jobs submit` persists a job as `queued`.
-2. `WorkerDaemon` polls queued/running/recovering/resuming jobs.
-3. The worker acquires a lease and writes a heartbeat.
-4. `JobRunner.run_next_step()` advances exactly one durable step.
-5. Each step records a checkpoint before and after execution.
-6. Provider failures become `waiting_runtime` rather than `failed`.
-7. Stale lease / stale heartbeat detection moves interrupted jobs to
-   `recovering`.
-8. Recovery resumes from completed checkpoints rather than replaying every step.
-
-## Notification Flow
-
-- `notify_server.send_approval_request` emits:
-  - `approval_id`
-  - `job_id`
-  - `risk_level`
-  - `operation`
-  - `reason`
-  - one-time approve and reject URLs
-  - CLI fallback command
-- The fake notify server writes these messages to console-style buffers for
-  deterministic local testing.
-- Additional runtime notifications cover:
-  - provider wait
-  - provider recovered
-  - job completed
-  - job failed
-
 ## Audit Boundary
 
 `packages.orchestrator.audit.AuditRecorder` records:
 
 - model selection events with `model_key`, `provider_key`, and `routing_reason`
-- model call events with redacted hashes, estimated input tokens, resolved
-  `max_tokens`, model context window, safety margin, and completion token usage
+- model call events with redacted hashes and token estimates
 - tool call events with hashed inputs and outputs
-- policy decisions with operation, risk level, and approval id when present
-- approval lifecycle events such as requested, approved, rejected, and expired
 
 Raw prompts, API keys, and secret-like strings are not stored in audit event
 metadata.

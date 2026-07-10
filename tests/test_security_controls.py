@@ -14,13 +14,15 @@ from packages.mcp_client.fake import FakeMCPEnvironment, RepoServer, TestServer
 from packages.mcp_client.router import MCPRouter
 from packages.memory.redaction import redact_text
 from packages.orchestrator.audit import AuditRecorder
-from packages.orchestrator.job_runner import JobRunner
+from packages.orchestrator.job_runner import JobRunner, build_default_runner
 from packages.orchestrator.policy import PolicyEngine
+from packages.orchestrator.quality_gates import QualityGateError
 from packages.schemas.runtime import RuntimeHttpCheck
 from packages.schemas.agent_outputs import FilePatch, ImplementationResult, TestRunResult
 from packages.schemas.context import ContextPacket
 from packages.schemas.jobs import JobRecord, JobSpec
-from packages.schemas.models import ImplementationStatus
+from packages.schemas.models import ImplementationStatus, JobStatus
+from packages.schemas.tasks import PlannedTask
 
 from tests.conftest import attach_mock_adapter, config_dir, load_registry
 
@@ -64,7 +66,10 @@ def test_repo_server_blocks_secret_paths_and_symlink_escape(tmp_path: Path) -> N
     outside_file = tmp_path / "outside.txt"
     outside_file.write_text("secret", encoding="utf-8")
     (workspace / "inside.py").write_text("VALUE = 1\n", encoding="utf-8")
-    (workspace / "link.txt").symlink_to(outside_file)
+    try:
+        (workspace / "link.txt").symlink_to(outside_file)
+    except OSError as exc:
+        pytest.skip(f"symlink creation is unavailable in this environment: {exc}")
     repo = RepoServer(workspace)
 
     assert repo.repo_tree()["files"] == ["inside.py"]
@@ -80,6 +85,40 @@ def test_repo_server_blocks_secret_paths_and_symlink_escape(tmp_path: Path) -> N
 
     with pytest.raises(ValueError):
         repo.read_file("link.txt")
+
+
+def test_default_runner_context_retrieval_blocks_secret_target_files(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / ".env.local").write_text("API_KEY=sk-this-should-not-be-read\n", encoding="utf-8")
+    (workspace / "inside.py").write_text("VALUE = 1\n", encoding="utf-8")
+    runner, _ = build_default_runner(
+        config_dir=config_dir(),
+        workspace_root=workspace,
+        memory_db_path=workspace / ".memory.sqlite3",
+    )
+    spec = JobSpec(
+        request_text="Inspect the workspace without reading secrets",
+        repo_path=str(workspace),
+        target_branch="acos/secret-context",
+    )
+    record = JobRecord(job_id=spec.job_id, spec=spec, status=JobStatus.SUBMITTED)
+    task = PlannedTask(
+        id="secret-target",
+        title="Secret target",
+        description="The planner incorrectly targeted a secret file.",
+        role="implementer",
+        target_files=[".env.local"],
+    )
+
+    files = runner._gather_relevant_files("implementer", record=record, task=task)
+
+    assert ".env.local" not in files
+    assert "sk-this-should-not-be-read" not in "\n".join(files.values())
+    assert any(
+        item["path"] == ".env.local" and item["action"].startswith("read_failed:")
+        for item in record.outputs["retrieval_trace"]
+    )
 
 
 def test_test_server_rejects_invalid_timeout_and_unknown_command(tmp_path: Path) -> None:
@@ -244,6 +283,30 @@ def test_test_server_runtime_smoke_detects_fastapi_entrypoint(
     assert captured["command"][-4:] == ["--host", "127.0.0.1", "--port", "8123"]
     assert captured["port"] == 8123
     assert captured["http_path"] == "/"
+
+
+def test_test_server_runtime_smoke_fails_http_checks_without_runtime_profile(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    server = TestServer(workspace)
+
+    payload = server.run_test(
+        command_name="runtime-smoke-auto",
+        http_checks=[
+            {
+                "name": "home",
+                "method": "GET",
+                "path": "/",
+                "expect_status": 200,
+            }
+        ],
+    )
+
+    assert payload["success"] is False
+    assert payload["command"] == ["runtime-smoke", "missing-profile"]
+    assert "no supported runtime profile" in payload["output_excerpt"]
 
 
 def test_test_server_run_command_formats_server_placeholders(
@@ -474,12 +537,25 @@ def test_policy_blocks_test_and_dependency_patches() -> None:
         policy.assert_patch_target_allowed("fixer", "tests/test_feature.py")
 
     with pytest.raises(PermissionError):
+        policy.assert_patch_target_allowed(
+            "implementer",
+            "frontend/test/project_scaffold.test.tsx",
+        )
+
+    with pytest.raises(PermissionError):
+        policy.assert_patch_target_allowed("fixer", "src/App.spec.tsx")
+
+    with pytest.raises(PermissionError):
         policy.assert_patch_target_allowed("implementer", "pyproject.toml")
 
     with pytest.raises(PermissionError):
         policy.assert_patch_target_allowed("test_writer", ".env.local")
 
     policy.assert_patch_target_allowed("test_writer", "tests/test_feature.py")
+    policy.assert_patch_target_allowed(
+        "test_writer",
+        "frontend/test/project_scaffold.test.tsx",
+    )
 
 
 def test_agent_runner_rejects_tool_override_outside_agent_config(tmp_path: Path) -> None:
@@ -580,6 +656,138 @@ def test_job_runner_blocks_dependency_manifest_patch(tmp_path: Path) -> None:
             record,
             "implementer",
             [FilePatch(path="pyproject.toml", content="[project]\nname='bad'\n")],
+        )
+
+
+def test_job_runner_blocks_weak_frontend_test_writer_patch(tmp_path: Path) -> None:
+    registry = load_registry()
+    policy = PolicyEngine.from_path(config_dir() / "policies.yaml")
+    environment = FakeMCPEnvironment(
+        workspace_root=tmp_path,
+        memory_db_path=tmp_path / ".memory.sqlite3",
+    )
+    runner = JobRunner(registry=registry, policy=policy, router=environment.build_router())
+    record = JobRecord(
+        job_id="job-weak-test",
+        spec=JobSpec(
+            request_text="test",
+            repo_path=str(tmp_path),
+            workspace_root=str(tmp_path),
+            target_branch="acos/security-check",
+        ),
+    )
+
+    with pytest.raises(QualityGateError, match="test_writer attempted to weaken tests"):
+        runner._apply_patches(
+            record,
+            "test_writer",
+            [
+                FilePatch(
+                    path="frontend/test/project_scaffold.test.tsx",
+                    operation="create",
+                    content=(
+                        "import { it } from 'vitest'\n\n"
+                        "it('placeholder', () => {\n"
+                        "})\n"
+                    ),
+                )
+            ],
+        )
+
+
+def test_job_runner_blocks_weak_scaffold_test_patch(tmp_path: Path) -> None:
+    registry = load_registry()
+    policy = PolicyEngine.from_path(config_dir() / "policies.yaml")
+    environment = FakeMCPEnvironment(
+        workspace_root=tmp_path,
+        memory_db_path=tmp_path / ".memory.sqlite3",
+    )
+    runner = JobRunner(registry=registry, policy=policy, router=environment.build_router())
+    record = JobRecord(
+        job_id="job-weak-scaffold-test",
+        spec=JobSpec(
+            request_text="test",
+            repo_path=str(tmp_path),
+            workspace_root=str(tmp_path),
+            target_branch="acos/security-check",
+        ),
+    )
+
+    with pytest.raises(QualityGateError, match="scaffold attempted to weaken tests"):
+        runner._apply_patches(
+            record,
+            "scaffold",
+            [
+                FilePatch(
+                    path="frontend/test/project_scaffold.test.tsx",
+                    operation="create",
+                    content=(
+                        "import { it } from 'vitest'\n\n"
+                        "it('placeholder', () => {\n"
+                        "})\n"
+                    ),
+                )
+            ],
+        )
+
+
+def test_job_runner_keeps_policy_deny_for_implementer_test_patch(
+    tmp_path: Path,
+) -> None:
+    registry = load_registry()
+    policy = PolicyEngine.from_path(config_dir() / "policies.yaml")
+    environment = FakeMCPEnvironment(
+        workspace_root=tmp_path,
+        memory_db_path=tmp_path / ".memory.sqlite3",
+    )
+    runner = JobRunner(registry=registry, policy=policy, router=environment.build_router())
+    record = JobRecord(
+        job_id="job-implementer-test-deny",
+        spec=JobSpec(
+            request_text="test",
+            repo_path=str(tmp_path),
+            workspace_root=str(tmp_path),
+            target_branch="acos/security-check",
+        ),
+    )
+
+    with pytest.raises(PermissionError, match="implementer.*test files"):
+        runner._apply_patches(
+            record,
+            "implementer",
+            [
+                FilePatch(
+                    path="tests/test_feature.py",
+                    operation="create",
+                    content="def test_placeholder() -> None:\n    pass\n",
+                )
+            ],
+        )
+
+
+def test_job_runner_blocks_test_writer_test_delete_patch(tmp_path: Path) -> None:
+    registry = load_registry()
+    policy = PolicyEngine.from_path(config_dir() / "policies.yaml")
+    environment = FakeMCPEnvironment(
+        workspace_root=tmp_path,
+        memory_db_path=tmp_path / ".memory.sqlite3",
+    )
+    runner = JobRunner(registry=registry, policy=policy, router=environment.build_router())
+    record = JobRecord(
+        job_id="job-delete-test",
+        spec=JobSpec(
+            request_text="test",
+            repo_path=str(tmp_path),
+            workspace_root=str(tmp_path),
+            target_branch="acos/security-check",
+        ),
+    )
+
+    with pytest.raises(QualityGateError, match="test_writer attempted to weaken tests"):
+        runner._apply_patches(
+            record,
+            "test_writer",
+            [FilePatch(path="tests/test_feature.py", operation="delete")],
         )
 
 

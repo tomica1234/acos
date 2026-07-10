@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import importlib.metadata
+import hashlib
 import json
 import os
 import re
@@ -10,49 +12,66 @@ import socket
 import subprocess
 import sys
 import time
-import urllib.parse
+import tomllib
 import urllib.error
+import urllib.parse
 import urllib.request
+from fnmatch import fnmatch
 from http.cookiejar import CookieJar
-from pathlib import Path
-from pathlib import PurePosixPath
-from typing import Iterable
+from pathlib import Path, PurePosixPath
+from typing import TYPE_CHECKING, Iterable
 
 from packages.memory.redaction import redact_text
 from packages.memory.store import SQLiteMemoryStore
 from packages.mcp_client.router import MCPRouter
-from packages.orchestrator.workspace import WorkspacePolicy
 from packages.schemas.agent_outputs import TestRunResult
 from packages.schemas.runtime import RuntimeHttpCheck
 
-SAFE_HIDDEN_FILE_NAMES = {
-    ".env.example",
-    ".env.sample",
-    ".env.template",
-    ".gitignore",
-    ".python-version",
-}
+if TYPE_CHECKING:
+    from packages.orchestrator.workspace import WorkspacePolicy
 
-FORBIDDEN_EXACT_NAMES = {
-    ".git",
+FORBIDDEN_PATH_PARTS = {
+    ".env",
     ".ssh",
     ".aws",
-    "authorized_keys",
-    "credentials",
     "id_rsa",
     "id_ed25519",
-    "known_hosts",
+    "token",
+    "tokens",
+}
+FORBIDDEN_PATH_PATTERNS = {
+    ".env",
+    ".env.local",
+    ".env.*.local",
+    ".env.development",
+    ".env.*.development",
+    ".env.production",
+    ".env.*.production",
+    ".env.test",
+    ".env.*.test",
+    ".git",
+    ".git/**",
+    "**/.git/**",
+    "**/.ssh/**",
+    "**/.aws/**",
+    "**/id_rsa",
+    "**/id_ed25519",
+    "**/*credential*",
+    "**/*secret*",
+    "**/*token*",
 }
 
-FORBIDDEN_NAME_PATTERN = re.compile(
-    r"(^|[._-])(token|secret|credential|password|passwd)([._-]|$)",
-    re.IGNORECASE,
-)
-FORBIDDEN_SUFFIXES = {".pem", ".key", ".p12", ".crt", ".cer"}
-BINARY_SUFFIXES = {".sqlite3", ".db", ".pyc"}
-MAX_READ_CHARS = 50000
-MAX_PATCH_CHARS = 200000
-MAX_TEST_TIMEOUT_SECONDS = 600
+TEST_COMMAND_ALLOWLIST: dict[str, list[str]] = {
+    "django-test": [sys.executable, "manage.py", "test"],
+    "python-compile": [sys.executable, "-m", "compileall", "."],
+    "pytest": [sys.executable, "-m", "pytest", "-q"],
+    "pytest-unit": [sys.executable, "-m", "pytest", "tests", "-q"],
+    "npm-test": ["npm", "test"],
+    "npm-lint": ["npm", "run", "lint"],
+    "npm-typecheck": ["npm", "run", "typecheck"],
+}
+
+MAX_TEST_TIMEOUT_SECONDS = 1200
 MAX_INSTALL_TIMEOUT_SECONDS = 900
 MAX_RUNTIME_STARTUP_WAIT_SECONDS = 10
 PACKAGE_SPEC_PATTERN = re.compile(
@@ -77,15 +96,17 @@ PYTHON_WEB_ENTRYPOINT_CANDIDATES = (
     "src/api.py",
 )
 
-TEST_COMMAND_ALLOWLIST: dict[str, list[str]] = {
-    "python-compile": [sys.executable, "-m", "compileall", "."],
-    "pytest": [sys.executable, "-m", "pytest", "-q"],
-    "pytest-unit": [sys.executable, "-m", "pytest", "tests", "-q"],
-    "django-test": [sys.executable, "manage.py", "test"],
-    "npm-test": ["npm", "test"],
-    "npm-lint": ["npm", "run", "lint"],
-    "npm-typecheck": ["npm", "run", "typecheck"],
-}
+
+class _PythonExecutable(str):
+    """String path that compares equal to native and POSIX spellings on Windows."""
+
+    __hash__ = str.__hash__
+
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, str):
+            return False
+        raw = str(self)
+        return other in {raw, Path(raw).as_posix()}
 
 
 class RepoServer:
@@ -98,69 +119,55 @@ class RepoServer:
         self.modified_files: set[str] = set()
         self.workspace_policy = workspace_policy
 
-    @staticmethod
-    def _normalize_relative_path(relative_path: str) -> PurePosixPath:
-        normalized = PurePosixPath(relative_path.replace("\\", "/"))
-        if normalized.is_absolute():
-            raise ValueError("absolute paths are forbidden")
-        if not normalized.parts:
-            raise ValueError("empty path is forbidden")
-        if any(part in {"..", "."} for part in normalized.parts):
-            raise ValueError("relative traversal is forbidden")
-        return normalized
-
-    @classmethod
-    def _assert_component_allowed(cls, part: str, *, is_leaf: bool) -> None:
-        lowered = part.lower()
-        if part in FORBIDDEN_EXACT_NAMES:
-            raise ValueError("forbidden path access")
-        if lowered.startswith(".env") and part not in SAFE_HIDDEN_FILE_NAMES:
-            raise ValueError("forbidden path access")
-        if part.startswith(".") and not (is_leaf and part in SAFE_HIDDEN_FILE_NAMES):
-            raise ValueError("hidden path access is forbidden")
-        if FORBIDDEN_NAME_PATTERN.search(part):
-            raise ValueError("forbidden path access")
-        if Path(part).suffix.lower() in FORBIDDEN_SUFFIXES:
-            raise ValueError("forbidden path access")
-
     def _resolve(self, relative_path: str) -> Path:
-        normalized = self._normalize_relative_path(relative_path)
+        normalized = PurePosixPath(str(relative_path).replace("\\", "/")).as_posix()
         if self.workspace_policy is not None:
-            decision = self.workspace_policy.classify_path_access(
-                normalized.as_posix(),
-                "read",
-            )
+            decision = self.workspace_policy.classify_path_access(normalized, "read")
             if decision.policy_action.value == "deny":
                 raise ValueError(decision.reason)
-        for index, part in enumerate(normalized.parts):
-            self._assert_component_allowed(part, is_leaf=index == len(normalized.parts) - 1)
+        if self._is_forbidden_path(normalized):
+            raise ValueError("forbidden path access")
         target = (self.workspace_root / normalized).resolve()
         if self.workspace_root not in [target, *target.parents]:
             raise ValueError("workspace escape detected")
+        if target.is_symlink():
+            resolved_target = target.resolve()
+            if self.workspace_root not in [resolved_target, *resolved_target.parents]:
+                raise ValueError("symlink escape detected")
         return target
+
+    @staticmethod
+    def _is_forbidden_path(path: str) -> bool:
+        normalized = PurePosixPath(path).as_posix()
+        parts = PurePosixPath(normalized).parts
+        basename = PurePosixPath(normalized).name
+        return (
+            any(part in FORBIDDEN_PATH_PARTS for part in parts)
+            or any(
+                fnmatch(normalized, pattern) or fnmatch(basename, pattern)
+                for pattern in FORBIDDEN_PATH_PATTERNS
+            )
+        )
 
     def repo_tree(self) -> dict[str, object]:
         files = []
         for path in sorted(self.workspace_root.rglob("*")):
+            if path.is_symlink():
+                continue
             if not path.is_file():
                 continue
-            if "__pycache__" in path.parts:
+            if ".git" in path.parts or "__pycache__" in path.parts:
                 continue
-            relative_path = path.relative_to(self.workspace_root).as_posix()
-            try:
-                self._resolve(relative_path)
-            except ValueError:
+            if any(part.startswith(".") for part in path.relative_to(self.workspace_root).parts):
                 continue
-            if path.suffix in BINARY_SUFFIXES:
+            if path.suffix in {".sqlite3", ".db", ".pyc"}:
                 continue
-            files.append(relative_path)
+            files.append(path.relative_to(self.workspace_root).as_posix())
         return {"files": files}
 
     def read_file(self, path: str, max_chars: int = 20000) -> dict[str, object]:
-        if max_chars <= 0 or max_chars > MAX_READ_CHARS:
-            raise ValueError(f"max_chars must be between 1 and {MAX_READ_CHARS}")
         file_path = self._resolve(path)
-        if file_path.suffix in BINARY_SUFFIXES:
+        if file_path.suffix in {".sqlite3", ".db", ".pyc"}:
             raise ValueError("binary file access is forbidden")
         try:
             content = file_path.read_text(encoding="utf-8")
@@ -169,28 +176,183 @@ class RepoServer:
         content = content[:max_chars]
         return {"path": path, "content": content}
 
-    def search_text(self, query: str) -> dict[str, object]:
-        matches: list[dict[str, str]] = []
+    def search_text(
+        self,
+        query: str,
+        glob: str | None = None,
+        max_results: int = 50,
+        context_lines: int = 2,
+        case_sensitive: bool = False,
+        regex: bool = False,
+    ) -> dict[str, object]:
+        matches: list[dict[str, object]] = []
+        needle = query if case_sensitive else query.lower()
+        pattern = re.compile(query, 0 if case_sensitive else re.IGNORECASE) if regex else None
         for relative_path in self.repo_tree()["files"]:
+            if glob and not Path(str(relative_path)).match(glob):
+                continue
             file_path = self._resolve(str(relative_path))
-            content = file_path.read_text(encoding="utf-8")
-            if query in content:
-                matches.append({"path": str(relative_path), "snippet": query})
+            try:
+                content = file_path.read_text(encoding="utf-8")
+            except UnicodeDecodeError:
+                continue
+            haystack = content if case_sensitive else content.lower()
+            if pattern is None and needle not in haystack:
+                continue
+            if pattern is not None and pattern.search(content) is None:
+                continue
+            lines = content.splitlines()
+            for index, line in enumerate(lines, start=1):
+                search_line = line if case_sensitive else line.lower()
+                if pattern is None and needle not in search_line:
+                    continue
+                if pattern is not None and pattern.search(line) is None:
+                    continue
+                start = max(1, index - context_lines)
+                end = min(len(lines), index + context_lines)
+                snippet = "\n".join(lines[start - 1 : end])
+                matches.append(
+                    {
+                        "path": str(relative_path),
+                        "line": index,
+                        "line_number": index,
+                        "before": lines[start - 1 : index - 1],
+                        "match": line,
+                        "after": lines[index:end],
+                        "snippet": snippet,
+                    }
+                )
+                if len(matches) >= max_results:
+                    return {"matches": matches}
         return {"matches": matches}
 
-    def apply_patch(self, path: str, content: str, operation: str = "update") -> dict[str, object]:
-        if operation not in {"create", "update"}:
-            raise ValueError("unsupported patch operation")
-        if len(content) > MAX_PATCH_CHARS:
-            raise ValueError(f"patch content exceeds {MAX_PATCH_CHARS} chars")
+    def apply_patch(
+        self,
+        path: str,
+        content: str | None = None,
+        operation: str = "update",
+        new_path: str | None = None,
+        unified_diff: str | None = None,
+        base_sha256: str | None = None,
+        expected_old_content: str | None = None,
+        executable: bool | None = None,
+    ) -> dict[str, object]:
         file_path = self._resolve(path)
+        old_content: str | None = None
+        old_sha256: str | None = None
+        if file_path.exists() and file_path.is_file():
+            old_content = file_path.read_text(encoding="utf-8")
+            old_sha256 = hashlib.sha256(file_path.read_bytes()).hexdigest()
+        if base_sha256 is not None and file_path.exists():
+            digest = hashlib.sha256(file_path.read_bytes()).hexdigest()
+            if digest != base_sha256:
+                raise ValueError("base_sha256 mismatch")
+        if expected_old_content is not None:
+            if not file_path.exists():
+                raise ValueError("expected_old_content provided but file does not exist")
+            if file_path.read_text(encoding="utf-8") != expected_old_content:
+                raise ValueError("expected_old_content mismatch")
         if operation == "create":
+            if content is None:
+                raise ValueError("create operation requires content")
             file_path.parent.mkdir(parents=True, exist_ok=True)
-        elif not file_path.exists():
-            file_path.parent.mkdir(parents=True, exist_ok=True)
-        file_path.write_text(content, encoding="utf-8")
+            if file_path.exists():
+                raise ValueError(f"create operation would overwrite existing file: {path}")
+            file_path.write_text(content, encoding="utf-8")
+        elif operation == "update":
+            if not file_path.exists():
+                raise ValueError(f"target_files_missing:update target does not exist: {path}")
+            if unified_diff is not None:
+                patched = self._apply_unified_diff(
+                    old_content if old_content is not None else "",
+                    unified_diff,
+                )
+                file_path.write_text(patched, encoding="utf-8")
+            elif content is not None:
+                file_path.write_text(content, encoding="utf-8")
+            else:
+                raise ValueError("update operation requires content or unified_diff")
+        elif operation == "delete":
+            if not file_path.exists():
+                raise ValueError(f"delete operation target does not exist: {path}")
+            file_path.unlink()
+        elif operation == "rename":
+            if not new_path:
+                raise ValueError("rename operation requires new_path")
+            if not file_path.exists():
+                raise ValueError(f"rename operation source does not exist: {path}")
+            new_file_path = self._resolve(new_path)
+            if new_file_path.exists():
+                raise ValueError(f"rename operation target already exists: {new_path}")
+            new_file_path.parent.mkdir(parents=True, exist_ok=True)
+            file_path.rename(new_file_path)
+            self.modified_files.add(new_path)
+        else:
+            raise ValueError(f"unsupported patch operation: {operation}")
+        if executable is not None and operation != "delete":
+            target_path = self._resolve(new_path if operation == "rename" and new_path else path)
+            mode = target_path.stat().st_mode
+            if executable:
+                target_path.chmod(mode | 0o111)
+            else:
+                target_path.chmod(mode & ~0o111)
         self.modified_files.add(path)
-        return {"path": path, "operation": operation}
+        return {
+            "path": path,
+            "operation": operation,
+            "new_path": new_path,
+            "rollback": {
+                "old_sha256": old_sha256,
+                "old_content": old_content,
+            },
+        }
+
+    @staticmethod
+    def _apply_unified_diff(original: str, unified_diff: str) -> str:
+        original_lines = original.splitlines(keepends=True)
+        result: list[str] = []
+        source_index = 0
+        lines = unified_diff.splitlines(keepends=True)
+        index = 0
+        while index < len(lines):
+            line = lines[index]
+            if line.startswith(("--- ", "+++ ")):
+                index += 1
+                continue
+            if not line.startswith("@@"):
+                index += 1
+                continue
+            match = re.match(r"@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@", line)
+            if match is None:
+                raise ValueError("patch_conflict: invalid unified diff hunk")
+            old_start = int(match.group(1)) - 1
+            if old_start < source_index:
+                raise ValueError("patch_conflict: overlapping unified diff hunk")
+            result.extend(original_lines[source_index:old_start])
+            source_index = old_start
+            index += 1
+            while index < len(lines) and not lines[index].startswith("@@"):
+                hunk_line = lines[index]
+                marker = hunk_line[:1]
+                text = hunk_line[1:]
+                if marker == " ":
+                    if source_index >= len(original_lines) or original_lines[source_index] != text:
+                        raise ValueError("patch_conflict: context mismatch")
+                    result.append(original_lines[source_index])
+                    source_index += 1
+                elif marker == "-":
+                    if source_index >= len(original_lines) or original_lines[source_index] != text:
+                        raise ValueError("patch_conflict: removal mismatch")
+                    source_index += 1
+                elif marker == "+":
+                    result.append(text)
+                elif hunk_line.startswith("\\ No newline"):
+                    pass
+                else:
+                    raise ValueError("patch_conflict: unsupported unified diff line")
+                index += 1
+        result.extend(original_lines[source_index:])
+        return "".join(result)
 
 
 class GitServer:
@@ -240,10 +402,78 @@ class GitServer:
             raise ValueError("direct protected branch operation is forbidden")
         if not branch.startswith("acos/"):
             raise ValueError("branch must start with 'acos/'")
-        if any(char in branch for char in {" ", "\t", "\n", "\r", ":", "~", "^", "?"}):
-            raise ValueError("invalid branch name")
-        if ".." in branch:
-            raise ValueError("invalid branch name")
+
+
+class RealGitServer:
+    """Real git backend with protected branch and rollback safeguards."""
+
+    def __init__(self, workspace_root: str | Path, *, branch_prefix: str = "acos/") -> None:
+        self.workspace_root = Path(workspace_root).resolve()
+        self.branch_prefix = branch_prefix
+
+    def status(self) -> dict[str, object]:
+        output = self._git("status", "--porcelain=v1")
+        modified = [
+            line[3:]
+            for line in output.splitlines()
+            if len(line) >= 4 and line[:2].strip()
+        ]
+        return {"modified_files": modified, "branch": self.current_branch()["branch"]}
+
+    def diff(self) -> dict[str, object]:
+        return {"diff": self._git("diff")}
+
+    def current_branch(self) -> dict[str, object]:
+        return {"branch": self._git("rev-parse", "--abbrev-ref", "HEAD").strip()}
+
+    def create_branch(self, branch: str) -> dict[str, object]:
+        self._assert_branch_allowed(branch)
+        self._git("checkout", "-B", branch)
+        return {"branch": branch}
+
+    def commit(self, message: str, branch: str) -> dict[str, object]:
+        self._assert_branch_allowed(branch)
+        if not message.startswith("acos:"):
+            raise ValueError("commit message must start with 'acos:'")
+        current = self.current_branch()["branch"]
+        if current != branch:
+            raise ValueError(f"current branch {current} does not match requested branch {branch}")
+        self._git("add", "--all")
+        self._git("commit", "-m", message)
+        sha = self._git("rev-parse", "HEAD").strip()
+        return {"sha": sha, "message": message, "branch": branch}
+
+    def rollback_last_acos_commit(self) -> dict[str, object]:
+        message = self._git("log", "-1", "--pretty=%s").strip()
+        if not message.startswith("acos:"):
+            raise ValueError("last commit is not an ACOS commit")
+        self._git("revert", "--no-edit", "HEAD")
+        return {"reverted": True, "message": message}
+
+    def restore_file(self, path: str) -> dict[str, object]:
+        resolved = (self.workspace_root / path).resolve()
+        if self.workspace_root not in [resolved, *resolved.parents]:
+            raise ValueError("workspace escape detected")
+        self._git("restore", "--", path)
+        return {"path": path, "restored": True}
+
+    def _git(self, *args: str) -> str:
+        result = subprocess.run(
+            ["git", *args],
+            cwd=self.workspace_root,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode != 0:
+            raise RuntimeError(result.stderr.strip() or result.stdout.strip() or "git failed")
+        return result.stdout
+
+    def _assert_branch_allowed(self, branch: str) -> None:
+        if branch in {"main", "master", "develop"}:
+            raise ValueError("direct protected branch operation is forbidden")
+        if not branch.startswith(self.branch_prefix):
+            raise ValueError(f"branch must start with {self.branch_prefix!r}")
 
 
 class TestServer:
@@ -254,6 +484,7 @@ class TestServer:
     ) -> None:
         self.workspace_root = Path(workspace_root).resolve()
         self.scripted_results = list(scripted_results or [])
+        self._installed_dependency_roots: set[Path] = set()
 
     def run_test(
         self,
@@ -268,7 +499,10 @@ class TestServer:
         if command_name == "prepare-runtime-auto":
             return self._run_runtime_prepare(timeout_seconds=timeout_seconds)
         if command_name == "runtime-smoke-auto":
-            return self._run_runtime_smoke(timeout_seconds=timeout_seconds, http_checks=http_checks)
+            return self._run_runtime_smoke(
+                timeout_seconds=timeout_seconds,
+                http_checks=http_checks,
+            )
         if command_name == "django-wsgi-check":
             return self._run_django_wsgi_check(timeout_seconds=timeout_seconds)
         if command_name not in TEST_COMMAND_ALLOWLIST:
@@ -277,7 +511,11 @@ class TestServer:
             raise ValueError(
                 f"timeout_seconds must be between 1 and {MAX_TEST_TIMEOUT_SECONDS}"
             )
-        command = self._normalize_python_command(list(TEST_COMMAND_ALLOWLIST[command_name]))
+        command = list(TEST_COMMAND_ALLOWLIST[command_name])
+        command = self._normalize_python_command(command)
+        dependency_result = self._ensure_project_test_dependencies(timeout_seconds)
+        if dependency_result is not None:
+            return dependency_result.model_dump()
         return self._execute_test_command(command, timeout_seconds=timeout_seconds)
 
     def install_package(
@@ -383,13 +621,24 @@ class TestServer:
     ) -> dict[str, object]:
         profile = self._detect_runtime_profile()
         if profile is None:
+            if http_checks:
+                return TestRunResult(
+                    success=False,
+                    command=["runtime-smoke", "missing-profile"],
+                    failed_tests=[],
+                    output_excerpt=(
+                        "runtime HTTP checks were requested, but no supported "
+                        "runtime profile was detected"
+                    ),
+                    exit_code=1,
+                ).model_dump()
             return TestRunResult(
                 success=True,
                 command=["runtime-smoke", "skipped"],
                 failed_tests=[],
                 output_excerpt="no runtime smoke check available",
                 exit_code=0,
-        ).model_dump()
+            ).model_dump()
         if profile["kind"] == "django":
             return self._run_django_runserver_check(
                 timeout_seconds=timeout_seconds,
@@ -800,7 +1049,7 @@ class TestServer:
             body = exc.read(4000).decode("utf-8", errors="replace").strip()
         except (urllib.error.URLError, TimeoutError, OSError):
             return None
-        output = f"GET / -> HTTP {status_code}"
+        output = f"GET {http_path} -> HTTP {status_code}"
         if body:
             output = f"{output}\n{body}"
         return {
@@ -829,8 +1078,18 @@ class TestServer:
 
     @staticmethod
     def _normalize_python_command(command: list[str]) -> list[str]:
-        if len(command) >= 3 and command[0] == sys.executable and command[1] != "-B":
-            return [command[0], "-B", *command[1:]]
+        if not command:
+            return command
+        first = command[0]
+        try:
+            is_python = Path(first).resolve() == Path(sys.executable).resolve()
+        except OSError:
+            is_python = first == sys.executable
+        if is_python:
+            executable = _PythonExecutable(sys.executable)
+            if len(command) >= 2 and command[1] == "-B":
+                return [executable, *command[1:]]
+            return [executable, "-B", *command[1:]]
         return command
 
     def _build_subprocess_env(self) -> dict[str, str]:
@@ -870,8 +1129,199 @@ class TestServer:
             failed_tests=failed_tests,
             output_excerpt=output[-20000:],
             exit_code=completed.returncode,
+            executed_test_count=_parse_executed_test_count(output),
         )
         return payload.model_dump()
+
+    def _ensure_project_test_dependencies(
+        self,
+        timeout_seconds: int,
+    ) -> TestRunResult | None:
+        inferred_result = self._install_missing_requirements(
+            self.workspace_root,
+            self._inferred_test_requirements(),
+            timeout_seconds,
+        )
+        if inferred_result is not None:
+            return inferred_result
+        dependency_roots = self._dependency_roots()
+        if not dependency_roots:
+            return None
+        for root in dependency_roots:
+            if root in self._installed_dependency_roots:
+                continue
+            install_command = self._dependency_install_command(root)
+            if install_command is None:
+                self._installed_dependency_roots.add(root)
+                continue
+            install_result = self._run_dependency_install(
+                root,
+                install_command,
+                timeout_seconds,
+            )
+            if install_result is not None:
+                return install_result
+            self._installed_dependency_roots.add(root)
+        return None
+
+    def _install_missing_requirements(
+        self,
+        root: Path,
+        requirements: list[str],
+        timeout_seconds: int,
+    ) -> TestRunResult | None:
+        missing = [
+            requirement
+            for requirement in requirements
+            if not self._requirement_installed(requirement)
+        ]
+        if not missing:
+            return None
+        return self._run_dependency_install(
+            root,
+            [sys.executable, "-m", "pip", "install", *missing],
+            timeout_seconds,
+        )
+
+    @staticmethod
+    def _run_dependency_install(
+        root: Path,
+        install_command: list[str],
+        timeout_seconds: int,
+    ) -> TestRunResult | None:
+        env = os.environ.copy()
+        env["PYTHONDONTWRITEBYTECODE"] = "1"
+        try:
+            result = subprocess.run(
+                install_command,
+                cwd=root,
+                capture_output=True,
+                text=True,
+                timeout=timeout_seconds,
+                env=env,
+                check=False,
+            )
+        except subprocess.TimeoutExpired as exc:
+            output = "\n".join(
+                item
+                for item in [
+                    "Dependency installation timed out before tests could run.",
+                    str(exc.stdout or ""),
+                    str(exc.stderr or ""),
+                ]
+                if item
+            )
+            return TestRunResult(
+                success=False,
+                command=install_command,
+                failed_tests=[],
+                output_excerpt=output[-20000:],
+                exit_code=124,
+                executed_test_count=0,
+            )
+        output = (result.stdout + "\n" + result.stderr).strip()
+        if result.returncode != 0:
+            return TestRunResult(
+                success=False,
+                command=install_command,
+                failed_tests=[],
+                output_excerpt=(
+                    "Dependency installation failed before tests could run.\n"
+                    + output
+                )[-20000:],
+                exit_code=result.returncode,
+                executed_test_count=0,
+            )
+        return None
+
+    def _dependency_roots(self) -> list[Path]:
+        roots: set[Path] = set()
+        for path in self.workspace_root.rglob("requirements.txt"):
+            if self._is_visible_workspace_file(path):
+                roots.add(path.parent)
+        for path in self.workspace_root.rglob("pyproject.toml"):
+            if self._is_visible_workspace_file(path) and self._pyproject_has_dependencies(path):
+                roots.add(path.parent)
+        return sorted(roots, key=lambda item: len(item.parts))
+
+    def _is_visible_workspace_file(self, path: Path) -> bool:
+        try:
+            relative = path.relative_to(self.workspace_root)
+        except ValueError:
+            return False
+        return not any(part.startswith(".") for part in relative.parts)
+
+    def _dependency_install_command(self, root: Path) -> list[str] | None:
+        requirements = root / "requirements.txt"
+        if requirements.exists():
+            missing = [
+                requirement
+                for requirement in self._read_requirements(requirements)
+                if not self._requirement_installed(requirement)
+            ]
+            if missing:
+                return [sys.executable, "-m", "pip", "install", *missing]
+            return None
+        pyproject = root / "pyproject.toml"
+        if pyproject.exists() and self._pyproject_has_dependencies(pyproject):
+            return [sys.executable, "-m", "pip", "install", "-e", str(root)]
+        return None
+
+    def _inferred_test_requirements(self) -> list[str]:
+        requirements: list[str] = []
+        for path in self.workspace_root.rglob("*.py"):
+            if not self._is_visible_workspace_file(path):
+                continue
+            try:
+                content = path.read_text(encoding="utf-8")
+            except UnicodeDecodeError:
+                continue
+            if (
+                "python -m playwright" in content
+                or '"-m", "playwright"' in content
+                or "'-m', 'playwright'" in content
+                or "import playwright" in content
+            ):
+                requirements.append("playwright")
+            if "import pytest_asyncio" in content or "pytest.mark.asyncio" in content:
+                requirements.append("pytest-asyncio")
+            if "aiosqlite" in content:
+                requirements.append("aiosqlite")
+        return sorted(set(requirements))
+
+    @staticmethod
+    def _read_requirements(path: Path) -> list[str]:
+        requirements: list[str] = []
+        for line in path.read_text(encoding="utf-8").splitlines():
+            item = line.strip()
+            if not item or item.startswith("#") or item.startswith("-"):
+                continue
+            requirements.append(item)
+        return requirements
+
+    @staticmethod
+    def _requirement_installed(requirement: str) -> bool:
+        package_name = re.split(r"[<>=!~;\\[]", requirement, maxsplit=1)[0].strip()
+        if not package_name:
+            return True
+        try:
+            importlib.metadata.version(package_name)
+            return True
+        except importlib.metadata.PackageNotFoundError:
+            return False
+
+    @staticmethod
+    def _pyproject_has_dependencies(path: Path) -> bool:
+        try:
+            data = tomllib.loads(path.read_text(encoding="utf-8"))
+        except (OSError, tomllib.TOMLDecodeError):
+            return False
+        project = data.get("project")
+        if not isinstance(project, dict):
+            return False
+        dependencies = project.get("dependencies")
+        optional = project.get("optional-dependencies")
+        return bool(dependencies) or bool(optional)
 
     @staticmethod
     def _is_virtualenv_python() -> bool:
@@ -879,6 +1329,26 @@ class TestServer:
 
 
 TestServer.__test__ = False
+
+
+def _parse_executed_test_count(output: str) -> int | None:
+    lowered = output.lower()
+    if "no tests ran" in lowered or "collected 0 items" in lowered:
+        return 0
+    ran_match = re.search(r"\bran\s+(\d+)\s+tests?\b", lowered)
+    if ran_match:
+        return int(ran_match.group(1))
+    collected_match = re.search(r"\bcollected\s+(\d+)\s+items?\b", lowered)
+    if collected_match and "passed" not in lowered and "failed" not in lowered:
+        return int(collected_match.group(1))
+    counts = [
+        int(match.group(1))
+        for match in re.finditer(
+            r"\b(\d+)\s+(?:passed|failed|errors?|skipped|xfailed|xpassed)\b",
+            lowered,
+        )
+    ]
+    return sum(counts) if counts else None
 
 
 class MemoryServer:
@@ -902,11 +1372,11 @@ class MemoryServer:
         return {"scope": memory_scope, "key": memory_key}
 
     def read_memory(self, uri: str | None = None, scope: str | None = None, limit: int = 20) -> dict[str, object]:
-        resolved_scope = self._resolve_scope(uri=uri, scope=scope)[0]
+        resolved_scope = self._resolve_read_scope(uri=uri, scope=scope)
         return {"entries": self.memory_store.read(scope=resolved_scope, limit=limit)}
 
     def search_memory(self, query: str, uri: str | None = None, scope: str | None = None, limit: int = 20) -> dict[str, object]:
-        resolved_scope = self._resolve_scope(uri=uri, scope=scope)[0]
+        resolved_scope = self._resolve_read_scope(uri=uri, scope=scope)
         return {"entries": self.memory_store.search(query=query, scope=resolved_scope, limit=limit)}
 
     def update_task_summary(self, uri: str, summary: str) -> dict[str, object]:
@@ -926,159 +1396,44 @@ class MemoryServer:
                 raise ValueError("memory URI must start with memory://")
             remainder = uri[len("memory://") :]
             scope_part, _, key_part = remainder.partition("/")
-            return scope_part or None, key_part or "default"
-        return scope, item_key or "default"
+            return scope_part or "global", key_part or "default"
+        return scope or "global", item_key or "default"
+
+    @staticmethod
+    def _resolve_read_scope(
+        *,
+        uri: str | None = None,
+        scope: str | None = None,
+    ) -> str | None:
+        if uri is None:
+            return scope
+        if not uri.startswith("memory://"):
+            raise ValueError("memory URI must start with memory://")
+        remainder = uri[len("memory://") :]
+        scope_part, _, _key_part = remainder.partition("/")
+        return scope_part or None
 
 
 class NotifyServer:
     def __init__(self) -> None:
         self.notifications: list[str] = []
-        self.approval_notifications: list[dict[str, str]] = []
-        self.runtime_notifications: list[dict[str, str]] = []
-        self.job_notifications: list[dict[str, str]] = []
+        self.approval_notifications: list[dict[str, object]] = []
+        self.runtime_notifications: list[dict[str, object]] = []
 
-    def send_notification(self, body: str | None = None, message: str | None = None) -> dict[str, object]:
+    def send_notification(
+        self,
+        body: str | None = None,
+        message: str | None = None,
+        **metadata: object,
+    ) -> dict[str, object]:
         text = redact_text((body if body is not None else message or "")[:2000])
         self.notifications.append(text)
-        return {"message": text, "channel": "console"}
-
-    def send_approval_request(
-        self,
-        approval_id: str,
-        job_id: str,
-        risk_level: str,
-        operation: str,
-        reason: str,
-        approve_url: str | None = None,
-        reject_url: str | None = None,
-        cli_command: str | None = None,
-    ) -> dict[str, object]:
-        stored_message = redact_text(
-            "\n".join(
-                [
-                    "ACOS approval required",
-                    f"Job: {job_id}",
-                    f"Operation: {operation}",
-                    f"Risk: {risk_level}",
-                    f"Reason: {reason}",
-                    f"Approve: {approve_url or 'use CLI'}",
-                    f"Reject: {reject_url or 'use CLI'}",
-                    f"CLI: {cli_command or f'acos approvals approve {approval_id}'}",
-                ]
-            )
-        )
-        self.notifications.append(stored_message)
-        payload = {
-            "approval_id": approval_id,
-            "job_id": job_id,
-            "risk_level": risk_level,
-            "operation": operation,
-            "reason": redact_text(reason),
-            "approve_url": approve_url,
-            "reject_url": reject_url,
-            "cli_command": cli_command or f"acos approvals approve {approval_id}",
-            "channel": "console",
-        }
-        self.approval_notifications.append(
-            {
-                "approval_id": approval_id,
-                "job_id": job_id,
-                "operation": operation,
-                "risk_level": risk_level,
-                "approve_url": approve_url or "",
-                "reject_url": reject_url or "",
-                "cli_command": cli_command or f"acos approvals approve {approval_id}",
-            }
-        )
-        return payload
-
-    def send_runtime_wait(
-        self,
-        job_id: str,
-        provider_key: str,
-        model_key: str | None = None,
-        reason: str | None = None,
-        kind: str = "runtime_wait",
-        channel: str = "console",
-        cli_command: str | None = None,
-    ) -> dict[str, object]:
-        payload = {
-            "job_id": job_id,
-            "provider_key": provider_key,
-            "model_key": model_key,
-            "reason": redact_text(reason or "provider unavailable"),
-            "kind": kind,
-            "channel": channel,
-            "cli_command": cli_command or f"acos jobs resume {job_id}",
-        }
-        self.runtime_notifications.append({key: str(value or "") for key, value in payload.items()})
-        self.notifications.append(
-            redact_text(
-                "\n".join(
-                    [
-                        "ACOS runtime is waiting for model provider",
-                        f"Job: {job_id}",
-                        f"Provider: {provider_key}",
-                        f"Model: {model_key or '-'}",
-                        f"Reason: {reason or 'provider unavailable'}",
-                        f"CLI: {payload['cli_command']}",
-                    ]
-                )
-            )
-        )
-        return payload
-
-    def send_provider_recovered(
-        self,
-        job_id: str,
-        provider_key: str,
-        model_key: str | None = None,
-        cli_command: str | None = None,
-    ) -> dict[str, object]:
-        payload = {
-            "job_id": job_id,
-            "provider_key": provider_key,
-            "model_key": model_key,
-            "kind": "provider_recovered",
-            "channel": "console",
-            "cli_command": cli_command or f"acos jobs resume {job_id}",
-        }
-        self.runtime_notifications.append({key: str(value or "") for key, value in payload.items()})
-        self.notifications.append(
-            redact_text(
-                f"ACOS provider recovered\nJob: {job_id}\nProvider: {provider_key}\nCLI: {payload['cli_command']}"
-            )
-        )
-        return payload
-
-    def send_job_completed(
-        self,
-        job_id: str,
-        message: str | None = None,
-    ) -> dict[str, object]:
-        payload = {
-            "job_id": job_id,
-            "kind": "job_completed",
-            "channel": "console",
-            "message": redact_text(message or "job completed"),
-        }
-        self.job_notifications.append({key: str(value or "") for key, value in payload.items()})
-        self.notifications.append(payload["message"])
-        return payload
-
-    def send_job_failed(
-        self,
-        job_id: str,
-        message: str | None = None,
-    ) -> dict[str, object]:
-        payload = {
-            "job_id": job_id,
-            "kind": "job_failed",
-            "channel": "console",
-            "message": redact_text(message or "job failed"),
-        }
-        self.job_notifications.append({key: str(value or "") for key, value in payload.items()})
-        self.notifications.append(payload["message"])
+        payload = {"message": text, "channel": "console", **metadata}
+        kind = str(metadata.get("kind", ""))
+        if kind == "approval_required" or metadata.get("approval_id") is not None:
+            self.approval_notifications.append(payload)
+        if kind.startswith("runtime") or metadata.get("runtime_issue_id") is not None:
+            self.runtime_notifications.append(payload)
         return payload
 
 
@@ -1118,9 +1473,4 @@ class FakeMCPEnvironment:
         router.register("memory_server.search_memory", self.memory_server.search_memory)
         router.register("memory_server.update_task_summary", self.memory_server.update_task_summary)
         router.register("notify_server.send_notification", self.notify_server.send_notification)
-        router.register("notify_server.send_approval_request", self.notify_server.send_approval_request)
-        router.register("notify_server.send_runtime_wait", self.notify_server.send_runtime_wait)
-        router.register("notify_server.send_provider_recovered", self.notify_server.send_provider_recovered)
-        router.register("notify_server.send_job_completed", self.notify_server.send_job_completed)
-        router.register("notify_server.send_job_failed", self.notify_server.send_job_failed)
         return router

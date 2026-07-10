@@ -1,19 +1,17 @@
-"""Checkpoint schemas for durable job resumption."""
+"""Checkpoint schemas for durable recovery execution."""
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime
 from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field
 
-
-def utc_now() -> datetime:
-    return datetime.now(timezone.utc)
+from packages.schemas.jobs import utc_now
 
 
 class CheckpointRecord(BaseModel):
-    """Persisted checkpoint for idempotent step execution."""
+    """Persisted checkpoint for an idempotent recovery or job step."""
 
     model_config = ConfigDict(extra="forbid")
 

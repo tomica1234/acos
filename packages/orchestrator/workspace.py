@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import difflib
 from fnmatch import fnmatch
-from pathlib import Path, PurePosixPath
+from pathlib import Path, PurePosixPath, PureWindowsPath
 
 from packages.schemas.approvals import PolicyAction, RiskDecision, RiskLevel
 
@@ -132,7 +132,7 @@ class WorkspacePolicy:
 
     def _resolve_path(self, path: str, *, operation: str) -> Path:
         candidate = PurePosixPath(path)
-        if candidate.is_absolute():
+        if Path(path).is_absolute() or PureWindowsPath(path).is_absolute() or candidate.is_absolute():
             target = Path(path).resolve()
         else:
             if any(part in {"..", "."} for part in candidate.parts):

@@ -4,15 +4,14 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from typing import Any
 
 from openai import (
     APIConnectionError,
     APIStatusError,
     APITimeoutError,
-    AuthenticationError,
     BadRequestError,
-    NotFoundError,
     OpenAI,
     RateLimitError,
 )
@@ -25,15 +24,12 @@ from packages.schemas.models import ModelConfig, ModelProviderConfig, ModelResul
 class OpenAICompatibleAdapter:
     """Adapter for OpenAI-compatible chat completion APIs."""
 
+    PROMPT_ONLY_STRUCTURED_ROLES = {"implementer", "fixer"}
+
     def __init__(self, provider: ModelProviderConfig, model: ModelConfig) -> None:
         self.provider = provider
         self.model = model
-        api_key_env = provider.api_key_env.strip()
-        api_key = os.environ.get(api_key_env, "") if api_key_env else ""
-        if not api_key and provider.allow_empty_api_key:
-            api_key = provider.default_api_key or "EMPTY"
-        if not api_key and provider.default_api_key is not None:
-            api_key = provider.default_api_key
+        api_key = self._resolve_api_key(provider)
         self.client = OpenAI(
             api_key=api_key,
             base_url=provider.base_url,
@@ -52,28 +48,65 @@ class OpenAICompatibleAdapter:
         response_schema: dict[str, Any] | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> ModelResult:
-        if not isinstance(max_tokens, int):
-            raise TypeError("max_tokens must be resolved to an integer before adapter.generate()")
         kwargs: dict[str, Any] = {
             "model": self.model.model,
             "messages": messages,
             "temperature": temperature,
             "max_tokens": max_tokens,
         }
+        if self.provider.extra_body:
+            kwargs["extra_body"] = self.provider.extra_body
+        used_json_schema = False
         if top_p is not None:
             kwargs["top_p"] = top_p
         if tools:
             kwargs["tools"] = tools
-        if response_schema and self.provider.supports_json_mode:
-            kwargs["response_format"] = {"type": "json_object"}
-        extra_body = self._merged_extra_body(metadata)
-        if extra_body:
-            kwargs["extra_body"] = extra_body
+        request_timeout = self._request_timeout_seconds(metadata)
+        if request_timeout is not None:
+            kwargs["timeout"] = request_timeout
+        role = str((metadata or {}).get("role", ""))
+        use_provider_json_mode = (
+            self.provider.supports_json_mode
+            and role not in self.PROMPT_ONLY_STRUCTURED_ROLES
+        )
+        if response_schema:
+            if self.provider.supports_structured_output and self.model.supports_structured_output:
+                used_json_schema = True
+                kwargs["response_format"] = {
+                    "type": "json_schema",
+                    "json_schema": {
+                        "name": self._response_schema_name(response_schema),
+                        "strict": True,
+                        "schema": response_schema,
+                    },
+                }
+            elif use_provider_json_mode:
+                kwargs["response_format"] = {"type": "json_object"}
         try:
             response = self.client.chat.completions.create(**kwargs)
+        except BadRequestError as exc:
+            if (
+                used_json_schema
+                and self.provider.supports_json_mode
+                and self._should_downgrade_structured_output(exc)
+            ):
+                retry_kwargs = dict(kwargs)
+                retry_kwargs["response_format"] = {"type": "json_object"}
+                try:
+                    response = self.client.chat.completions.create(**retry_kwargs)
+                except Exception as retry_exc:  # pragma: no cover - network/provider failure
+                    raise AdapterError(
+                        redact_text(str(retry_exc)),
+                        code=self._classify_error(retry_exc),
+                    ) from retry_exc
+            else:
+                raise AdapterError(
+                    redact_text(str(exc)),
+                    code=self._classify_error(exc),
+                ) from exc
         except Exception as exc:  # pragma: no cover - network/provider failure
             raise AdapterError(
-                self._format_error_message(exc),
+                redact_text(str(exc)),
                 code=self._classify_error(exc),
             ) from exc
         choice = response.choices[0]
@@ -85,21 +118,17 @@ class OpenAICompatibleAdapter:
             tool_calls = [
                 {
                     "id": item.id,
+                    "type": getattr(item, "type", "function"),
                     "name": item.function.name,
                     "arguments": self._coerce_arguments(item.function.arguments),
                 }
                 for item in choice.message.tool_calls
             ]
-        finish_reason = getattr(choice, "finish_reason", None)
-        if (
-            response_schema
-            and self.provider.supports_json_mode
-            and content
-            and finish_reason != "length"
-        ):
+        if response_schema and use_provider_json_mode and content:
             try:
-                json.loads(content)
-            except json.JSONDecodeError as exc:
+                parsed_content = self._extract_json_object(content)
+                content = json.dumps(parsed_content, ensure_ascii=False)
+            except (json.JSONDecodeError, ValueError) as exc:
                 raise AdapterError(
                     "Provider returned invalid JSON for a structured response",
                     code="invalid_json",
@@ -110,28 +139,9 @@ class OpenAICompatibleAdapter:
             raw=response.model_dump(),
             model=self.model.model_id,
             provider=self.provider.name,
-            finish_reason=finish_reason,
+            finish_reason=getattr(choice, "finish_reason", None),
             usage=self._normalize_usage(getattr(response, "usage", None)),
-            output_truncated=finish_reason == "length",
         )
-
-    def _merged_extra_body(self, metadata: dict[str, Any] | None) -> dict[str, Any]:
-        provider_extra_body = dict(self.provider.extra_body)
-        metadata_extra_body = metadata.get("extra_body") if metadata is not None else None
-        if not isinstance(metadata_extra_body, dict):
-            return provider_extra_body
-        return self._deep_merge(provider_extra_body, metadata_extra_body)
-
-    @classmethod
-    def _deep_merge(cls, base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
-        merged = dict(base)
-        for key, value in override.items():
-            existing = merged.get(key)
-            if isinstance(existing, dict) and isinstance(value, dict):
-                merged[key] = cls._deep_merge(existing, value)
-                continue
-            merged[key] = value
-        return merged
 
     @staticmethod
     def _coerce_arguments(arguments: Any) -> dict[str, Any]:
@@ -148,66 +158,101 @@ class OpenAICompatibleAdapter:
         return {"value": arguments}
 
     @staticmethod
+    def _response_schema_name(response_schema: dict[str, Any]) -> str:
+        raw_name = str(response_schema.get("title") or "structured_output")
+        normalized = re.sub(r"[^A-Za-z0-9_-]", "_", raw_name).strip("_")
+        if not normalized:
+            normalized = "structured_output"
+        return normalized[:64]
+
+    @staticmethod
+    def _extract_json_object(content: str) -> dict[str, Any]:
+        cleaned = re.sub(r"<think>.*?</think>", "", content, flags=re.IGNORECASE | re.DOTALL)
+        cleaned = re.sub(r"```(?:json)?", "", cleaned, flags=re.IGNORECASE).replace("```", "")
+        decoder = json.JSONDecoder()
+        search_from = 0
+        while True:
+            start = cleaned.find("{", search_from)
+            if start == -1:
+                break
+            try:
+                parsed, _end = decoder.raw_decode(cleaned[start:])
+            except json.JSONDecodeError:
+                search_from = start + 1
+                continue
+            if isinstance(parsed, dict):
+                return parsed
+            search_from = start + 1
+        raise ValueError("No JSON object found in structured response")
+
+    @staticmethod
+    def _should_downgrade_structured_output(exc: BadRequestError) -> bool:
+        message = str(exc).lower()
+        return any(
+            marker in message
+            for marker in (
+                "unexpected empty grammar stack",
+                "failed to initialize samplers",
+                "grammar",
+                "json_schema",
+                "response_format",
+            )
+        )
+
+    @staticmethod
     def _normalize_usage(usage: Any) -> dict[str, int] | None:
         if usage is None:
             return None
-        payload = usage.model_dump() if hasattr(usage, "model_dump") else usage
-        if not isinstance(payload, dict):
-            return None
+        if hasattr(usage, "model_dump"):
+            payload = usage.model_dump()
+        elif isinstance(usage, dict):
+            payload = usage
+        else:
+            payload = {}
         normalized: dict[str, int] = {}
-        for key, value in payload.items():
-            if isinstance(value, bool):
-                continue
+        for key in ("prompt_tokens", "completion_tokens", "total_tokens"):
+            value = payload.get(key, getattr(usage, key, None))
             if isinstance(value, int):
                 normalized[key] = value
         return normalized or None
 
-    def _format_error_message(self, exc: Exception) -> str:
-        if isinstance(exc, APIStatusError):
-            status_code = getattr(exc, "status_code", None)
-            if status_code is None and getattr(exc, "response", None) is not None:
-                status_code = exc.response.status_code
-            message = (
-                f"Provider {self.provider.name} returned HTTP {status_code} "
-                f"for model {self.model.model}"
-            )
-            body = getattr(exc, "body", None)
-            if body not in (None, ""):
-                serialized = (
-                    json.dumps(body, sort_keys=True, default=str)
-                    if not isinstance(body, str)
-                    else body
-                )
-                message = f"{message}: {serialized}"
-            elif getattr(exc, "response", None) is not None:
-                try:
-                    response_text = exc.response.text.strip()
-                except Exception:  # pragma: no cover - defensive
-                    response_text = ""
-                if response_text:
-                    message = f"{message}: {response_text}"
-            return redact_text(message)
-        return redact_text(str(exc))
+    @staticmethod
+    def _request_timeout_seconds(metadata: dict[str, Any] | None) -> float | None:
+        if not isinstance(metadata, dict):
+            return None
+        value = metadata.get("request_timeout_seconds")
+        try:
+            timeout = float(value)
+        except (TypeError, ValueError):
+            return None
+        if timeout <= 0:
+            return None
+        return timeout
+
+    @staticmethod
+    def _resolve_api_key(provider: ModelProviderConfig) -> str:
+        env_name = provider.api_key_env.strip()
+        if env_name:
+            value = os.environ.get(env_name)
+            if value:
+                return value
+        if provider.default_api_key is not None:
+            return provider.default_api_key
+        if provider.allow_empty_api_key:
+            return "EMPTY"
+        return "missing-api-key"
 
     @staticmethod
     def _classify_error(exc: Exception) -> str:
-        if isinstance(exc, AuthenticationError):
-            return "auth_error"
         if isinstance(exc, (APITimeoutError, APIConnectionError)):
             return "timeout"
         if isinstance(exc, RateLimitError):
             return "rate_limit"
-        if isinstance(exc, NotFoundError):
-            return "model_not_found"
         if isinstance(exc, APIStatusError):
             if getattr(exc, "status_code", None) == 429:
                 return "rate_limit"
             if getattr(exc, "status_code", None) == 408:
                 return "timeout"
-            if getattr(exc, "status_code", None) == 401:
-                return "auth_error"
-            if getattr(exc, "status_code", None) == 404:
-                return "model_not_found"
         if isinstance(exc, BadRequestError):
             message = str(exc).lower()
             if "context" in message and any(

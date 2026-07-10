@@ -45,6 +45,7 @@ REDACTION_RULES: list[tuple[re.Pattern[str], str | None]] = [
 
 def redact_text(text: str) -> str:
     """Replace secret-like substrings with a redaction marker."""
+
     redacted = text
     for pattern, replacement in REDACTION_RULES:
         if replacement is None:
@@ -65,6 +66,7 @@ def redact_text(text: str) -> str:
 
 def redact_value(value: Any) -> Any:
     """Recursively redact strings inside nested structures."""
+
     if isinstance(value, str):
         return redact_text(value)
     if isinstance(value, dict):

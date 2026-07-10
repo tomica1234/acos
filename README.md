@@ -1,569 +1,340 @@
 # ACOS
 
 ACOS is an Autonomous Coding Operating System. A user provides product
-requirements in natural language, and ACOS decomposes the work across explicit
-roles such as PM, Architect, Planner, Implementer, Test Writer, Reviewer,
-Security Reviewer, Fixer, Summarizer, and Release Manager.
+requirements in natural language, and ACOS decomposes the work across multiple
+specialized roles for requirements analysis, architecture, planning,
+implementation, test generation, review, deterministic test execution, fixing,
+release finalization, memory summarization, and notification.
 
-ACOS は Autonomous Coding Operating System です。ユーザーが自然言語で要件を与えると、
-PM、Architect、Planner、Implementer、Test Writer、Reviewer、
-Security Reviewer、Fixer、Summarizer、Release Manager といった明示的な役割に
-作業を分解して進行します。
+The system is explicitly orchestrated. It does not delegate job lifecycle
+control to LLMs. Every role is model-routed through a registry and adapter
+layer so providers and model sizes remain interchangeable.
 
-The orchestrator owns state transitions, retries, stuck and blocked handling,
-tool permissions, and model selection. LLMs do not own workflow control.
+## Features
 
-状態遷移、リトライ、stuck / blocked 判定、ツール権限、モデル選択は Orchestrator が担当し、
-LLM 自体はワークフロー制御を持ちません。
+- Orchestrator-owned state machine with retries, blocked and stuck handling
+- AutonomyGovernor recovery that keeps jobs moving until completion unless a
+  policy hard stop is reached
+- RecoveryGovernor runtime recovery: `BLOCKED`, `STUCK`, and `FAILED` are
+  recoverable strategy-change triggers, while only `DONE`, `CANCELLED`, and
+  `POLICY_HARD_STOP` are hard terminal states
+- Role-specific model configuration and dynamic model escalation
+- OpenAI-compatible provider support plus a deterministic mock adapter
+- Pydantic-validated agent outputs and context packets
+- MCP-based tool routing for repo, git, test, memory, and notification actions
+- SQLite-backed memory store for MVP persistence
+- FastAPI API and CLI entrypoints
+- End-to-end vertical slice tests using fake MCP tools
 
-## Durable Runtime / 永続実行
-
-ACOS now includes a durable runtime backed by SQLite. `acos jobs submit --file job.yaml`
-persists the job in `.acos/acos.sqlite3`, and `acos worker run --forever` or
-`acos daemon start --foreground` can continue execution even if your terminal,
-browser, SSH session, or Codex UI disconnects.
-
-ACOS は SQLite ベースの Durable Runtime を持ちます。`acos jobs submit --file job.yaml`
-で投入した job は `.acos/acos.sqlite3` に永続化され、`acos worker run --forever`
-または `acos daemon start --foreground` によって、ターミナルやブラウザ、SSH、
-Codex UI が切断されても再接続後に継続できます。
-
-Key behaviors:
-
-- approval-required operations move the job to `waiting_approval`
-- provider outages move the job to `waiting_runtime` or `provider_unavailable`
-- stale heartbeat / lease detection moves interrupted jobs to `recovering`
-- restart resumes from checkpoints instead of replaying every step
-
-主な挙動:
-
-- 承認が必要な操作は `waiting_approval`
-- provider 障害は `waiting_runtime` または `provider_unavailable`
-- stale heartbeat / lease は `recovering`
-- 再起動後は checkpoint から再開
-
-Important limitation:
-
-- If the host Mac sleeps or loses power, execution stops while the machine is
-  unavailable. After the host starts again, the worker can recover unfinished
-  jobs from checkpoints.
-
-重要な制限:
-
-- 実行ホストの Mac がスリープまたは電源断になると、その間の実行は止まります。
-  起動後に worker が checkpoint から復旧できます。
-
-## Architecture Overview / アーキテクチャ概要
-
-- `packages/orchestrator/`: job runner, policy engine, audit, context builder
-- `packages/agents/`: role runner and role-specific prompt/config glue
-- `packages/llm/`: provider registry, model adapters, routing, budgets
-- `packages/mcp_client/`: local MCP-style router and fake tool environment
-- `mcp_servers/`: repo, git, test, memory, and notify server skeletons
-- `apps/`: CLI, API, and worker entrypoints
-
-主なディレクトリの役割は次の通りです。
-
-- `packages/orchestrator/`: ジョブ実行、ポリシー判定、監査、コンテキスト構築
-- `packages/agents/`: 各ロールの実行とプロンプト設定
-- `packages/llm/`: プロバイダ登録、モデルアダプタ、ルーティング、予算管理
-- `packages/mcp_client/`: ローカル MCP 風ルータとフェイク実行環境
-- `mcp_servers/`: repo / git / test / memory / notify サーバの骨組み
-- `apps/`: CLI、API、worker のエントリポイント
-
-## Model Routing Design / モデルルーティング設計
-
-ACOS does not fix itself to one model family. Every role resolves models
-through:
-
-ACOS は単一のモデル系列に固定されません。各ロールは次の仕組みを通じて
-利用モデルを解決します。
-
-- `ModelProviderConfig`: provider endpoint and capability metadata
-- `ModelConfig`: concrete model entry with context/output limits
-- `AgentModelConfig`: role-to-model mapping
-- `ModelRegistry`: YAML-backed provider/model/agent catalog
-- `ModelRouter`: role-aware selection, fallback, escalation, capability checks
-- `ModelAdapter`: provider-specific execution layer
-
-- `ModelProviderConfig`: プロバイダのエンドポイントと機能メタデータ
-- `ModelConfig`: コンテキスト長や出力上限を含むモデル定義
-- `AgentModelConfig`: ロールとモデルの対応付け
-- `ModelRegistry`: YAML ベースの provider / model / agent カタログ
-- `ModelRouter`: ロール単位の選択、フォールバック、エスカレーション、能力判定
-- `ModelAdapter`: プロバイダごとの実行層
-
-This allows patterns such as:
-
-これにより、たとえば次のような運用ができます。
-
-- every role can share one long-context model while keeping role-specific
-  prompts, tools, schemas, and sampling
-- `max_output_tokens` can stay `auto` and resolve per request instead of using
-  a fixed `1024` or `2048`
-- the orchestrator can still add escalation and fallback later through config
-
-- 全ロールで 1 つの long-context モデルを共有しつつ、ロールごとの
-  プロンプト、ツール、スキーマ、サンプリングを分離できる
-- `max_output_tokens` は固定 `1024` / `2048` ではなく、`auto` のまま
-  リクエストごとに解決できる
-- エスカレーションやフォールバックは後から設定で追加できる
-
-See [docs/MODEL_ROUTING.md](docs/MODEL_ROUTING.md) for the detailed routing
-design.
-
-詳細は [docs/MODEL_ROUTING.md](docs/MODEL_ROUTING.md) を参照してください。
-
-## Setup / セットアップ
-
-### 1. Install Dependencies / 依存関係のインストール
+## Setup From Scratch
 
 ```bash
 uv sync --group dev
-```
-
-### 2. Configure Environment / 環境変数の設定
-
-```bash
 cp .env.example .env
 ```
 
-Set the API key variables expected by `configs/model_providers.yaml`.
-
-`configs/model_providers.yaml` で参照している API キー環境変数を設定します。
+For local Ornith or any OpenAI-compatible endpoint, set the provider URL and API
+key environment variables expected by `configs/model_providers.yaml`. The
+default model record targets `ornith-1.0-35b-Q4_K_M.gguf` served from a local
+OpenAI-compatible `/v1` endpoint.
 
 Example:
 
-例:
-
 ```bash
-export OPENAI_API_KEY=replace-me
-export MOCK_API_KEY=dummy
+export ORNITH_API_KEY=replace-me
+export LOCAL_ORNITH_BASE_URL=http://localhost:8000/v1
 ```
 
-### 3. Point ACOS at Your OpenAI-Compatible API / OpenAI 互換 API の接続先を設定
+## OpenAI-Compatible Ornith Configuration
 
-Edit [configs/model_providers.yaml](configs/model_providers.yaml). For a local
-Qwen endpoint, update the provider `base_url` fields to match your
-OpenAI-compatible server.
-
-[configs/model_providers.yaml](configs/model_providers.yaml) を編集し、
-利用する OpenAI 互換 API に合わせて `base_url` を設定します。ローカルの
-Qwen エンドポイントを使う場合は、その URL に合わせて書き換えます。
-
-Example provider shape:
-
-設定例:
-
-```yaml
-providers:
-  local_qwen:
-    type: openai_compatible
-    base_url: "https://msi.tail5c01da.ts.net/v1"
-    api_key_env: "OPENAI_API_KEY"
-    allow_empty_api_key: true
-    default_api_key: "EMPTY"
-    timeout_seconds: 900
-    extra_body:
-      chat_template_kwargs:
-        enable_thinking: false
-    supports_tools: true
-    supports_json_mode: false
-```
-
-## Config Files / 設定ファイル
-
-### `configs/model_providers.yaml`
-
-Defines:
-
-内容:
+`configs/model_providers.yaml` defines providers and concrete model records.
+Each provider includes:
 
 - provider type
 - base URL
-- API key env var
+- API key environment variable name
 - timeout
 - tool support
 - JSON mode support
-- context and output limits
-- provider-specific request body extensions such as Qwen thinking flags
+- streaming support
+- provider-wide token limits
 
-- provider の種類
-- base URL
-- API キーを読む環境変数名
-- タイムアウト
-- ツール呼び出し対応
-- JSON mode 対応
-- コンテキスト長と出力上限
-- Qwen thinking 設定のような provider 固有 request body 拡張
+Each model includes:
 
-### `configs/agents.yaml`
+- provider binding
+- display name
+- max context and output tokens
+- tool calling support
+- structured output support
+- JSON repair capability
+- tags
 
-Defines, per role:
+## Role-Specific Model Settings
 
-ロールごとに次を定義します。
+`configs/agents.yaml` assigns models by role. This is where you decide that:
 
-- primary model
-- fallback models
-- sampling settings
-- `max_output_tokens` or `auto`
-- context budget
-- allowed tools
-- output schema
+- PM uses a long-context model
+- Architect uses a design-capable model
+- Implementer uses a coding model
+- Reviewer uses a strict low-temperature model
+- Summarizer uses the same local Ornith model for memory updates
+- Fixer can escalate repeated failures through routing policy while staying on
+  Ornith by default, and escalates repeated failures to `ncmoe40_q4`
 
-- primary model
-- fallback models
-- サンプリング設定
-- `max_output_tokens` または `auto`
-- コンテキスト予算
-- 使用可能ツール
-- 出力スキーマ
+`configs/model_routing.yaml` controls:
 
-Example idea:
-
-例:
-
-- `pm.primary_model = qwen_35b`
-- every role can set `max_output_tokens: auto`
-- every role can set `context_budget_tokens: 262144`
-
-### `configs/model_routing.yaml`
-
-Controls:
-
-制御対象:
-
-- fallback errors such as `timeout`, `rate_limit`, `invalid_json`
-- escalation triggers such as repeated failures
-- roles that require tool calling
+- fallback errors
+- escalation thresholds
+- roles that require tools
 - roles that require strict JSON
 
-- `timeout`, `rate_limit`, `invalid_json` などのフォールバック条件
-- 失敗回数に応じたエスカレーション条件
-- ツール呼び出しが必須のロール
-- strict JSON が必須のロール
+## CLI
 
-### `configs/policies.yaml`
-
-Defines:
-
-内容:
-
-- deny-by-default tool policy
-- release branch rules
-- test command restrictions
-- forbidden patch targets
-- protected file and secret-path restrictions
-
-### `configs/runtime.yaml`
-
-Defines provider health checks, waiting-runtime behavior, provider recovery,
-token budget policy, and whether recovery auto-resumes or waits for a manual
-`acos jobs resume`.
-
-## Token Budgeting / トークン予算
-
-ACOS treats API `max_tokens` as an output cap and `max_context_tokens` as the
-model context window. They are not the same value.
-
-ACOS は API の `max_tokens` を出力上限、`max_context_tokens` をモデルの
-コンテキスト長として別物で扱います。
-
-Before each LLM call, ACOS resolves the integer `max_tokens` with:
-
-各 LLM call の直前に、ACOS は次の式で整数の `max_tokens` を解決します。
-
-```text
-max_tokens = min(
-  configured max_output_tokens or remaining context,
-  model.max_context_tokens - estimated_input_tokens - safety_margin_tokens
-)
-```
-
-Current long-context defaults:
-
-- `qwen_35b.max_context_tokens = 262144`
-- `qwen_35b.max_output_tokens = auto`
-- every role sets `max_output_tokens = auto`
-- every role sets `context_budget_tokens = 262144`
-- runtime keeps `safety_margin_tokens = 4096`
-- provider `timeout_seconds = 900`
-
-If Qwen spends too long in thinking mode and returns `finish_reason=length`,
-ACOS records `output_truncated` instead of treating that case as plain
-`invalid_json`.
-
-Qwen が thinking mode で長引いて `finish_reason=length` を返した場合、
-ACOS はそれを単なる `invalid_json` ではなく `output_truncated` として記録します。
-
-Debug the resolved budget with:
-
-```bash
-acos debug token-budget --role pm --file job.yaml
-acos debug token-budget --role implementer --job-id <job_id>
-```
-
-### `configs/worker.yaml`
-
-Defines worker polling, heartbeat, lease TTL, stale recovery thresholds, and
-the default SQLite/log paths used by daemon mode.
-
-## Daemon Mode / 常駐実行
-
-Foreground:
-
-```bash
-acos daemon start --foreground --workspace .
-```
-
-Detached background process:
-
-```bash
-acos daemon start --detach --workspace .
-acos daemon status --workspace .
-acos daemon logs --workspace .
-```
-
-launchd plist generation on macOS:
-
-```bash
-acos daemon install-launchd --workspace .
-acos daemon uninstall-launchd --workspace .
-```
-
-The generated plist does not embed API keys or raw secrets.
-
-## Runtime Recovery / 復旧
-
-Check provider and model health:
-
-```bash
-acos check-provider --provider local_qwen
-acos check-model --model qwen_35b
-acos runtime status --workspace .
-acos runtime check --workspace .
-```
-
-If a provider recovers and auto-resume is disabled, continue manually:
-
-```bash
-acos jobs resume <job_id> --workspace .
-```
-
-- デフォルト拒否のツールポリシー
-- リリース系ブランチのルール
-- テストコマンドの制限
-- パッチ禁止対象
-- 保護ファイルと秘密情報パスの制限
-
-## MCP Server Overview / MCP サーバ概要
-
-ACOS routes repo, git, test, memory, and notification actions through MCP-style
-tools rather than arbitrary shell execution.
-
-ACOS は repo / git / test / memory / notification の操作を、任意の shell 実行ではなく
-MCP 風のツール呼び出し経由で扱います。
-
-Current MVP state:
-
-現状の MVP は次の状態です。
-
-- fake in-process MCP environment is implemented and used by tests
-- `mcp_servers/*` contains skeleton wrappers for future standalone servers
-
-- インプロセスの fake MCP 環境が実装済みで、テストで利用されている
-- `mcp_servers/*` には将来の standalone server 用スケルトンが入っている
-
-## Local Execution / ローカル実行
-
-### Validate Config / 設定検証
+Validate all config cross-references:
 
 ```bash
 acos validate-config
 ```
 
-### Inspect Models / モデル一覧確認
+List loaded models:
 
 ```bash
 acos list-models
 ```
 
-### Inspect Role Assignments / ロール割り当て確認
+List role-to-model assignments:
 
 ```bash
 acos list-agents
 ```
 
-### Resolve A Model For A Role / ロールごとのモデル解決
+Resolve the currently selected model for a role:
 
 ```bash
 acos resolve-model --role implementer
+```
+
+Resolve the model after repeated failures:
+
+```bash
 acos resolve-model --role fixer --repeated-failures 2
 ```
 
-### Explain Routing In Human Terms / ルーティング理由の確認
+Explain why routing chose a model and which fallback or escalation rules apply:
 
 ```bash
 acos explain-routing --role implementer
 ```
 
-### Run A Job From YAML / YAML からジョブを実行
-
-Start from [job.yaml.example](job.yaml.example):
-
-[job.yaml.example](job.yaml.example) をコピーして使います。
+Run a job from YAML:
 
 ```bash
-cp job.yaml.example job.yaml
 acos run-job --file job.yaml
 ```
 
-`run-job` accepts both:
+`run-job` applies the same strict quality gates used by the API and worker
+entrypoints: PRD quality, task acceptance criteria, required artifacts,
+completion integrity, test evidence, test patch evidence, and stage review.
 
-`run-job` は次の 2 形式に対応しています。
-
-- direct `JobSpec` fields such as `request_text`, `repo_path`, `target_branch`
-- a friendlier job file format using `requester_input`, `title`,
-  `base_branch`, `notification_channel`, `constraints`, and `workspace_root`
-
-- `request_text`, `repo_path`, `target_branch` などの `JobSpec` 直指定
-- `requester_input`, `title`, `base_branch`, `notification_channel`,
-  `constraints`, `workspace_root` を使う、より人が書きやすい形式
-
-### Approval Commands / 承認コマンド
-
-When ACOS hits a high-risk action, the job moves to `waiting_approval`.
-
-高リスク操作に到達すると、ジョブは `waiting_approval` に遷移します。
+Run a larger autonomous job in guarded stages:
 
 ```bash
-acos approvals list --workspace .
-acos approvals show <approval_id> --workspace .
-acos approvals approve <approval_id> --workspace .
-acos approvals reject <approval_id> --workspace . --reason "not acceptable"
-acos jobs resume <job_id> --workspace .
+acos plan-job --request "Build a project tracker with auth and tests" --repo-path . --jobs-dir .acos/jobs --summary-file .acos/plan-summary.json --preflight-provider local_ornith
+acos plan-job --request "Build a project tracker with auth and tests" --repo-path . --jobs-dir .acos/jobs --summary-file .acos/plan-summary.json --preflight-provider local_ornith --supervise-after-planning --supervise-max-cycles 10 --supervise-steps-per-cycle 1 --supervise-summary-file .acos/final-summary.json --supervise-summary-dir .acos/cycles --supervise-preflight-provider local_ornith
+acos run-autonomous --file job.yaml --jobs-dir .acos/jobs --max-steps 3
+acos run-supervised --file job.yaml --jobs-dir .acos/jobs --max-cycles 10 --steps-per-cycle 1 --max-stalled-cycles 3 --max-runtime-seconds 3600 --summary-file .acos/final-summary.json --summary-dir .acos/cycles
+acos run-supervised --request "Build a project tracker with auth and tests" --repo-path . --jobs-dir .acos/jobs --plan-first --max-cycles 10 --steps-per-cycle 1 --summary-file .acos/final-summary.json --summary-dir .acos/cycles --preflight-provider local_ornith
+acos run-supervised --request "Build a project tracker with auth and tests" --repo-path . --jobs-dir .acos/jobs --max-cycles 10
+acos run-supervised --request "Build the app from this PRD" --repo-path . --jobs-dir .acos/jobs --autonomous-until-done --summary-file .acos/final-summary.json --summary-dir .acos/cycles --preflight-provider local_ornith
+acos run-supervised --request "Build a project tracker" --repo-path . --preflight-provider local_ornith
+acos run-job --file job.yaml --jobs-dir .acos/jobs --large-autonomous
+acos job-status --job-id <job-id> --jobs-dir .acos/jobs
+acos continue-job --job-id <job-id> --jobs-dir .acos/jobs --max-steps 3
+acos continue-job --job-id <job-id> --jobs-dir .acos/jobs --max-steps 3 --json-summary
+acos continue-job --job-id <job-id> --jobs-dir .acos/jobs --max-steps 3 --json-summary --summary-file .acos/last-summary.json
+acos supervise-job --job-id <job-id> --jobs-dir .acos/jobs --max-cycles 10 --steps-per-cycle 1 --max-stalled-cycles 3 --summary-file .acos/final-summary.json --summary-dir .acos/cycles
+acos supervise-job --job-id <job-id> --jobs-dir .acos/jobs --autonomous-until-done --summary-file .acos/final-summary.json --summary-dir .acos/cycles
+acos job-status --job-id <job-id> --jobs-dir .acos/jobs --next-supervise-command --supervise-max-cycles 10 --supervise-steps-per-cycle 1 --supervise-summary-file .acos/final-summary.json --supervise-preflight-provider local_ornith
+acos job-status --job-id <job-id> --jobs-dir .acos/jobs --next-continue-command --continue-max-steps 3 --continue-json-summary
+acos job-status --job-id <job-id> --jobs-dir .acos/jobs --next-command
+acos resume-job --job-id <job-id> --jobs-dir .acos/jobs --bump-stage-limit
 ```
 
-Inside the configured workspace, normal development work is auto-allowed.
-Approval is reserved for high-risk actions such as large patches, mass delete,
-release-like operations, or external send operations. Critical actions remain
-denied.
+`--large-autonomous` keeps those strict gates enabled and adds a conservative
+one-stage execution limit for larger autonomous jobs.
+The PRD quality gate also requires enough acceptance tests to cover every
+declared `small_parts` item, so large requests are decomposed into verifiable
+units before coding begins. Task graph validation records `small_part_coverage`
+and `acceptance_test_coverage` so supervisors can audit which implementation
+task is responsible for each requirement slice and acceptance check.
 
-設定された workspace 内では、通常の開発操作は自動許可されます。承認が必要になるのは、
-大規模パッチ、一括削除、リリース相当の操作、外部送信などの高リスク操作です。
-重大な操作は引き続き拒否されます。
+`--autonomous-until-done` changes supervision from operator-assisted progress to
+PM-owned recovery. Repeated test failures, completion integrity failures, PRD
+quality failures, invalid task graphs, stage limits, stalls, and runtime
+limits are treated as recoverable strategy-change events. The job record stores
+`autonomous_recovery_plan` and `pm_interventions` so the next agent context sees
+why ACOS changed approach. Only `policy_hard_stop:*` style errors require human
+inspection.
+Recoverable errors are surfaced as `current_recovery_event` and
+`last_recoverable_error`; `last_error` is reserved for hard-stop conditions.
+Use `plan-job` when you want ACOS to spend a separate pass on PRD, architecture,
+task graph validation, and planning evidence before any implementation patches
+are applied. A successful planning run remains resumable through `continue-job`
+or `supervise-job`; `job-status --json` exposes `planning_summary` with
+planning completion, implementation readiness, and small-part coverage. Add
+`--preflight-provider local_ornith` when planning should first verify that the
+model endpoint is reachable. Add `--supervise-after-planning` when a successful
+planning pass should return a ready-to-run `supervise-job` command for the long
+implementation loop.
+Use `run-autonomous` to start a new job and immediately continue through several
+guarded stages. Use `run-supervised` to start a new large autonomous job and let
+ACOS repeatedly call the continuation logic itself for a fixed number of cycles,
+writing per-cycle summaries to `--summary-dir` and a final rollup to
+`--summary-file`. Add `--plan-first` when the same command should complete the
+planning-only PRD, architecture, and task validation gate before entering the
+supervised implementation loop. Pass either `--file job.yaml` or a direct `--request` with
+`--repo-path` when no YAML file is needed. `--max-stalled-cycles` stops
+supervision when repeated cycles produce the same progress marker, avoiding
+unbounded retry loops that are not changing task completion or patch progress.
+When this happens, the final JSON includes `stall_analysis`, and
+`operator_decision` returns a supervision recovery path. With
+`--autonomous-until-done`, ACOS records a PM strategy change and continues
+instead of returning to the user.
+`--max-runtime-seconds` stops supervision after the current cycle once the
+runtime budget is reached and returns `terminal_reason: runtime_limit`.
+Use `--preflight-provider local_ornith` on `run-supervised` or `supervise-job`
+to probe the OpenAI-compatible `/models` endpoint before starting or resuming a
+long run and before each supervised cycle; unhealthy providers return
+`terminal_reason: provider_unhealthy` without entering the implementation loop
+for that cycle. The same summary includes `operator_decision` with
+`resume_action: check_provider`, the latest preflight result, and
+`provider_events` history for pre-start and per-cycle probes. If the stopped
+command was supervising an existing persisted job, the summary also includes
+`next_supervise_command` so automation can retry the same guarded loop after the
+provider recovers.
+Use `job-status --json` when another script needs to inspect progress and decide
+whether to resume, raise the stage limit, or retry a failed stage; the JSON
+includes a `supervision` section with `next_supervise_command` for incomplete
+jobs. When a repeated or classified failure requires guarded recovery,
+`operator_decision` includes `failure_classification` and `recommended_recovery`
+so automation can see the intended recovery strategy and constraints before
+using the explicit recovery override. The same JSON includes `operator_summary`,
+a compact control view with the chosen action, command source, override
+requirement, and continuation/supervision availability. Use
+`job-status --next-supervise-command` to print a ready-to-run supervision
+command for an existing incomplete job, or `job-status --next-continue-command`
+to print a lower-level continuation command, with `--continue-max-steps` and
+`--continue-json-summary` when a supervising script wants a ready-to-run
+multi-step command. Add `--supervise-summary-file` when the generated
+supervision command should keep updating the same final JSON file, and
+`--supervise-preflight-provider` when it should keep probing the model endpoint
+before each resumed run. Use `continue-job` when ACOS should make that resume
+decision from an existing persisted job state.
+The legacy `job-status --next-command` still prints the older `resume-job`
+command when available, and falls back to `operator_decision.command` for
+guarded recovery cases such as repeated failures or completion integrity
+failures.
+Add `--json-summary` to `run-autonomous` or `continue-job` when automation needs
+the final progress summary and the number of continuation steps that actually
+ran. Add `--summary-file` with `--json-summary` to persist that same
+machine-readable summary for a supervisor, CI job, or later resume audit. Use
+`supervise-job` when the job already exists and ACOS should supervise its
+continuation cycles. The JSON summary includes `terminal_reason`,
+`next_action`, `can_continue`, `step_events`, `next_continue_cli_args`,
+`next_continue_command`, and `operator_decision` so supervisors can distinguish
+completed jobs from jobs that simply reached the current step limit, audit each
+continuation step, and launch the next continuation without inspecting nested
+summary fields.
+Supervised summaries also include `can_supervise_continue`,
+`next_supervise_cli_args`, and `next_supervise_command` when a stopped
+supervision run can be resumed as another guarded supervision run. Per-cycle
+summaries include the cycle `operator_decision`, and stalled stopping cycles
+also include `stall_analysis`, so a supervisor can audit which exact cycle
+changed from continuation to inspection. Runtime-limited stopping cycles include
+`runtime_analysis` and an inspection decision for the same reason; the final
+summary also carries the same `runtime_analysis` alongside the supervise retry
+command. Final supervised and provider-preflight stop summaries also include
+`stop_summary`, a compact aggregation of the terminal reason, operator action,
+next operator command, and any stall, runtime, or provider analysis needed by an
+external supervisor.
 
-### Start The API / API を起動
+Start the API:
 
 ```bash
 acos api
 ```
 
-### Start The Worker / Worker を起動
+Start the worker:
 
 ```bash
-acos worker
-acos worker --request "READMEにセットアップ手順を追加してください" --repo .
-acos worker --file job.yaml.example
+acos worker --request "build a small API" --repo .
 ```
 
-In the MVP, the worker is a simple entrypoint for running one job locally.
+## Repository Layout
 
-MVP の worker は、ローカルで 1 ジョブを実行するためのシンプルなエントリポイントです。
+- `apps/`: API, worker, and CLI entrypoints
+- `packages/`: reusable ACOS core modules
+- `mcp_servers/`: MCP server skeletons for repo, git, test, memory, notify
+- `configs/`: model, agent, routing, and policy configuration
+- `docs/`: implementation and operations documentation
+- `tests/`: schema, routing, orchestration, and vertical slice coverage
 
-## CLI Reference / CLI リファレンス
+## Config Files
 
-- `acos validate-config`
-- `acos list-models`
-- `acos list-agents`
-- `acos resolve-model --role implementer`
-- `acos resolve-model --role fixer --repeated-failures 2`
-- `acos explain-routing --role implementer`
-- `acos run-job --file job.yaml`
-- `acos approvals list`
-- `acos approvals show <approval_id>`
-- `acos approvals approve <approval_id>`
-- `acos approvals reject <approval_id> --reason "..."`
-- `acos jobs resume <job_id>`
-- `acos api`
-- `acos worker`
+- `configs/model_providers.yaml`: providers and model catalog
+- `configs/agents.yaml`: per-role model defaults and tool permissions
+- `configs/model_routing.yaml`: fallback, escalation, and capability rules
+- `configs/policies.yaml`: deny-by-default MCP and git policy
 
-## Testing / テスト
+## Testing
 
 ```bash
-python3 -m compileall acos
-.venv/bin/pytest
+make compile
+make pytest
+python -m apps.cli run-demo --workspace /tmp/acos-demo
 ```
 
-For a deterministic smoke test without a real provider:
+## Security Policy
 
-実際のモデルプロバイダなしで決定的なスモークテストを行う場合:
+- LLMs do not manage orchestration state
+- secrets are redacted before prompts, memory, audit, and notifications
+- workspace escapes are blocked
+- arbitrary shell is blocked
+- test execution is allowlisted
+- direct `main`/`master` writes are blocked
+- force push, production deploy, and destructive migrations are blocked
+
+## Runtime Recovery
+
+ACOS writes recovery plans to job runtime state when tests, quality gates,
+reviews, or required artifacts fail. The next worker cycle uses that plan as
+agent context and changes strategy instead of repeating the same fixer loop.
+Recoverable failures are tracked in recovery events, while `last_error` is kept
+for policy hard stops and other hard terminal failures.
+See [docs/RUNTIME_RECOVERY.md](docs/RUNTIME_RECOVERY.md).
+
+Hard terminal statuses are only `DONE`, `CANCELLED`, and
+`POLICY_HARD_STOP`. `BLOCKED`, `STUCK`, and `FAILED` are recoverable signals:
+the worker moves them through `RECOVERING`, asks `RecoveryGovernor` for a plan,
+and `RecoveryExecutor` consumes the plan before normal execution resumes.
+
+Durable execution can use `SQLiteJobStore`:
 
 ```bash
-python3 -m apps.cli run-demo --workspace /tmp/acos-demo
+acos-worker --repo . --sqlite-path .acos/acos.sqlite3 --forever
 ```
 
-## Security Policy / セキュリティポリシー
+Provider outages move jobs to `WAITING_RUNTIME`; once the provider health check
+passes, the runtime manager changes the job to `RESUMING` for automatic worker
+pickup.
 
-ACOS enforces:
+## Current Limitations
 
-ACOS では次を強制します。
+- MCP server implementations are still local skeletons and fake adapters for MVP
+- the Docker sandbox runner is structural only
+- OpenAI-compatible integration is implemented, but tests do not call real APIs
+- branch and patch handling are safe MVP abstractions, not full git-native automation
+- API mutation auth is enabled when `ACOS_API_TOKEN` is set; local dev can opt
+  out with `ACOS_LOCAL_DEV_AUTH_DISABLED=1`
 
-- deny-by-default tool policy
-- workspace-only file access
-- symlink escape blocking
-- workspace-auto approval gateway for high-risk operations
-- secret redaction before prompt, memory, audit, and notification use
-- allowlisted test commands only
-- protected branch restrictions
-- release commit restriction to `release_manager`
-- patch restrictions on tests and dependency manifests
-
-- デフォルト拒否のツールポリシー
-- workspace 外アクセスの禁止
-- symlink escape の遮断
-- 高リスク操作に対する workspace 内承認ゲート
-- prompt / memory / audit / notification 前の secret redact
-- 許可済みテストコマンドのみ実行可
-- protected branch 制約
-- `release_manager` のみがリリースコミット可能
-- テストや依存定義へのパッチ制限
-
-See [docs/SECURITY.md](docs/SECURITY.md).
-
-詳細は [docs/SECURITY.md](docs/SECURITY.md) を参照してください。
-
-## Current Limitations / 現状の制約
-
-- `mcp_servers/*` are still skeletons for standalone server mode
-- Docker sandbox execution is not implemented yet
-- tests do not call real external model APIs
-- `run-job` needs a reachable configured provider unless you switch configs to
-  mock models or use `run-demo`
-
-- `mcp_servers/*` は standalone server モード向けのスケルトン段階
-- Docker sandbox 実行は未実装
-- テストは実外部モデル API を呼ばない
-- `run-job` を使うには、mock モデル構成へ切り替えるか `run-demo` を使わない限り、
-  到達可能なプロバイダ設定が必要
-
-## Roadmap / ロードマップ
-
-- standalone MCP server transports
-- persistent audit and job history
-- stronger worker queue and background processing
-- real sandbox execution
-- richer semantic review and test-quality gates
-
-- standalone MCP server transport
-- 永続化された audit と job history
-- より強い worker queue とバックグラウンド処理
-- 実 sandbox 実行
-- より高度な semantic review と test-quality gate
-
-## More Detail / 詳細資料
-
-- [docs/QUICKSTART.md](docs/QUICKSTART.md)
-- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
-- [docs/MODEL_ROUTING.md](docs/MODEL_ROUTING.md)
-- [docs/SECURITY.md](docs/SECURITY.md)
+See [docs/QUICKSTART.md](docs/QUICKSTART.md) for setup details.

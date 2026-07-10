@@ -40,7 +40,7 @@ It validates:
   Uses the OpenAI Python SDK with provider `base_url` and `api_key_env`
   settings. It supports tool calls, returns normalized `ModelResult`, and raises
   explicit `invalid_json` errors when a provider running in JSON mode returns
-  malformed JSON. Provider `extra_body` is merged into the outgoing request.
+  malformed JSON.
 - `MockAdapter`
   Is deterministic and test-only. It accepts response sequences and can emit
   tool calls, invalid JSON, or fully structured fake responses without calling
@@ -69,7 +69,7 @@ Output:
 - selected provider key
 - routing reason
 - routing details
-- sampling settings and configured output budget
+- sampling settings and capped output budget
 
 1. Start with the role's primary model.
 2. Apply escalation when configured thresholds match.
@@ -85,12 +85,9 @@ hard-code provider names or model ids. The runner:
 2. asks `ModelRouter` for a `ModelSelection`
 3. resolves the concrete adapter from `ModelRegistry`
 4. converts allowed MCP tools into OpenAI-compatible tool definitions
-5. estimates prompt tokens from the actual message array
-6. resolves an integer API `max_tokens` from the role config, model context
-   window, and safety margin
-7. executes tool calls only when `PolicyEngine` allows them
-8. retries invalid JSON once with a repair prompt on the same model
-9. switches to fallback routing only after repair fails
+5. executes tool calls only when `PolicyEngine` allows them
+6. retries invalid JSON once with a repair prompt on the same model
+7. switches to fallback routing only after repair fails
 
 ## Fallback
 
@@ -121,8 +118,8 @@ Context budgeting combines:
 
 - role-level budget from `AgentModelConfig.context_budget_tokens`
 - selected model maximum context window
-- `TokenBudgetPolicy.minimum_output_tokens`
-- `TokenBudgetPolicy.safety_margin_tokens`
+- selected model output reservation
+- a safety overhead for prompt framing
 
 `ContextBuilder` truncates or summarizes:
 
@@ -134,18 +131,6 @@ Context budgeting combines:
 
 It also redacts secrets before prompt construction and writes
 `model_context_budget` plus `selected_model_hint` into the `ContextPacket`.
-
-`AgentRunner` then resolves:
-
-```text
-max_tokens = min(
-  configured max_output_tokens or remaining context,
-  model.max_context_tokens - estimated_input_tokens - safety_margin_tokens
-)
-```
-
-If the prompt already consumes too much of the model window, ACOS raises
-`ContextBudgetExceededError` instead of returning a tiny clipped output budget.
 
 ## Capability Requirements
 
@@ -159,15 +144,20 @@ Roles that require strict JSON may only use models that support:
 
 ## Role Examples
 
-- every role can point at `qwen_35b` while still keeping independent
-  temperatures, allowed tools, and output schemas
-- role configs can keep `max_output_tokens: auto` while the runtime resolves a
-  safe integer per request
-- future fallback or escalation models can still be introduced without changing
-  the orchestrator code path
+- PM and Architect use `ornith_35b_q4` for long-context planning.
+- Implementer, Test Writer, Reviewer, Fixer, Release Manager, and Summarizer all
+  route to the same local Ornith model by default.
+- Repeated-failure escalation must route to a different configured model.
+  `ModelRegistry.validate` rejects no-op escalation where
+  `escalated_model == primary_model`.
+- The default escalation target is `ncmoe40_q4`, allowing recovery to switch
+  away from `ornith_35b_q4` for repeated failures.
+
+Recovery constraints can force model escalation, long-context retrieval, JSON
+repair retries, or smaller structured-output retries. Provider outages are
+runtime waits, not job failures.
 
 ## Audit Expectations
 
 Every selection records the role, chosen model, provider, routing reason,
-estimated tokens, resolved `max_tokens`, routing details, and redacted
-input/output hashes.
+estimated tokens, routing details, and redacted input/output hashes.

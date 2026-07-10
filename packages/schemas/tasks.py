@@ -2,15 +2,13 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from packages.schemas.models import TaskComplexity, TaskStatus
-
-
-def utc_now() -> datetime:
-    return datetime.now(timezone.utc)
+from packages.schemas.jobs import utc_now
+from datetime import datetime
 
 
 class PlannedTask(BaseModel):
@@ -25,25 +23,83 @@ class PlannedTask(BaseModel):
     status: TaskStatus = TaskStatus.TODO
     complexity: TaskComplexity = TaskComplexity.MEDIUM
     depends_on: list[str] = Field(default_factory=list)
-    dependencies: list[str] = Field(default_factory=list)
+    acceptance_criteria: list[str] = Field(default_factory=list)
     target_files: list[str] = Field(default_factory=list)
     required_artifacts: list[str] = Field(default_factory=list)
-    attempt_count: int = 0
-    max_attempts: int = 3
-    approval_id: str | None = None
-    pending_runtime_issue_id: str | None = None
-    last_error: str | None = None
-    checkpoint_key: str | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_llm_aliases(cls, value: Any) -> Any:
+        if not isinstance(value, dict):
+            return value
+        normalized = dict(value)
+        if not normalized.get("title"):
+            for key in ("name", "summary", "description", "instruction", "id"):
+                candidate = normalized.get(key)
+                if isinstance(candidate, str) and candidate.strip():
+                    normalized["title"] = candidate.strip().splitlines()[0][:120]
+                    break
+        if not normalized.get("description"):
+            for key in ("instruction", "details", "summary", "title"):
+                candidate = normalized.get(key)
+                if isinstance(candidate, str) and candidate.strip():
+                    normalized["description"] = candidate.strip()
+                    break
+        if "depends_on" not in normalized and "dependencies" in normalized:
+            normalized["depends_on"] = normalized.get("dependencies")
+        if "acceptance_criteria" not in normalized:
+            for key in ("acceptance_tests", "acceptance", "done_when"):
+                if key in normalized:
+                    normalized["acceptance_criteria"] = normalized.get(key)
+                    break
+        if "target_files" not in normalized:
+            for key in ("files", "changed_files", "expected_files"):
+                if key in normalized:
+                    normalized["target_files"] = normalized.get(key)
+                    break
+        if "required_artifacts" not in normalized:
+            for key in ("artifacts", "deliverables", "required_files"):
+                if key in normalized:
+                    normalized["required_artifacts"] = normalized.get(key)
+                    break
+        for alias in (
+            "name",
+            "summary",
+            "instruction",
+            "details",
+            "dependencies",
+            "acceptance_tests",
+            "acceptance",
+            "done_when",
+            "files",
+            "changed_files",
+            "expected_files",
+            "artifacts",
+            "deliverables",
+            "required_files",
+        ):
+            normalized.pop(alias, None)
+        return normalized
+
+
+class TaskGraph(BaseModel):
+    """A planned graph of ACOS tasks."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    goal: str
+    tasks: list[PlannedTask] = Field(default_factory=list)
+    notes: list[str] = Field(default_factory=list)
 
 
 class TaskRecord(BaseModel):
-    """Persisted task state for durable execution."""
+    """Durable task row derived from a planned task."""
 
     model_config = ConfigDict(extra="forbid")
 
     task_id: str
     job_id: str
-    status: TaskStatus = TaskStatus.QUEUED
+    status: TaskStatus = TaskStatus.TODO
     title: str
     description: str
     role: str
@@ -65,28 +121,12 @@ class TaskRecord(BaseModel):
         return cls(
             task_id=task.id,
             job_id=job_id,
-            status=task.status if task.status != TaskStatus.TODO else TaskStatus.QUEUED,
+            status=task.status,
             title=task.title,
             description=task.description,
             role=task.role,
             complexity=task.complexity,
-            dependencies=list(task.dependencies or task.depends_on),
+            dependencies=list(task.depends_on),
             target_files=list(task.target_files),
             required_artifacts=list(task.required_artifacts),
-            attempt_count=task.attempt_count,
-            max_attempts=task.max_attempts,
-            pending_approval_id=task.approval_id,
-            pending_runtime_issue_id=task.pending_runtime_issue_id,
-            last_error=task.last_error,
-            checkpoint_key=task.checkpoint_key,
         )
-
-
-class TaskGraph(BaseModel):
-    """A planned graph of ACOS tasks."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    goal: str
-    tasks: list[PlannedTask] = Field(default_factory=list)
-    notes: list[str] = Field(default_factory=list)

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -31,15 +30,6 @@ class ContextPacket(BaseModel):
     selected_model_hint: str | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
 
-    _INTERNAL_METADATA_KEYS = {
-        "context_truncated",
-        "context_truncation_notes",
-        "estimated_input_tokens",
-        "context_budget_tokens",
-        "effective_context_budget_tokens",
-        "safety_margin_tokens",
-    }
-
     def render_text(self) -> str:
         """Render the packet into a readable prompt body."""
         lines = [
@@ -52,16 +42,6 @@ class ContextPacket(BaseModel):
             "request:",
             self.request_text,
         ]
-        visible_metadata = {
-            key: value
-            for key, value in self.metadata.items()
-            if key not in self._INTERNAL_METADATA_KEYS
-        }
-        if visible_metadata:
-            lines.append("metadata:")
-            for key, value in visible_metadata.items():
-                rendered = json.dumps(value, ensure_ascii=False, sort_keys=True)
-                lines.append(f"- {key}: {rendered}")
         if self.constraints:
             lines.extend(["constraints:"] + [f"- {item}" for item in self.constraints])
         if self.memory_summaries:
@@ -73,9 +53,26 @@ class ContextPacket(BaseModel):
                     f"- id: {self.task.id}",
                     f"- title: {self.task.title}",
                     f"- description: {self.task.description}",
+                    f"- role: {self.task.role}",
                     f"- complexity: {self.task.complexity.value}",
+                    f"- depends_on: {', '.join(self.task.depends_on) if self.task.depends_on else 'none'}",
                 ]
             )
+            if self.task.acceptance_criteria:
+                lines.extend(
+                    ["- acceptance_criteria:"]
+                    + [f"  - {item}" for item in self.task.acceptance_criteria]
+                )
+            if self.task.target_files:
+                lines.extend(
+                    ["- target_files:"]
+                    + [f"  - {item}" for item in self.task.target_files]
+                )
+            if self.task.required_artifacts:
+                lines.extend(
+                    ["- required_artifacts:"]
+                    + [f"  - {item}" for item in self.task.required_artifacts]
+                )
         if self.relevant_files:
             lines.append("files:")
             for path, content in self.relevant_files.items():

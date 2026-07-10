@@ -17,9 +17,6 @@ class MCPRouter:
     def register(self, tool_name: str, handler: ToolHandler) -> None:
         self._handlers[tool_name] = handler
 
-    def has_tool(self, tool_name: str) -> bool:
-        return tool_name in self._handlers
-
     def call(self, tool_name: str, **kwargs: Any) -> ToolCallResult:
         handler = self._handlers.get(tool_name)
         if handler is None:
@@ -31,3 +28,4 @@ class MCPRouter:
 
     def available_tools(self) -> list[str]:
         return sorted(self._handlers)
+

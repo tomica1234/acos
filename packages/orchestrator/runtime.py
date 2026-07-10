@@ -8,9 +8,8 @@ from uuid import uuid4
 
 import yaml
 
-from packages.orchestrator.job_store import JobStore, utc_now
 from packages.orchestrator.provider_health import ProviderHealthChecker
-from packages.schemas.jobs import JobRecord
+from packages.schemas.jobs import JobRecord, utc_now
 from packages.schemas.models import JobStatus
 from packages.schemas.runtime import (
     ProviderHealthStatus,
@@ -24,7 +23,14 @@ from packages.schemas.runtime import (
 class ProviderUnavailableError(RuntimeError):
     """Raised when a provider outage should pause runtime instead of failing."""
 
-    def __init__(self, *, provider_key: str, model_key: str | None, issue_type: RuntimeIssueType, message: str) -> None:
+    def __init__(
+        self,
+        *,
+        provider_key: str,
+        model_key: str | None,
+        issue_type: RuntimeIssueType,
+        message: str,
+    ) -> None:
         self.provider_key = provider_key
         self.model_key = model_key
         self.issue_type = issue_type
@@ -40,7 +46,7 @@ class RuntimeManager:
 
     def __init__(
         self,
-        store: JobStore,
+        store,
         health_checker: ProviderHealthChecker,
         *,
         config: RuntimeConfig | None = None,
@@ -54,12 +60,16 @@ class RuntimeManager:
         cls,
         path: str | Path,
         *,
-        store: JobStore,
+        store,
         health_checker: ProviderHealthChecker,
     ) -> "RuntimeManager":
         with Path(path).open("r", encoding="utf-8") as handle:
             payload = yaml.safe_load(handle) or {}
-        return cls(store=store, health_checker=health_checker, config=RuntimeConfig(**payload["runtime"]))
+        return cls(
+            store=store,
+            health_checker=health_checker,
+            config=RuntimeConfig(**payload.get("runtime", {})),
+        )
 
     def handle_provider_error(
         self,
@@ -82,20 +92,24 @@ class RuntimeManager:
             model_key=model_key,
             issue_type=issue_type,
             message=message,
-            status=RuntimeIssueStatus.WAITING if reaction.action == "wait_and_retry" else RuntimeIssueStatus.BLOCKED,
+            status=(
+                RuntimeIssueStatus.WAITING
+                if reaction.action == "wait_and_retry"
+                else RuntimeIssueStatus.BLOCKED
+            ),
             retry_count=0,
-            next_retry_at=utc_now() + timedelta(seconds=self.config.provider_health_check.check_interval_seconds),
+            next_retry_at=utc_now()
+            + timedelta(seconds=self.config.provider_health_check.check_interval_seconds),
         )
         self.store.save_runtime_issue(issue)
         record.pending_runtime_issue_id = issue.id
         record.runtime_error = message
         record.provider_status = issue_type.value
-        if reaction.action == "wait_and_retry":
-            record.status = JobStatus(
-                reaction.mark_job_status or JobStatus.WAITING_RUNTIME.value
-            )
-        else:
-            record.status = JobStatus.BLOCKED
+        record.status = (
+            JobStatus(reaction.mark_job_status or JobStatus.WAITING_RUNTIME.value)
+            if reaction.action == "wait_and_retry"
+            else JobStatus.BLOCKED
+        )
         self.store.update(record)
         return issue
 
@@ -122,16 +136,15 @@ class RuntimeManager:
             if health.status == ProviderHealthStatus.OK:
                 issue.status = RuntimeIssueStatus.RESOLVED
                 issue.resolved_at = utc_now()
-                issue.updated_at = utc_now()
                 self.store.save_runtime_issue(issue)
                 record.pending_runtime_issue_id = None
                 record.runtime_error = None
                 record.provider_status = ProviderHealthStatus.OK.value
-                if self.config.resume.auto_resume_after_provider_recovery:
-                    record.status = JobStatus.RESUMING
-                else:
-                    record.status = JobStatus.PAUSED
-                    record.runtime_error = "provider recovered; waiting for manual resume"
+                record.status = (
+                    JobStatus.RESUMING
+                    if self.config.resume.auto_resume_after_provider_recovery
+                    else JobStatus.PAUSED
+                )
                 self.store.update(record)
                 resumed.append(record)
                 continue
@@ -141,6 +154,5 @@ class RuntimeManager:
                 self.config.provider_health_check.max_backoff_seconds,
             )
             issue.next_retry_at = utc_now() + timedelta(seconds=backoff)
-            issue.updated_at = utc_now()
             self.store.save_runtime_issue(issue)
         return resumed

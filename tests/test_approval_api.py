@@ -5,8 +5,16 @@ from urllib.parse import parse_qs, urlparse
 from fastapi.testclient import TestClient
 
 from apps.api.main import create_app
+from packages.orchestrator.job_constraints import STRICT_JOB_CONSTRAINTS
 from packages.schemas.models import JobStatus
 from tests.fakes import build_approval_harness
+
+
+def _assert_strict_constraints(payload: dict) -> None:
+    constraints = payload["job"]["spec"]["metadata"]["constraints"]
+    for key, value in STRICT_JOB_CONSTRAINTS.items():
+        assert constraints[key] is value
+    assert constraints["test_timeout_seconds"] == 1200
 
 
 def _extract_token(url: str) -> str:
@@ -52,6 +60,7 @@ def test_approval_api_approve_endpoint(tmp_path) -> None:
     payload = response.json()
     assert payload["approval"]["status"] == "approved"
     assert payload["job"]["status"] == JobStatus.DONE.value
+    _assert_strict_constraints(payload)
 
 
 def test_approval_api_reject_endpoint(tmp_path) -> None:
@@ -71,3 +80,4 @@ def test_approval_api_reject_endpoint(tmp_path) -> None:
     payload = response.json()
     assert payload["approval"]["status"] == "rejected"
     assert payload["job"]["status"] == JobStatus.BLOCKED.value
+    _assert_strict_constraints(payload)

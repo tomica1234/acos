@@ -2,15 +2,19 @@
 
 from __future__ import annotations
 
+import shlex
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from packages.schemas.models import (
+    FailureClassification,
+    FailureRetryMode,
     FixStatus,
     ImplementationStatus,
     ReviewDecision,
     Severity,
+    TestWriterStatus,
 )
 from packages.schemas.runtime import RuntimeHttpCheck
 
@@ -21,9 +25,35 @@ class FilePatch(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     path: str
-    content: str
-    operation: Literal["create", "update"] = "update"
+    content: str | None = None
+    operation: Literal["create", "update", "delete", "rename"] = "update"
     rationale: str | None = None
+    new_path: str | None = None
+    unified_diff: str | None = None
+    base_sha256: str | None = None
+    expected_old_content: str | None = None
+    executable: bool | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_path_aliases(cls, value: Any) -> Any:
+        if not isinstance(value, dict):
+            return value
+        normalized = dict(value)
+        if "path" not in normalized:
+            for alias in ("file", "filename"):
+                if alias in normalized:
+                    normalized["path"] = normalized.pop(alias)
+                    break
+        return normalized
+
+    @model_validator(mode="after")
+    def validate_operation_payload(self) -> "FilePatch":
+        if self.operation in {"create", "update"} and self.content is None and self.unified_diff is None:
+            raise ValueError("create/update patches require content or unified_diff")
+        if self.operation == "rename" and not self.new_path:
+            raise ValueError("rename patches require new_path")
+        return self
 
 
 class PRD(BaseModel):
@@ -37,7 +67,13 @@ class PRD(BaseModel):
     goals: list[str] = Field(default_factory=list)
     non_goals: list[str] = Field(default_factory=list)
     constraints: list[str] = Field(default_factory=list)
+    smallest_working_core: list[str] = Field(default_factory=list)
+    small_parts: list[str] = Field(default_factory=list)
+    incremental_milestones: list[str] = Field(default_factory=list)
+    acceptance_tests: list[str] = Field(default_factory=list)
     success_criteria: list[str] = Field(default_factory=list)
+    open_questions: list[str] = Field(default_factory=list)
+    definition_of_done: list[str] = Field(default_factory=list)
     framework_profile: str | None = None
     framework_entrypoint: str | None = None
     framework_project_name: str | None = None
@@ -58,6 +94,72 @@ class RuntimePlan(BaseModel):
     prepare_timeout_seconds: int | None = None
     startup_timeout_seconds: int | None = None
     extra: dict[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode="before")
+    @classmethod
+    def collect_unknown_runtime_hints(cls, value: Any) -> Any:
+        if not isinstance(value, dict):
+            return value
+        allowed = {
+            "prepare_commands",
+            "start_command",
+            "http_probe_path",
+            "http_checks",
+            "prepare_timeout_seconds",
+            "startup_timeout_seconds",
+            "extra",
+        }
+        normalized = dict(value)
+        extra = normalized.get("extra")
+        if not isinstance(extra, dict):
+            extra = {}
+        for key in list(normalized):
+            if key in allowed:
+                continue
+            extra[key] = normalized.pop(key)
+        if "prepare_commands" in normalized:
+            normalized["prepare_commands"] = cls._normalize_prepare_commands(
+                normalized.get("prepare_commands")
+            )
+        if "start_command" in normalized:
+            normalized["start_command"] = cls._normalize_command(
+                normalized.get("start_command")
+            )
+        normalized["extra"] = extra
+        return normalized
+
+    @classmethod
+    def _normalize_prepare_commands(cls, value: Any) -> Any:
+        if value is None:
+            return []
+        if isinstance(value, str):
+            command = cls._normalize_command(value)
+            return [command] if command else []
+        if not isinstance(value, list):
+            return value
+        commands: list[list[str]] = []
+        for item in value:
+            command = cls._normalize_command(item)
+            if command:
+                commands.append(command)
+        return commands
+
+    @staticmethod
+    def _normalize_command(value: Any) -> Any:
+        if value is None:
+            return None
+        if isinstance(value, str):
+            command = value.strip()
+            if not command:
+                return None
+            try:
+                parts = shlex.split(command)
+            except ValueError:
+                parts = command.split()
+            return parts
+        if isinstance(value, list):
+            return [str(part) for part in value if str(part).strip()]
+        return value
 
 
 class PMReviewResult(BaseModel):
@@ -101,6 +203,7 @@ class TestWriterResult(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
+    status: TestWriterStatus = TestWriterStatus.TESTS_WRITTEN
     summary: str
     changed_files: list[str] = Field(default_factory=list)
     patches: list[FilePatch] = Field(default_factory=list)
@@ -120,6 +223,19 @@ class Finding(BaseModel):
     description: str
     file_path: str | None = None
     suggestion: str | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_recommendation_alias(cls, value: Any) -> Any:
+        if not isinstance(value, dict):
+            return value
+        normalized = dict(value)
+        if "suggestion" not in normalized and "recommendation" in normalized:
+            normalized["suggestion"] = normalized.pop("recommendation")
+        return normalized
+
+
+ReviewFinding = Finding
 
 
 class ReviewResult(BaseModel):
@@ -152,9 +268,26 @@ class TestRunResult(BaseModel):
     failed_tests: list[str] = Field(default_factory=list)
     output_excerpt: str = ""
     exit_code: int = 0
+    executed_test_count: int | None = None
 
 
 TestRunResult.__test__ = False
+
+
+class FailureDiagnosis(BaseModel):
+    """Structured diagnosis for a deterministic test or build failure."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    classification: FailureClassification = FailureClassification.UNKNOWN
+    root_cause: str
+    failed_files: list[str] = Field(default_factory=list)
+    failed_tests: list[str] = Field(default_factory=list)
+    recommended_fix_strategy: str
+    confidence: float = Field(ge=0.0, le=1.0)
+    should_retry: bool = True
+    retry_mode: FailureRetryMode = FailureRetryMode.NORMAL_FIX
+    failure_signature: str | None = None
 
 
 class FixResult(BaseModel):

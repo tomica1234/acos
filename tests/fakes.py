@@ -159,7 +159,59 @@ def build_approval_harness(tmp_path: Path) -> ApprovalHarness:
     workspace.mkdir()
     (workspace / "feature.py").write_text("VALUE = 0\n" * 2505, encoding="utf-8")
     registry = load_registry()
+    value_acceptance = (
+        "Feature module VALUE constant equals 1 and can be verified by an observable "
+        "pytest check."
+    )
+    pm_outputs = [
+        PRD(
+            title="Update Feature Value",
+            problem_statement="The feature module must expose the expected VALUE constant.",
+            goals=["Expose VALUE = 1", "Validate the value with an automated test"],
+            smallest_working_core=["Expose the feature module and verify it with pytest"],
+            small_parts=["Create feature module"],
+            incremental_milestones=["Feature module exists"],
+            acceptance_tests=[value_acceptance],
+            definition_of_done=["The generated pytest suite passes"],
+            required_artifacts=["feature.py", "tests/test_feature.py"],
+        ).model_dump(),
+        PMReviewResult(
+            decision=ReviewDecision.APPROVE,
+            summary="The design covers the requested work.",
+            required_artifacts=["feature.py", "tests/test_feature.py"],
+        ).model_dump(),
+        PMReviewResult(
+            decision=ReviewDecision.APPROVE,
+            summary="The delivered result satisfies the request.",
+            required_artifacts=["feature.py", "tests/test_feature.py"],
+        ).model_dump(),
+    ]
+    task_graph = TaskGraph(
+        goal="Update and validate the feature value",
+        tasks=[
+            PlannedTask(
+                id="feature-value",
+                title="Update feature value",
+                description="Update feature.py so VALUE is 1.",
+                role="implementer",
+                acceptance_criteria=[value_acceptance],
+                target_files=["feature.py"],
+                required_artifacts=["feature.py"],
+            ),
+            PlannedTask(
+                id="feature-value-tests",
+                title="Test feature value",
+                description="Add a pytest assertion for VALUE.",
+                role="test_writer",
+                depends_on=["feature-value"],
+                acceptance_criteria=[value_acceptance],
+                target_files=["tests/test_feature.py"],
+                required_artifacts=["tests/test_feature.py"],
+            ),
+        ],
+    )
     scenario = base_vertical_slice_scenario(
+        pm=pm_outputs,
         implementer=ImplementationResult(
             status=ImplementationStatus.IMPLEMENTED,
             summary="Replace the large file with the final implementation.",
@@ -191,6 +243,7 @@ def build_approval_harness(tmp_path: Path) -> ApprovalHarness:
         reviewer=approval_review(),
         security_reviewer=approval_security_review(),
     )
+    scenario["planner"] = task_graph.model_dump()
     attach_mock_adapter(registry, scenario)
     policy = PolicyEngine.from_path(config_dir() / "policies.yaml")
     workspace_policy = policy.build_workspace_policy(workspace)

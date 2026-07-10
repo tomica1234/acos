@@ -3,15 +3,11 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 from hashlib import sha256
+from time import perf_counter
 from typing import Any
 
-from packages.llm.budget import (
-    TokenBudgetPolicy,
-    compute_max_output_tokens,
-    estimate_tokens_from_messages,
-    resolve_configured_max_output_tokens,
-)
 from packages.llm.errors import AdapterError
 from packages.llm.registry import ModelRegistry
 from packages.llm.routing import ModelRouter, RoutingContext
@@ -32,15 +28,9 @@ def _hash_payload(payload: Any) -> str:
 class LLMClient:
     """Run routed model calls and return normalized results."""
 
-    def __init__(
-        self,
-        registry: ModelRegistry,
-        router: ModelRouter,
-        token_budget_policy: TokenBudgetPolicy | None = None,
-    ) -> None:
+    def __init__(self, registry: ModelRegistry, router: ModelRouter) -> None:
         self.registry = registry
         self.router = router
-        self.token_budget_policy = token_budget_policy or TokenBudgetPolicy()
         self._adapters: dict[str, object] = {}
 
     def generate(
@@ -53,28 +43,15 @@ class LLMClient:
         selection = self.router.select_model(routing_context)
         adapter = self._get_adapter(selection.model_id)
         tool_payload = build_tool_manifest(allowed_tools) if allowed_tools else None
-        selected_model = self.registry.get_model(selection.model_key)
-        configured_max_output_tokens = resolve_configured_max_output_tokens(
-            selection.max_output_tokens,
-            selected_model.max_output_tokens,
-            self.token_budget_policy.default_output_tokens,
-        )
-        estimated_input_tokens = estimate_tokens_from_messages(messages)
-        resolved_max_output_tokens = compute_max_output_tokens(
-            model_max_context_tokens=selected_model.max_context_tokens,
-            estimated_input_tokens=estimated_input_tokens,
-            configured_max_output_tokens=configured_max_output_tokens,
-            safety_margin_tokens=self.token_budget_policy.safety_margin_tokens,
-            minimum_output_tokens=self.token_budget_policy.minimum_output_tokens,
-            hard_max_output_tokens=self.token_budget_policy.hard_max_output_tokens,
-        )
+        started_at = datetime.now(timezone.utc)
+        start_seconds = perf_counter()
         try:
             result = adapter.generate(
                 messages=messages,
                 tools=tool_payload,
                 temperature=selection.temperature,
                 top_p=selection.top_p,
-                max_tokens=resolved_max_output_tokens,
+                max_tokens=selection.max_output_tokens,
                 response_schema=response_schema,
                 metadata={
                     "role": routing_context.role,
@@ -85,11 +62,38 @@ class LLMClient:
             )
         except AdapterError:
             raise
+        finished_at = datetime.now(timezone.utc)
+        duration_seconds = max(perf_counter() - start_seconds, 0.0)
         status = ModelCallStatus.SUCCESS
         if selection.reason.value == "fallback":
             status = ModelCallStatus.FALLBACK_USED
         elif selection.reason.value == "escalation":
             status = ModelCallStatus.ESCALATED
+        estimated_prompt_tokens = sum(len(str(item)) for item in messages) // 4
+        prompt_tokens = (
+            result.usage.get("prompt_tokens", estimated_prompt_tokens)
+            if result.usage is not None
+            else estimated_prompt_tokens
+        )
+        completion_tokens = (
+            result.usage.get("completion_tokens", len(result.content) // 4)
+            if result.usage is not None
+            else len(result.content) // 4
+        )
+        total_tokens = (
+            result.usage.get(
+                "total_tokens",
+                prompt_tokens + completion_tokens,
+            )
+            if result.usage is not None
+            else prompt_tokens + completion_tokens
+        )
+        completion_tps = (
+            completion_tokens / duration_seconds
+            if duration_seconds and completion_tokens > 0
+            else None
+        )
+        total_tps = total_tokens / duration_seconds if duration_seconds and total_tokens > 0 else None
         record = ModelCallRecord(
             role=routing_context.role,
             model_key=selection.model_key,
@@ -97,28 +101,17 @@ class LLMClient:
             status=status,
             input_hash=_hash_payload(messages),
             output_hash=_hash_payload(result.model_dump()),
-            prompt_tokens_estimate=sum(len(str(item)) for item in messages) // 4,
-            completion_tokens_estimate=(
-                result.usage.get("completion_tokens", len(result.content) // 4)
-                if result.usage is not None
-                else len(result.content) // 4
+            prompt_tokens_estimate=prompt_tokens,
+            completion_tokens_estimate=completion_tokens,
+            total_tokens_estimate=total_tokens,
+            started_at=started_at,
+            finished_at=finished_at,
+            duration_seconds=round(duration_seconds, 4),
+            usage_source="provider" if result.usage is not None else "estimate",
+            completion_tokens_per_second=(
+                round(completion_tps, 4) if completion_tps is not None else None
             ),
-            total_tokens_estimate=(
-                result.usage.get(
-                    "total_tokens",
-                    sum(len(str(item)) for item in messages) // 4 + len(result.content) // 4,
-                )
-                if result.usage is not None
-                else sum(len(str(item)) for item in messages) // 4 + len(result.content) // 4
-            ),
-            finish_reason=result.finish_reason,
-            configured_max_output_tokens=configured_max_output_tokens,
-            estimated_input_tokens=estimated_input_tokens,
-            resolved_max_output_tokens=resolved_max_output_tokens,
-            model_max_context_tokens=selected_model.max_context_tokens,
-            safety_margin_tokens=self.token_budget_policy.safety_margin_tokens,
-            context_budget_tokens=routing_context.context_tokens,
-            output_truncated=result.output_truncated,
+            total_tokens_per_second=round(total_tps, 4) if total_tps is not None else None,
         )
         return result, selection, record
 

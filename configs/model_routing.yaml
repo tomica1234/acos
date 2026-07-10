@@ -1,4 +1,3 @@
-# Fallback, escalation, and capability requirements for model routing.
 routing:
   default_strategy: role_primary
 
@@ -9,23 +8,23 @@ routing:
         same_test_failure_gte: 2
         changed_files_gte: 8
         task_complexity_in: ["high", "critical"]
-      escalated_model: qwen_35b
+      escalated_model: ncmoe40_q4
 
     fixer:
       escalate_when:
         repeated_failures_gte: 2
         same_test_failure_gte: 2
-      escalated_model: qwen_35b
+      escalated_model: ncmoe40_q4
 
     reviewer:
       escalate_when:
         security_sensitive: true
-      escalated_model: qwen_35b
+      escalated_model: ncmoe40_q4
 
     security_reviewer:
       escalate_when:
         security_sensitive: true
-      escalated_model: qwen_35b
+      escalated_model: ncmoe40_q4
 
   fallback:
     on_errors:
@@ -38,6 +37,7 @@ routing:
   capability_requirements:
     roles_requiring_tools:
       - implementer
+      - scaffold
       - test_writer
       - fixer
       - release_manager
@@ -46,6 +46,7 @@ routing:
       - pm
       - architect
       - planner
+      - scaffold
       - implementer
       - test_writer
       - reviewer

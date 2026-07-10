@@ -39,6 +39,12 @@ tools:
       - repo_server.repo_tree
       - repo_server.search_text
 
+    scaffold:
+      - repo_server.read_file
+      - repo_server.search_text
+      - repo_server.apply_patch
+      - git_server.diff
+
     implementer:
       - repo_server.read_file
       - repo_server.search_text
@@ -50,6 +56,12 @@ tools:
       - repo_server.search_text
       - repo_server.apply_patch
       - git_server.diff
+
+    diagnoser:
+      - repo_server.read_file
+      - repo_server.search_text
+      - git_server.diff
+      - memory_server.read_memory
 
     reviewer:
       - repo_server.read_file
@@ -108,9 +120,23 @@ workspace:
   max_patch_deleted_lines_without_approval: 2000
   forbidden_path_patterns:
     - ".env"
-    - ".env.*"
+    - ".env.local"
+    - ".env.*.local"
+    - ".env.development"
+    - ".env.*.development"
+    - ".env.production"
+    - ".env.*.production"
+    - ".env.test"
+    - ".env.*.test"
     - "**/.env"
-    - "**/.env.*"
+    - "**/.env.local"
+    - "**/.env.*.local"
+    - "**/.env.development"
+    - "**/.env.*.development"
+    - "**/.env.production"
+    - "**/.env.*.production"
+    - "**/.env.test"
+    - "**/.env.*.test"
     - "**/.ssh/**"
     - "**/.aws/**"
     - "**/id_rsa"

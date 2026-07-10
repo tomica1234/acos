@@ -61,6 +61,111 @@ def test_synthesize_job_metadata_from_prd_uses_explicit_fastapi_contract(tmp_pat
     assert metadata["acceptance_checks"][0]["path"] == "/"
 
 
+def test_prd_runtime_unknown_hints_are_preserved_as_extra(tmp_path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    prd = PRD.model_validate(
+        {
+            "title": "English Vocabulary App",
+            "problem_statement": "Build a vocabulary learning app.",
+            "runtime": {
+                "python": {"version": "3.11", "backend": "FastAPI"},
+                "node": {"version": "22", "frontend": "Vite"},
+                "http_probe_path": "/health",
+            },
+        }
+    )
+
+    metadata = synthesize_job_metadata_from_prd(
+        prd,
+        {},
+        workspace_root=workspace,
+    )
+
+    assert prd.runtime is not None
+    assert prd.runtime.extra["python"] == {"version": "3.11", "backend": "FastAPI"}
+    assert prd.runtime.extra["node"] == {"version": "22", "frontend": "Vite"}
+    assert metadata["runtime"]["python"] == {"version": "3.11", "backend": "FastAPI"}
+    assert metadata["runtime"]["node"] == {"version": "22", "frontend": "Vite"}
+    assert metadata["runtime"]["http_probe_path"] == "/health"
+
+
+def test_prd_runtime_normalizes_string_commands() -> None:
+    prd = PRD.model_validate(
+        {
+            "title": "English Vocabulary App",
+            "problem_statement": "Build a vocabulary learning app.",
+            "runtime": {
+                "prepare_commands": [
+                    "npm install",
+                    ["python", "-m", "pytest"],
+                    "",
+                ],
+                "start_command": "npm run dev -- --host 127.0.0.1 --port {port}",
+            },
+        }
+    )
+
+    assert prd.runtime is not None
+    assert prd.runtime.prepare_commands == [
+        ["npm", "install"],
+        ["python", "-m", "pytest"],
+    ]
+    assert prd.runtime.start_command == [
+        "npm",
+        "run",
+        "dev",
+        "--",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "{port}",
+    ]
+
+
+def test_prd_runtime_normalizes_single_prepare_command_string() -> None:
+    prd = PRD.model_validate(
+        {
+            "title": "API",
+            "problem_statement": "Build an API.",
+            "runtime": {
+                "prepare_commands": "python -m pytest",
+            },
+        }
+    )
+
+    assert prd.runtime is not None
+    assert prd.runtime.prepare_commands == [["python", "-m", "pytest"]]
+
+
+def test_synthesize_job_metadata_filters_invalid_required_artifacts(tmp_path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    prd = PRD(
+        title="Feature",
+        problem_statement="Build a feature.",
+        required_artifacts=[
+            "src/feature.py",
+            "frontend/src",
+            ".github",
+            "../outside.py",
+            "C:\\outside.py",
+            "docs/",
+        ],
+    )
+
+    metadata = synthesize_job_metadata_from_prd(
+        prd,
+        {"required_artifacts": ["tests", "tests/test_feature.py", "/absolute.py"]},
+        workspace_root=workspace,
+    )
+
+    assert metadata["required_artifacts"] == [
+        "src/feature.py",
+        "tests/test_feature.py",
+    ]
+
+
 def test_synthesize_job_metadata_from_prd_inferrs_django_contract(tmp_path) -> None:
     workspace = tmp_path / "my-product"
     workspace.mkdir()

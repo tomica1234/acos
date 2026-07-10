@@ -4,6 +4,8 @@ __pycache__/
 .pytest_cache/
 .venv/
 .env
+.acos/
+node_modules/
 build/
 dist/
 *.db

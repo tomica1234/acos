@@ -1,0 +1,49 @@
+title: "django-todo-mvp"
+requester_input: |
+  DjangoでシンプルなTodoリストWebアプリを作成してください。
+
+  必須要件:
+  - Djangoを使う
+  - Todoの一覧表示ができる
+  - Todoの新規作成ができる
+  - Todoの完了/未完了を切り替えできる
+  - Todoの削除ができる
+  - SQLiteを使う
+  - テンプレートベースで実装する
+  - Django標準の管理画面からTodoを確認できるようにする
+  - READMEにセットアップ手順と実行手順を書く
+  - テストを追加する
+
+  画面要件:
+  - 1ページでよい
+  - 見た目はシンプルでよい
+  - 日本語UIでよい
+
+  制約:
+  - 認証機能は不要
+  - CSSフレームワークは不要
+  - Dockerは不要
+  - 本番デプロイは不要
+  - 既存ファイルを壊さない
+  - workspace内だけを編集する
+
+  完了条件:
+  - migrations が通る
+  - runserver で起動できる
+  - TodoのCRUDのうち、作成・一覧・完了切替・削除が動く
+  - テストが通る
+  - READMEが更新される
+
+repo_path: "/Users/tachibanashunta/wip/acos/tmp_runs/django-todo-mvp-fresh-20260422-2"
+workspace_root: "/Users/tachibanashunta/wip/acos/tmp_runs/django-todo-mvp-fresh-20260422-2"
+
+repo_url: null
+base_branch: "main"
+target_branch: "acos/django-todo-mvp"
+autonomy_level: 4
+notification_channel: "console"
+
+constraints:
+  allow_dependency_addition: false
+  allow_db_migration: true
+  allow_external_network_during_tests: false

@@ -1,0 +1,35 @@
+title: "split-python-notes-generation-test"
+repo_path: "/Users/tachibanashunta/wip/acos/tmp_runs/split-python-notes-generation-test-20260630"
+workspace_root: "/Users/tachibanashunta/wip/acos/tmp_runs/split-python-notes-generation-test-20260630"
+target_branch: "acos/split-python-notes-generation-test"
+
+requester_input: |
+  Build a small Python notes library without external dependencies.
+
+  Required behavior:
+  - Create a notes.py module.
+  - Define a Note dataclass with title, body, and done fields.
+  - Define an in-memory NotesStore class with add, list_all, mark_done, and delete methods.
+  - Add focused pytest tests for add/list, mark_done, delete, and missing-id errors.
+  - Add a short README.md with usage examples.
+
+  Planning requirement:
+  - Split the implementation into separate planned tasks:
+    1. model and store creation
+    2. behavior refinement and README
+    3. pytest coverage
+  - Keep each implementation task small and complete.
+
+  Constraints:
+  - Use only the Python standard library.
+  - Do not create a web app.
+  - Do not add dependencies.
+  - Tests must pass with pytest.
+
+constraints:
+  allow_dependency_addition: false
+  allow_external_network_during_tests: false
+  skip_review: true
+  skip_release: true
+  test_command_name: pytest
+  test_timeout_seconds: 120

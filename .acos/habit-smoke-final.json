@@ -1,0 +1,823 @@
+{
+  "job_id": "397f8cf3e4274035ba5f1d969cfd6df0",
+  "status": "blocked",
+  "done": false,
+  "started": true,
+  "continued": false,
+  "steps_run": 0,
+  "max_steps": 1,
+  "step_events": [],
+  "terminal_reason": "can_continue",
+  "next_action": "improve_planning_quality",
+  "can_continue": true,
+  "next_continue_cli_args": [
+    "continue-job",
+    "--job-id",
+    "397f8cf3e4274035ba5f1d969cfd6df0",
+    "--max-steps",
+    "1",
+    "--json-summary",
+    "--config-dir",
+    "configs",
+    "--jobs-dir",
+    ".acos/jobs-habit-smoke"
+  ],
+  "next_continue_command": "acos continue-job --job-id 397f8cf3e4274035ba5f1d969cfd6df0 --max-steps 1 --json-summary --config-dir configs --jobs-dir .acos/jobs-habit-smoke",
+  "can_blocked_recovery_continue": false,
+  "blocked_recovery_continue_cli_args": [],
+  "blocked_recovery_continue_command": null,
+  "summary": {
+    "job_id": "397f8cf3e4274035ba5f1d969cfd6df0",
+    "status": "blocked",
+    "total_tasks": 14,
+    "completed_task_count": 0,
+    "pending_task_count": 14,
+    "progress_ratio": 0.0,
+    "completed_task_ids": [],
+    "pending_task_ids": [
+      "core-dataclass",
+      "store-add",
+      "store-list",
+      "store-complete",
+      "store-streak",
+      "store-delete",
+      "cli-commands",
+      "test-add-list",
+      "test-cadence",
+      "test-idempotent",
+      "test-streak",
+      "test-delete",
+      "test-cli-smoke",
+      "readme"
+    ],
+    "next_task": {
+      "id": "core-dataclass",
+      "title": "Create Habit dataclass",
+      "description": "Define Habit dataclass with id, name, cadence, created_at, completed_dates fields. Cadence must be validated as 'daily' or 'weekly'.",
+      "role": "implementer",
+      "status": "todo",
+      "complexity": "low",
+      "depends_on": [],
+      "acceptance_criteria": [
+        "Habit dataclass exists with all required fields",
+        "Invalid cadence raises ValueError"
+      ]
+    },
+    "checkpoint_count": 0,
+    "last_stage": null,
+    "failed_stage": null,
+    "stage_statuses": [],
+    "successful_stage_task_ids": [],
+    "failed_stage_task_ids": [],
+    "recovered_stage_task_ids": [],
+    "recovery_history": [],
+    "resume": {
+      "action": "improve_planning_quality",
+      "task_id": null,
+      "stage": null,
+      "reason": "invalid_task_graph",
+      "can_auto_continue": true,
+      "blocking_items": [
+        {
+          "type": "task_graph_not_valid",
+          "errors": [
+            {
+              "type": "undercovered_small_parts",
+              "small_part_count": 9,
+              "implementation_task_count": 8,
+              "uncovered_small_parts": [
+                {
+                  "small_part_index": 9,
+                  "small_part": "Add README with usage examples",
+                  "task_id": null,
+                  "covered": false
+                }
+              ]
+            }
+          ]
+        }
+      ],
+      "suggested_cli_args": [
+        "resume-job",
+        "--job-id",
+        "397f8cf3e4274035ba5f1d969cfd6df0"
+      ],
+      "suggested_continue_cli_args": [
+        "continue-job",
+        "--job-id",
+        "397f8cf3e4274035ba5f1d969cfd6df0"
+      ]
+    },
+    "planning_summary": {
+      "complete": false,
+      "declared_ready_for_implementation": false,
+      "ready_for_implementation": false,
+      "prd_quality_passed": true,
+      "task_graph_valid": false,
+      "task_count": 14,
+      "implementation_task_count": 8,
+      "small_part_count": 9,
+      "small_part_coverage": [
+        {
+          "small_part_index": 1,
+          "small_part": "Define Habit dataclass with id, name, cadence, created_at, completed_dates",
+          "task_id": "core-dataclass",
+          "covered": true
+        },
+        {
+          "small_part_index": 2,
+          "small_part": "Implement HabitStore.add with cadence validation",
+          "task_id": "store-add",
+          "covered": true
+        },
+        {
+          "small_part_index": 3,
+          "small_part": "Implement HabitStore.list_all",
+          "task_id": "store-list",
+          "covered": true
+        },
+        {
+          "small_part_index": 4,
+          "small_part": "Implement HabitStore.complete with idempotency",
+          "task_id": "store-complete",
+          "covered": true
+        },
+        {
+          "small_part_index": 5,
+          "small_part": "Implement HabitStore.streak calculation",
+          "task_id": "store-streak",
+          "covered": true
+        },
+        {
+          "small_part_index": 6,
+          "small_part": "Implement HabitStore.delete",
+          "task_id": "store-delete",
+          "covered": true
+        },
+        {
+          "small_part_index": 7,
+          "small_part": "Create CLI with argparse for add/list/complete/streak/delete",
+          "task_id": "cli-commands",
+          "covered": true
+        },
+        {
+          "small_part_index": 8,
+          "small_part": "Write pytest tests for all core behaviors",
+          "task_id": "readme",
+          "covered": true
+        },
+        {
+          "small_part_index": 9,
+          "small_part": "Add README with usage examples",
+          "task_id": null,
+          "covered": false
+        }
+      ],
+      "uncovered_small_parts": [
+        {
+          "small_part_index": 9,
+          "small_part": "Add README with usage examples",
+          "task_id": null,
+          "covered": false
+        }
+      ],
+      "acceptance_test_count": 10,
+      "acceptance_test_coverage": [
+        {
+          "acceptance_test_index": 1,
+          "acceptance_test": "Habit dataclass stores all required fields",
+          "task_id": "core-dataclass",
+          "covered": true
+        },
+        {
+          "acceptance_test_index": 2,
+          "acceptance_test": "HabitStore.add raises ValueError for invalid cadence",
+          "task_id": "store-add",
+          "covered": true
+        },
+        {
+          "acceptance_test_index": 3,
+          "acceptance_test": "HabitStore.complete does not duplicate dates",
+          "task_id": "store-list",
+          "covered": true
+        },
+        {
+          "acceptance_test_index": 4,
+          "acceptance_test": "HabitStore.streak returns correct count for consecutive days",
+          "task_id": "store-complete",
+          "covered": true
+        },
+        {
+          "acceptance_test_index": 5,
+          "acceptance_test": "HabitStore.delete removes habit",
+          "task_id": "store-streak",
+          "covered": true
+        },
+        {
+          "acceptance_test_index": 6,
+          "acceptance_test": "CLI add command creates habit",
+          "task_id": "store-delete",
+          "covered": true
+        },
+        {
+          "acceptance_test_index": 7,
+          "acceptance_test": "CLI list command displays habits",
+          "task_id": "cli-commands",
+          "covered": true
+        },
+        {
+          "acceptance_test_index": 8,
+          "acceptance_test": "CLI complete command marks habit",
+          "task_id": "readme",
+          "covered": true
+        },
+        {
+          "acceptance_test_index": 9,
+          "acceptance_test": "CLI delete command removes habit",
+          "task_id": null,
+          "covered": false
+        },
+        {
+          "acceptance_test_index": 10,
+          "acceptance_test": "pytest passes for all test cases",
+          "task_id": null,
+          "covered": false
+        }
+      ],
+      "uncovered_acceptance_tests": [
+        {
+          "acceptance_test_index": 9,
+          "acceptance_test": "CLI delete command removes habit",
+          "task_id": null,
+          "covered": false
+        },
+        {
+          "acceptance_test_index": 10,
+          "acceptance_test": "pytest passes for all test cases",
+          "task_id": null,
+          "covered": false
+        }
+      ],
+      "blocking_items": [
+        {
+          "type": "task_graph_not_valid",
+          "errors": [
+            {
+              "type": "undercovered_small_parts",
+              "small_part_count": 9,
+              "implementation_task_count": 8,
+              "uncovered_small_parts": [
+                {
+                  "small_part_index": 9,
+                  "small_part": "Add README with usage examples",
+                  "task_id": null,
+                  "covered": false
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    "planning_quality": {
+      "prd_quality": {
+        "passed": true,
+        "missing": [],
+        "warnings": [
+          "open_questions_present"
+        ],
+        "small_part_count": 9,
+        "acceptance_test_count": 10,
+        "acceptance_tests_cover_small_parts": true,
+        "missing_acceptance_test_count": 0,
+        "definition_of_done_count": 4
+      },
+      "prd_quality_attempt_count": 1,
+      "last_prd_quality_attempt": {
+        "attempt": 0,
+        "action": "initial",
+        "passed": true,
+        "missing": [],
+        "warnings": [
+          "open_questions_present"
+        ]
+      },
+      "task_graph_validation": {
+        "valid": false,
+        "task_count": 14,
+        "implementation_task_count": 8,
+        "implementation_task_acceptance_criteria_count": 8,
+        "require_acceptance_criteria": true,
+        "require_executable_task_roles": true,
+        "unsupported_task_role_count": 0,
+        "small_part_count": 9,
+        "small_part_coverage": [
+          {
+            "small_part_index": 1,
+            "small_part": "Define Habit dataclass with id, name, cadence, created_at, completed_dates",
+            "task_id": "core-dataclass",
+            "covered": true
+          },
+          {
+            "small_part_index": 2,
+            "small_part": "Implement HabitStore.add with cadence validation",
+            "task_id": "store-add",
+            "covered": true
+          },
+          {
+            "small_part_index": 3,
+            "small_part": "Implement HabitStore.list_all",
+            "task_id": "store-list",
+            "covered": true
+          },
+          {
+            "small_part_index": 4,
+            "small_part": "Implement HabitStore.complete with idempotency",
+            "task_id": "store-complete",
+            "covered": true
+          },
+          {
+            "small_part_index": 5,
+            "small_part": "Implement HabitStore.streak calculation",
+            "task_id": "store-streak",
+            "covered": true
+          },
+          {
+            "small_part_index": 6,
+            "small_part": "Implement HabitStore.delete",
+            "task_id": "store-delete",
+            "covered": true
+          },
+          {
+            "small_part_index": 7,
+            "small_part": "Create CLI with argparse for add/list/complete/streak/delete",
+            "task_id": "cli-commands",
+            "covered": true
+          },
+          {
+            "small_part_index": 8,
+            "small_part": "Write pytest tests for all core behaviors",
+            "task_id": "readme",
+            "covered": true
+          },
+          {
+            "small_part_index": 9,
+            "small_part": "Add README with usage examples",
+            "task_id": null,
+            "covered": false
+          }
+        ],
+        "uncovered_small_parts": [
+          {
+            "small_part_index": 9,
+            "small_part": "Add README with usage examples",
+            "task_id": null,
+            "covered": false
+          }
+        ],
+        "acceptance_test_count": 10,
+        "acceptance_test_coverage": [
+          {
+            "acceptance_test_index": 1,
+            "acceptance_test": "Habit dataclass stores all required fields",
+            "task_id": "core-dataclass",
+            "covered": true
+          },
+          {
+            "acceptance_test_index": 2,
+            "acceptance_test": "HabitStore.add raises ValueError for invalid cadence",
+            "task_id": "store-add",
+            "covered": true
+          },
+          {
+            "acceptance_test_index": 3,
+            "acceptance_test": "HabitStore.complete does not duplicate dates",
+            "task_id": "store-list",
+            "covered": true
+          },
+          {
+            "acceptance_test_index": 4,
+            "acceptance_test": "HabitStore.streak returns correct count for consecutive days",
+            "task_id": "store-complete",
+            "covered": true
+          },
+          {
+            "acceptance_test_index": 5,
+            "acceptance_test": "HabitStore.delete removes habit",
+            "task_id": "store-streak",
+            "covered": true
+          },
+          {
+            "acceptance_test_index": 6,
+            "acceptance_test": "CLI add command creates habit",
+            "task_id": "store-delete",
+            "covered": true
+          },
+          {
+            "acceptance_test_index": 7,
+            "acceptance_test": "CLI list command displays habits",
+            "task_id": "cli-commands",
+            "covered": true
+          },
+          {
+            "acceptance_test_index": 8,
+            "acceptance_test": "CLI complete command marks habit",
+            "task_id": "readme",
+            "covered": true
+          },
+          {
+            "acceptance_test_index": 9,
+            "acceptance_test": "CLI delete command removes habit",
+            "task_id": null,
+            "covered": false
+          },
+          {
+            "acceptance_test_index": 10,
+            "acceptance_test": "pytest passes for all test cases",
+            "task_id": null,
+            "covered": false
+          }
+        ],
+        "uncovered_acceptance_tests": [
+          {
+            "acceptance_test_index": 9,
+            "acceptance_test": "CLI delete command removes habit",
+            "task_id": null,
+            "covered": false
+          },
+          {
+            "acceptance_test_index": 10,
+            "acceptance_test": "pytest passes for all test cases",
+            "task_id": null,
+            "covered": false
+          }
+        ],
+        "errors": [
+          {
+            "type": "undercovered_small_parts",
+            "small_part_count": 9,
+            "implementation_task_count": 8,
+            "uncovered_small_parts": [
+              {
+                "small_part_index": 9,
+                "small_part": "Add README with usage examples",
+                "task_id": null,
+                "covered": false
+              }
+            ]
+          }
+        ]
+      },
+      "task_graph_validation_attempt_count": 2,
+      "last_task_graph_validation_attempt": {
+        "attempt": 1,
+        "action": "repair",
+        "valid": false,
+        "errors": [
+          {
+            "type": "undercovered_small_parts",
+            "small_part_count": 9,
+            "implementation_task_count": 8,
+            "uncovered_small_parts": [
+              {
+                "small_part_index": 9,
+                "small_part": "Add README with usage examples",
+                "task_id": null,
+                "covered": false
+              }
+            ]
+          }
+        ],
+        "small_part_coverage": [
+          {
+            "small_part_index": 1,
+            "small_part": "Define Habit dataclass with id, name, cadence, created_at, completed_dates",
+            "task_id": "core-dataclass",
+            "covered": true
+          },
+          {
+            "small_part_index": 2,
+            "small_part": "Implement HabitStore.add with cadence validation",
+            "task_id": "store-add",
+            "covered": true
+          },
+          {
+            "small_part_index": 3,
+            "small_part": "Implement HabitStore.list_all",
+            "task_id": "store-list",
+            "covered": true
+          },
+          {
+            "small_part_index": 4,
+            "small_part": "Implement HabitStore.complete with idempotency",
+            "task_id": "store-complete",
+            "covered": true
+          },
+          {
+            "small_part_index": 5,
+            "small_part": "Implement HabitStore.streak calculation",
+            "task_id": "store-streak",
+            "covered": true
+          },
+          {
+            "small_part_index": 6,
+            "small_part": "Implement HabitStore.delete",
+            "task_id": "store-delete",
+            "covered": true
+          },
+          {
+            "small_part_index": 7,
+            "small_part": "Create CLI with argparse for add/list/complete/streak/delete",
+            "task_id": "cli-commands",
+            "covered": true
+          },
+          {
+            "small_part_index": 8,
+            "small_part": "Write pytest tests for all core behaviors",
+            "task_id": "readme",
+            "covered": true
+          },
+          {
+            "small_part_index": 9,
+            "small_part": "Add README with usage examples",
+            "task_id": null,
+            "covered": false
+          }
+        ],
+        "uncovered_small_parts": [
+          {
+            "small_part_index": 9,
+            "small_part": "Add README with usage examples",
+            "task_id": null,
+            "covered": false
+          }
+        ],
+        "acceptance_test_coverage": [
+          {
+            "acceptance_test_index": 1,
+            "acceptance_test": "Habit dataclass stores all required fields",
+            "task_id": "core-dataclass",
+            "covered": true
+          },
+          {
+            "acceptance_test_index": 2,
+            "acceptance_test": "HabitStore.add raises ValueError for invalid cadence",
+            "task_id": "store-add",
+            "covered": true
+          },
+          {
+            "acceptance_test_index": 3,
+            "acceptance_test": "HabitStore.complete does not duplicate dates",
+            "task_id": "store-list",
+            "covered": true
+          },
+          {
+            "acceptance_test_index": 4,
+            "acceptance_test": "HabitStore.streak returns correct count for consecutive days",
+            "task_id": "store-complete",
+            "covered": true
+          },
+          {
+            "acceptance_test_index": 5,
+            "acceptance_test": "HabitStore.delete removes habit",
+            "task_id": "store-streak",
+            "covered": true
+          },
+          {
+            "acceptance_test_index": 6,
+            "acceptance_test": "CLI add command creates habit",
+            "task_id": "store-delete",
+            "covered": true
+          },
+          {
+            "acceptance_test_index": 7,
+            "acceptance_test": "CLI list command displays habits",
+            "task_id": "cli-commands",
+            "covered": true
+          },
+          {
+            "acceptance_test_index": 8,
+            "acceptance_test": "CLI complete command marks habit",
+            "task_id": "readme",
+            "covered": true
+          },
+          {
+            "acceptance_test_index": 9,
+            "acceptance_test": "CLI delete command removes habit",
+            "task_id": null,
+            "covered": false
+          },
+          {
+            "acceptance_test_index": 10,
+            "acceptance_test": "pytest passes for all test cases",
+            "task_id": null,
+            "covered": false
+          }
+        ],
+        "uncovered_acceptance_tests": [
+          {
+            "acceptance_test_index": 9,
+            "acceptance_test": "CLI delete command removes habit",
+            "task_id": null,
+            "covered": false
+          },
+          {
+            "acceptance_test_index": 10,
+            "acceptance_test": "pytest passes for all test cases",
+            "task_id": null,
+            "covered": false
+          }
+        ]
+      },
+      "planning_repair": {
+        "consecutive_prd_failure_count": 0,
+        "consecutive_task_graph_failure_count": 2,
+        "last_prd_missing": [],
+        "last_task_graph_error_types": [
+          "undercovered_small_parts"
+        ],
+        "repeated_prd_missing": [],
+        "repeated_task_graph_error_types": [
+          "undercovered_small_parts"
+        ],
+        "strategy_change_recommended": false
+      }
+    },
+    "autonomy_readiness": {
+      "ready": false,
+      "strict_controls_enabled": true,
+      "blocking_items": [
+        {
+          "type": "task_graph_not_valid",
+          "errors": [
+            {
+              "type": "undercovered_small_parts",
+              "small_part_count": 9,
+              "implementation_task_count": 8,
+              "uncovered_small_parts": [
+                {
+                  "small_part_index": 9,
+                  "small_part": "Add README with usage examples",
+                  "task_id": null,
+                  "covered": false
+                }
+              ]
+            }
+          ]
+        }
+      ],
+      "warnings": [],
+      "checks": {
+        "prd_quality_passed": true,
+        "task_graph_valid": false,
+        "implementation_tasks_have_acceptance_criteria": true,
+        "require_prd_quality": true,
+        "require_task_acceptance_criteria": true,
+        "require_completion_integrity": true,
+        "require_test_evidence": true,
+        "require_stage_test_patches": true,
+        "stage_review": true
+      }
+    },
+    "completion_integrity": null,
+    "execution_limits": {
+      "autonomous_stage_limit": null
+    },
+    "failure_analysis": {
+      "classification": "other",
+      "last_error": "invalid_task_graph",
+      "failure_count": 0,
+      "same_test_failure_count": 0,
+      "failed_task_id": null,
+      "failed_stage": null,
+      "auto_continue_blocked": false,
+      "manual_intervention_recommended": false,
+      "recommended_recovery": null
+    },
+    "change_summary": {
+      "changed_files": [],
+      "patch_count": 0,
+      "stages": []
+    },
+    "last_error": "invalid_task_graph",
+    "updated_at": "2026-07-04T04:58:36.373268+00:00"
+  },
+  "operator_decision": {
+    "action": "continue",
+    "command": "acos continue-job --job-id 397f8cf3e4274035ba5f1d969cfd6df0 --max-steps 1 --json-summary --config-dir configs --jobs-dir .acos/jobs-habit-smoke",
+    "resume_action": "improve_planning_quality",
+    "reason": "invalid_task_graph",
+    "requires_explicit_override": false,
+    "autonomy_ready": false,
+    "blocking_items": [
+      {
+        "type": "task_graph_not_valid",
+        "errors": [
+          {
+            "type": "undercovered_small_parts",
+            "small_part_count": 9,
+            "implementation_task_count": 8,
+            "uncovered_small_parts": [
+              {
+                "small_part_index": 9,
+                "small_part": "Add README with usage examples",
+                "task_id": null,
+                "covered": false
+              }
+            ]
+          }
+        ]
+      }
+    ],
+    "planning_strategy_change_recommended": false
+  },
+  "planning_complete": false,
+  "stop_summary": {
+    "terminal_reason": "can_continue",
+    "operator_action": "continue",
+    "operator_command": "acos continue-job --job-id 397f8cf3e4274035ba5f1d969cfd6df0 --max-steps 1 --json-summary --config-dir configs --jobs-dir .acos/jobs-habit-smoke",
+    "resume_action": "improve_planning_quality",
+    "can_continue": true,
+    "can_supervise_continue": false,
+    "requires_explicit_override": false,
+    "provider_preflight": {
+      "provider": "local_ornith",
+      "type": "openai_compatible",
+      "base_url": "http://100.95.69.79:8000/v1",
+      "api_key_env": "ORNITH_API_KEY",
+      "api_key_present": false,
+      "configured_timeout_seconds": 900,
+      "models_url": "http://100.95.69.79:8000/v1/models",
+      "probe_timeout_seconds": 180.0,
+      "healthy": true,
+      "status": "ok",
+      "http_status": 200,
+      "model_ids": [
+        "ornith-1.0-35b-Q4_K_M"
+      ]
+    },
+    "provider_event_count": 1,
+    "last_provider_event": {
+      "cycle": null,
+      "phase": "pre_start",
+      "healthy": true,
+      "terminal": false,
+      "provider_preflight": {
+        "provider": "local_ornith",
+        "type": "openai_compatible",
+        "base_url": "http://100.95.69.79:8000/v1",
+        "api_key_env": "ORNITH_API_KEY",
+        "api_key_present": false,
+        "configured_timeout_seconds": 900,
+        "models_url": "http://100.95.69.79:8000/v1/models",
+        "probe_timeout_seconds": 180.0,
+        "healthy": true,
+        "status": "ok",
+        "http_status": 200,
+        "model_ids": [
+          "ornith-1.0-35b-Q4_K_M"
+        ]
+      }
+    }
+  },
+  "provider_preflight": {
+    "provider": "local_ornith",
+    "type": "openai_compatible",
+    "base_url": "http://100.95.69.79:8000/v1",
+    "api_key_env": "ORNITH_API_KEY",
+    "api_key_present": false,
+    "configured_timeout_seconds": 900,
+    "models_url": "http://100.95.69.79:8000/v1/models",
+    "probe_timeout_seconds": 180.0,
+    "healthy": true,
+    "status": "ok",
+    "http_status": 200,
+    "model_ids": [
+      "ornith-1.0-35b-Q4_K_M"
+    ]
+  },
+  "provider_events": [
+    {
+      "cycle": null,
+      "phase": "pre_start",
+      "healthy": true,
+      "terminal": false,
+      "provider_preflight": {
+        "provider": "local_ornith",
+        "type": "openai_compatible",
+        "base_url": "http://100.95.69.79:8000/v1",
+        "api_key_env": "ORNITH_API_KEY",
+        "api_key_present": false,
+        "configured_timeout_seconds": 900,
+        "models_url": "http://100.95.69.79:8000/v1/models",
+        "probe_timeout_seconds": 180.0,
+        "healthy": true,
+        "status": "ok",
+        "http_status": 200,
+        "model_ids": [
+          "ornith-1.0-35b-Q4_K_M"
+        ]
+      }
+    }
+  ]
+}

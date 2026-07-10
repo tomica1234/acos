@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 def utc_now() -> datetime:
@@ -22,12 +22,14 @@ class AuditEvent(BaseModel):
     role: str
     action: str
     status: str
-    job_id: str | None = None
-    task_id: str | None = None
-    step: str | None = None
-    provider_key: str | None = None
-    model_key: str | None = None
-    tool_name: str | None = None
     input_hash: str | None = None
     output_hash: str | None = None
+    tool_name: str | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def mirror_legacy_fields_into_metadata(self) -> "AuditEvent":
+        if self.tool_name is not None:
+            self.metadata.setdefault("tool_name", self.tool_name)
+        return self
+

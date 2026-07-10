@@ -2,12 +2,11 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from enum import Enum
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, computed_field, model_validator
-
-OutputTokenSetting = int | Literal["auto"]
 
 
 class ProviderType(str, Enum):
@@ -34,49 +33,71 @@ class ImplementationStatus(str, Enum):
     FAILED = "failed"
 
 
+class TestWriterStatus(str, Enum):
+    TESTS_WRITTEN = "tests_written"
+    BLOCKED = "blocked"
+    FAILED = "failed"
+
+
 class FixStatus(str, Enum):
     FIXED = "fixed"
     STUCK = "stuck"
     FAILED = "failed"
 
 
+class FailureClassification(str, Enum):
+    IMPORT_ERROR = "import_error"
+    SYNTAX_ERROR = "syntax_error"
+    TEST_EXPECTATION_MISMATCH = "test_expectation_mismatch"
+    MISSING_DEPENDENCY = "missing_dependency"
+    RUNTIME_ERROR = "runtime_error"
+    FRONTEND_BUILD_ERROR = "frontend_build_error"
+    UNKNOWN = "unknown"
+
+
+class FailureRetryMode(str, Enum):
+    NORMAL_FIX = "normal_fix"
+    TARGETED_FIX = "targeted_fix"
+    INSPECT_FILES_FIRST = "inspect_files_first"
+    REWRITE_SMALL_SCOPE = "rewrite_small_scope"
+    ASK_HUMAN = "ask_human"
+
+
 class JobStatus(str, Enum):
+    SUBMITTED = "submitted"
     QUEUED = "queued"
     RUNNING = "running"
-    SUBMITTED = "submitted"
-    WAITING_RUNTIME = "waiting_runtime"
-    PROVIDER_UNAVAILABLE = "provider_unavailable"
-    RETRYING_PROVIDER = "retrying_provider"
-    WAITING_APPROVAL = "waiting_approval"
-    PAUSED = "paused"
-    RESUMING = "resuming"
-    CANCELLING = "cancelling"
-    CANCELLED = "cancelled"
-    CRASHED = "crashed"
-    RECOVERING = "recovering"
     ANALYZING = "analyzing"
     DESIGNING = "designing"
     PLANNING = "planning"
+    REPLANNING = "replanning"
     IMPLEMENTING = "implementing"
     WRITING_TESTS = "writing_tests"
     REVIEWING = "reviewing"
+    DIAGNOSING = "diagnosing"
+    STRATEGY_CHANGE = "strategy_change"
+    RECOVERING = "recovering"
     TESTING = "testing"
     FIXING = "fixing"
     FINALIZING = "finalizing"
+    WAITING_APPROVAL = "waiting_approval"
+    WAITING_RUNTIME = "waiting_runtime"
+    PROVIDER_UNAVAILABLE = "provider_unavailable"
+    PAUSED = "paused"
+    RESUMING = "resuming"
+    RETRYING_PROVIDER = "retrying_provider"
     DONE = "done"
+    CANCELLED = "cancelled"
+    POLICY_HARD_STOP = "policy_hard_stop"
     BLOCKED = "blocked"
     STUCK = "stuck"
     FAILED = "failed"
 
 
 class TaskStatus(str, Enum):
-    QUEUED = "queued"
-    RUNNING = "running"
     TODO = "todo"
     READY = "ready"
-    WAITING_APPROVAL = "waiting_approval"
-    WAITING_RUNTIME = "waiting_runtime"
-    PAUSED = "paused"
+    RUNNING = "running"
     RESUMING = "resuming"
     IN_PROGRESS = "in_progress"
     IMPLEMENTED = "implemented"
@@ -114,6 +135,9 @@ class TaskComplexity(str, Enum):
     CRITICAL = "critical"
 
 
+OutputTokenSetting = int | Literal["auto"]
+
+
 class ModelProviderConfig(BaseModel):
     """Provider-level configuration for model access."""
 
@@ -130,6 +154,7 @@ class ModelProviderConfig(BaseModel):
     extra_body: dict[str, Any] = Field(default_factory=dict)
     supports_tools: bool = False
     supports_json_mode: bool = False
+    supports_structured_output: bool = False
     supports_streaming: bool = False
     max_context_tokens: int | None = None
     default_max_output_tokens: int | None = None
@@ -157,14 +182,6 @@ class ModelConfig(BaseModel):
     cost_hints: dict[str, float] | None = None
     tags: list[str] = Field(default_factory=list)
 
-    @model_validator(mode="after")
-    def validate_output_limit(self) -> "ModelConfig":
-        if self.max_context_tokens <= 0:
-            raise ValueError("max_context_tokens must be > 0")
-        if isinstance(self.max_output_tokens, int) and self.max_output_tokens <= 0:
-            raise ValueError("max_output_tokens must be > 0 when provided as an integer")
-        return self
-
 
 class AgentModelConfig(BaseModel):
     """Role-to-model mapping."""
@@ -181,6 +198,7 @@ class AgentModelConfig(BaseModel):
     allow_tools: bool = True
     allowed_tools: list[str] = Field(default_factory=list)
     require_json_schema: bool = True
+    max_tool_steps: int | None = None
     escalation_policy: dict[str, Any] = Field(default_factory=dict)
     output_schema: str
 
@@ -190,10 +208,6 @@ class AgentModelConfig(BaseModel):
             raise ValueError("temperature must be between 0 and 2")
         if self.top_p is not None and not 0 < self.top_p <= 1:
             raise ValueError("top_p must be between 0 and 1 when provided")
-        if self.context_budget_tokens <= 0:
-            raise ValueError("context_budget_tokens must be > 0")
-        if isinstance(self.max_output_tokens, int) and self.max_output_tokens <= 0:
-            raise ValueError("max_output_tokens must be > 0 when provided as an integer")
         return self
 
 
@@ -285,7 +299,6 @@ class ModelResult(BaseModel):
     provider: str
     finish_reason: str | None = None
     usage: dict[str, int] | None = None
-    output_truncated: bool = False
 
 
 class ModelCallRecord(BaseModel):
@@ -302,15 +315,13 @@ class ModelCallRecord(BaseModel):
     prompt_tokens_estimate: int
     completion_tokens_estimate: int
     total_tokens_estimate: int
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
+    duration_seconds: float | None = None
+    usage_source: str = "estimate"
+    completion_tokens_per_second: float | None = None
+    total_tokens_per_second: float | None = None
     error: str | None = None
-    finish_reason: str | None = None
-    configured_max_output_tokens: OutputTokenSetting | None = None
-    estimated_input_tokens: int | None = None
-    resolved_max_output_tokens: int | None = None
-    model_max_context_tokens: int | None = None
-    safety_margin_tokens: int | None = None
-    context_budget_tokens: int | None = None
-    output_truncated: bool = False
 
     @computed_field
     @property

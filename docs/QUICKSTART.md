@@ -1,168 +1,78 @@
 # Quickstart
 
-## 1. Install Dependencies
+## Install
 
 ```bash
 uv sync --group dev
 ```
 
-## 2. Configure `.env`
+## Verify
 
 ```bash
-cp .env.example .env
-```
-
-Set the API keys expected by `configs/model_providers.yaml`.
-
-Example:
-
-```bash
-export OPENAI_API_KEY=replace-me
-export MOCK_API_KEY=dummy
-```
-
-## 3. Edit Config
-
-Update these files for your environment:
-
-- `configs/model_providers.yaml`
-  - set `base_url`
-  - set `api_key_env`
-  - set `timeout_seconds: 900` for long Qwen reasoning
-  - set provider `extra_body` such as `chat_template_kwargs.enable_thinking`
-- `configs/agents.yaml`
-  - set `primary_model: qwen_35b`
-  - set `max_output_tokens: auto`
-  - set `context_budget_tokens: 262144`
-- `configs/model_routing.yaml`
-  - tune fallback and escalation rules
-- `configs/runtime.yaml`
-  - keep `token_budget.safety_margin_tokens`
-  - keep `token_budget.default_output_tokens: auto`
-- `configs/policies.yaml`
-  - confirm workspace sandbox, approval policy, tool policy, and git policy
-
-`max_context_tokens` is the model window. API `max_tokens` is the per-request
-output cap resolved by ACOS just before the call.
-
-If you want the workspace sandbox to follow the job file, keep:
-
-```yaml
-workspace:
-  root_from_job: true
-```
-
-Then set `workspace_root` or `repo_path` in your job file.
-
-## 4. Validate Config
-
-```bash
+make compile
+make pytest
 acos validate-config
-acos check-provider --provider local_qwen
-acos check-model --model qwen_35b
-```
-
-## 5. Inspect Available Models
-
-```bash
 acos list-models
 acos list-agents
 acos resolve-model --role implementer
 acos resolve-model --role fixer --repeated-failures 2
 acos explain-routing --role implementer
-acos debug token-budget --role pm --file job.yaml
 ```
 
-## 6. Start Durable Worker
+Repeated implementer/fixer failures should route to `ncmoe40_q4`. If an
+escalation rule points to the same model as a role primary, `acos
+validate-config` fails so the route cannot silently become a no-op.
 
-Foreground:
+## Run A Demo Job
 
 ```bash
-acos daemon start --foreground --workspace .
+python -m apps.cli run-demo --workspace /tmp/acos-demo
 ```
 
-Or direct worker:
+## Run A Job From YAML
 
 ```bash
-acos worker run --forever --repo .
+acos run-job --file job.yaml
 ```
 
-## 7. Submit A Job
+`run-job` applies strict quality gates by default: PRD quality, task acceptance
+criteria, required artifacts, completion integrity, test evidence, test patch
+evidence, and stage review.
+
+For an end-to-end autonomous run that should keep changing strategy until the
+job is complete or a policy hard stop occurs:
 
 ```bash
-cp job.yaml.example job.yaml
-acos jobs submit --file job.yaml --workspace .
-acos jobs watch <job_id> --workspace .
+acos run-supervised --request "Build the app from this PRD" --repo-path . --jobs-dir .acos/jobs --autonomous-until-done --summary-file .acos/final-summary.json --summary-dir .acos/cycles --preflight-provider local_ornith
 ```
 
-The example job file supports a friendly shape with fields such as
-`requester_input`, `base_branch`, `notification_channel`, `constraints`, and
-`workspace_root`.
+Use `job-status --json` to inspect `resume`, `failure_analysis`,
+`failure_diagnosis`, `autonomous_recovery_plan`, and `pm_interventions` while
+the job is running.
 
-## 8. Handle Approval Requests
-
-Normal development work inside the configured workspace is auto-allowed. High
-risk actions pause the job in `waiting_approval` and emit a notification.
-
-Console approval flow:
-
-```bash
-acos approvals list --workspace .
-acos approvals show <approval_id> --workspace .
-acos approvals approve <approval_id> --workspace .
-acos approvals reject <approval_id> --workspace . --reason "not acceptable"
-acos jobs resume <job_id> --workspace .
-```
-
-## 9. Runtime Wait And Recovery
-
-If the model provider goes down, ACOS pauses the job in `waiting_runtime`
-instead of marking it failed.
-
-```bash
-acos runtime status --workspace .
-acos runtime check --workspace .
-acos check-provider --provider local_qwen
-acos check-model --model qwen_35b
-acos jobs resume <job_id> --workspace .
-```
-
-If Qwen returns `finish_reason=length`, ACOS records `output_truncated` and
-preserves the resolved `max_tokens` plus completion token usage in audit logs.
-
-The approve and reject HTTP links are for local/dev convenience. In production,
-prefer authenticated POST endpoints over GET links.
-
-## 10. Start API Or Worker
+## Start The API
 
 ```bash
 acos api
-acos worker run --repo . --request "READMEにセットアップ手順を追加してください"
 ```
 
-## 11. Approval Notification Settings
+The API exposes a minimal ACOS MVP surface for submitting and inspecting jobs.
 
-`configs/policies.yaml` controls:
-
-- request TTL
-- whether CLI approval is allowed
-- whether HTTP approval is allowed
-- whether one-time notification links are emitted
-
-The MVP fake notify server prints approval requests to the console-style
-notification buffer. Optional Telegram or webhook delivery is future work.
-
-## 12. Run Tests
+## Durable Worker
 
 ```bash
-python3 -m compileall acos
-.venv/bin/pytest
+acos-worker --repo . --sqlite-path .acos/acos.sqlite3 --forever
 ```
 
-## 13. Optional Deterministic Demo
+Recoverable failures are handled automatically. Only `DONE`, `CANCELLED`, and
+`POLICY_HARD_STOP` are hard terminal states. `WAITING_RUNTIME` resumes
+automatically after provider recovery; `WAITING_APPROVAL` waits for an approval
+decision.
 
-If you want a smoke test without a real model provider:
+For API mutation auth:
 
 ```bash
-python3 -m apps.cli run-demo --workspace /tmp/acos-demo
+export ACOS_API_TOKEN=change-me
+export ACOS_REPO_ALLOWLIST="$PWD"
+export ACOS_CORS_ALLOW_ORIGINS="http://127.0.0.1:5174"
 ```

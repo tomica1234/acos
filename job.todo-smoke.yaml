@@ -1,0 +1,41 @@
+title: "django-todo-generation-test"
+repo_path: "/Users/tachibanashunta/wip/acos/tmp_runs/django-todo-generation-test-20260630"
+workspace_root: "/Users/tachibanashunta/wip/acos/tmp_runs/django-todo-generation-test-20260630"
+target_branch: "acos/django-todo-generation-test"
+
+requester_input: |
+  DjangoでシンプルなTodoリストWebアプリを作成してください。
+
+  必須要件:
+  - Django + SQLite
+  - テンプレートベース
+  - 日本語UI
+  - Todoの一覧表示
+  - Todoの新規作成
+  - Todoの完了/未完了切り替え
+  - Todoの削除
+  - Django標準の管理画面からTodoを確認できる
+  - README.mdにセットアップ手順と実行手順を書く
+  - Djangoのテストを追加する
+
+  実装方針:
+  - 依存追加はしない
+  - CSSフレームワークは使わない
+  - 認証機能は不要
+  - 生成するファイルは必要最小限にする
+  - テストは python manage.py test で通るようにする
+
+  完了条件:
+  - python manage.py test が通る
+  - Todoの作成・一覧・完了切替・削除のテストがある
+  - README.mdがある
+
+constraints:
+  allow_dependency_addition: false
+  allow_db_migration: true
+  allow_external_network_during_tests: false
+  skip_review: true
+  skip_release: true
+  scaffold: django_todo
+  test_command_name: django-test
+  test_timeout_seconds: 120

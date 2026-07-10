@@ -6,120 +6,64 @@ import argparse
 from pathlib import Path
 from typing import Sequence
 
-import yaml
-
-from apps.cli import build_worker_daemon, load_job_spec_from_file
+from packages.orchestrator.job_constraints import apply_strict_job_constraints
 from packages.orchestrator.job_runner import build_default_runner
-from packages.orchestrator.worker_daemon import WorkerDaemon
+from packages.orchestrator.job_store import SQLiteJobStore
+from packages.orchestrator.worker_daemon import WorkerConfig, WorkerDaemon
 from packages.schemas.jobs import JobSpec
-from packages.schemas.models import JobStatus
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="acos-worker")
-    parser.add_argument("action", nargs="?", choices=["run", "recover"], default="run")
     parser.add_argument("--config-dir", default="configs")
     parser.add_argument("--repo", default=".")
     parser.add_argument("--request")
     parser.add_argument("--branch", default="acos/default")
-    parser.add_argument("--file")
+    parser.add_argument("--sqlite-path", default=".acos/acos.sqlite3")
+    parser.add_argument("--job-id")
     parser.add_argument("--forever", action="store_true")
+    parser.add_argument("--worker-id", default="local-worker")
+    parser.add_argument("--poll-interval-seconds", type=float, default=5.0)
     return parser
-
-
-def _build_daemon(config_dir: str | Path, repo: str | Path) -> WorkerDaemon:
-    runner, _ = build_default_runner(config_dir=config_dir, workspace_root=Path(repo))
-    if runner.runtime_manager is None:
-        raise RuntimeError("runtime manager is not configured")
-    return WorkerDaemon.from_path(
-        Path(config_dir) / "worker.yaml",
-        runner=runner,
-        store=runner.store,
-        runtime_manager=runner.runtime_manager,
-    )
-
-
-def _run_submitted_job_inline(runner, job_id: str):
-    record = runner.get(job_id)
-    settled = {
-        JobStatus.DONE,
-        JobStatus.BLOCKED,
-        JobStatus.STUCK,
-        JobStatus.FAILED,
-        JobStatus.CANCELLED,
-        JobStatus.WAITING_APPROVAL,
-        JobStatus.WAITING_RUNTIME,
-        JobStatus.PROVIDER_UNAVAILABLE,
-        JobStatus.PAUSED,
-    }
-    while record.status not in settled:
-        record = runner.run_next_step(job_id)
-    return record
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    runner, _ = build_default_runner(config_dir=args.config_dir, workspace_root=Path(args.repo))
-    daemon = build_worker_daemon(
+    store = SQLiteJobStore(args.sqlite_path)
+    runner, _ = build_default_runner(
         config_dir=args.config_dir,
-        workspace_root=args.repo,
-        runner=runner,
+        workspace_root=Path(args.repo),
+        store=store,
     )
-
-    if args.file:
-        spec = load_job_spec_from_file(args.file)
-        record = runner.submit(spec)
-        if daemon is not None:
-            record = daemon.run_until_job_settled(record.job_id)
-        else:
-            record = _run_submitted_job_inline(runner, record.job_id)
-        print(record.model_dump_json(indent=2))
-        return 0 if record.status.value == "done" else 1
-
-    if args.request:
-        spec = JobSpec(
-            request_text=args.request,
-            repo_path=str(Path(args.repo).resolve()),
-            target_branch=args.branch,
-        )
-        record = runner.submit(spec)
-        if daemon is not None:
-            record = daemon.run_until_job_settled(record.job_id)
-        else:
-            record = _run_submitted_job_inline(runner, record.job_id)
-        print(record.model_dump_json(indent=2))
-        return 0 if record.status.value == "done" else 1
-
-    daemon = daemon or _build_daemon(args.config_dir, args.repo)
-    if args.action == "recover":
-        recovered = daemon.recover_stale_jobs()
-        print(
-            yaml.safe_dump(
-                {
-                    "recovered_jobs": [item.model_dump(mode="json") for item in recovered],
-                },
-                sort_keys=False,
-                allow_unicode=True,
-            )
-        )
-        return 0
-
+    daemon = WorkerDaemon(
+        runner=runner,
+        store=store,
+        config=WorkerConfig(
+            id=args.worker_id,
+            poll_interval_seconds=args.poll_interval_seconds,
+        ),
+    )
     if args.forever:
         daemon.run_forever()
         return 0
-
-    processed = daemon.run_once()
-    print(
-        yaml.safe_dump(
-            {
-                "processed_jobs": [item.model_dump(mode="json") for item in processed],
-            },
-            sort_keys=False,
-            allow_unicode=True,
-        )
+    if args.job_id:
+        record = daemon.run_once(args.job_id)
+        print(record.model_dump_json(indent=2))
+        return 0 if record.status.value in {"done", "waiting_runtime", "waiting_approval"} else 1
+    if not args.request:
+        raise SystemExit("--request is required unless --job-id or --forever is used")
+    spec = JobSpec(
+        request_text=args.request,
+        repo_path=str(Path(args.repo).resolve()),
+        target_branch=args.branch,
     )
-    return 0
+    apply_strict_job_constraints(spec)
+    record = store.create(spec)
+    record = daemon.run_once(record.job_id)
+    print(record.model_dump_json(indent=2))
+    return 0 if record.status.value == "done" else 1
 
 
 if __name__ == "__main__":  # pragma: no cover
     raise SystemExit(main())
+

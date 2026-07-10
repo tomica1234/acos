@@ -6,12 +6,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from packages.llm.errors import ContextBudgetExceededError, RoutingError
-from packages.llm.budget import (
-    TokenBudgetManager,
-    TokenBudgetPolicy,
-    estimate_tokens,
-    resolve_configured_max_output_tokens,
-)
+from packages.llm.budget import TokenBudgetManager, compute_max_output_tokens, estimate_tokens
 from packages.llm.registry import ModelRegistry
 from packages.schemas.context import ContextPacket
 from packages.schemas.models import (
@@ -57,14 +52,9 @@ class FailureHistory:
 class ModelRouter:
     """Select models for agent invocations."""
 
-    def __init__(
-        self,
-        registry: ModelRegistry,
-        token_budget_policy: TokenBudgetPolicy | None = None,
-    ) -> None:
+    def __init__(self, registry: ModelRegistry) -> None:
         self.registry = registry
-        self.token_budget_policy = token_budget_policy or TokenBudgetPolicy()
-        self.budget_manager = TokenBudgetManager(self.token_budget_policy)
+        self.budget_manager = TokenBudgetManager()
 
     def select_model(
         self,
@@ -183,6 +173,25 @@ class ModelRouter:
                 {"forced_model_key": context.forced_model_key},
             )
         escalated_model = self._maybe_escalate(context)
+        if self._needs_fallback(context):
+            fallback_candidates = [
+                key for key in agent.fallback_models if key not in context.attempted_model_keys
+            ]
+            if context.fallback_index >= len(fallback_candidates):
+                raise RoutingError(f"No fallback model available for role {context.role}")
+            fallback_model = fallback_candidates[context.fallback_index]
+            details = {
+                "last_error": context.last_error,
+                "fallback_index": context.fallback_index,
+                "attempted_model_keys": context.attempted_model_keys,
+            }
+            if escalated_model is not None:
+                details["escalated_model"] = escalated_model
+            return (
+                [fallback_model, *fallback_candidates[context.fallback_index + 1 :]],
+                RoutingReason.FALLBACK,
+                details,
+            )
         if escalated_model is not None:
             return (
                 [escalated_model, *agent.fallback_models],
@@ -193,28 +202,6 @@ class ModelRouter:
                     "changed_files_count": context.changed_files_count,
                     "task_complexity": context.task_complexity.value,
                     "security_sensitive": context.security_sensitive,
-                },
-            )
-        if self._needs_fallback(context):
-            fallback_candidates = [
-                key for key in agent.fallback_models if key not in context.attempted_model_keys
-            ]
-            if context.fallback_index >= len(fallback_candidates):
-                attempted_models = list(dict.fromkeys(context.attempted_model_keys))
-                attempted_label = ", ".join(attempted_models) if attempted_models else "none"
-                error_label = f" after {context.last_error}" if context.last_error else ""
-                raise RoutingError(
-                    f"Fallbacks exhausted for role {context.role}{error_label}; "
-                    f"attempted models: {attempted_label}"
-                )
-            fallback_model = fallback_candidates[context.fallback_index]
-            return (
-                [fallback_model, *fallback_candidates[context.fallback_index + 1 :]],
-                RoutingReason.FALLBACK,
-                {
-                    "last_error": context.last_error,
-                    "fallback_index": context.fallback_index,
-                    "attempted_model_keys": context.attempted_model_keys,
                 },
             )
         return (
@@ -255,17 +242,17 @@ class ModelRouter:
         details: dict[str, Any],
     ) -> ModelSelection:
         for model in valid_models:
-            configured_max_output_tokens = resolve_configured_max_output_tokens(
-                agent.max_output_tokens,
-                model.max_output_tokens,
-                self.token_budget_policy.default_output_tokens,
+            max_output_tokens = self._resolve_max_output_tokens(
+                agent=agent,
+                model=model,
+                estimated_input_tokens=routing_context.context_tokens,
             )
             try:
                 self.budget_manager.assert_context_fits(
                     context_tokens=routing_context.context_tokens,
                     requested_budget=agent.context_budget_tokens,
                     model_max_context_tokens=model.max_context_tokens,
-                    configured_max_output_tokens=configured_max_output_tokens,
+                    model_max_output_tokens=max_output_tokens,
                 )
             except ContextBudgetExceededError:
                 continue
@@ -282,9 +269,7 @@ class ModelRouter:
                 details=actual_details,
                 temperature=agent.temperature,
                 top_p=agent.top_p,
-                max_output_tokens=configured_max_output_tokens
-                if configured_max_output_tokens is not None
-                else self.token_budget_policy.default_output_tokens,
+                max_output_tokens=max_output_tokens,
             )
         raise ContextBudgetExceededError(
             f"Context requires compaction for role {routing_context.role}",
@@ -346,3 +331,35 @@ class ModelRouter:
                 else []
             ),
         )
+
+    def _resolve_max_output_tokens(
+        self,
+        *,
+        agent: AgentModelConfig,
+        model: ModelConfig,
+        estimated_input_tokens: int,
+    ) -> int:
+        configured = self._combined_output_limit(
+            agent.max_output_tokens,
+            model.max_output_tokens,
+        )
+        return compute_max_output_tokens(
+            model_max_context_tokens=model.max_context_tokens,
+            estimated_input_tokens=estimated_input_tokens,
+            configured_max_output_tokens=configured,
+            safety_margin_tokens=self.budget_manager.policy.safety_margin_tokens,
+            minimum_output_tokens=self.budget_manager.policy.minimum_output_tokens,
+            hard_max_output_tokens=self.budget_manager.policy.hard_max_output_tokens,
+        )
+
+    @staticmethod
+    def _combined_output_limit(agent_limit: object, model_limit: object) -> int | str:
+        agent_is_int = isinstance(agent_limit, int)
+        model_is_int = isinstance(model_limit, int)
+        if agent_is_int and model_is_int:
+            return min(agent_limit, model_limit)
+        if agent_is_int:
+            return agent_limit
+        if model_is_int:
+            return model_limit
+        return "auto"

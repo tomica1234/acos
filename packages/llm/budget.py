@@ -40,6 +40,7 @@ class TokenBudgetPolicy(BaseModel):
 
 def estimate_tokens(text: str, *, chars_per_token: float = 4.0) -> int:
     """A rough token estimate suitable for routing and budgeting."""
+
     if not text:
         return 1
     return max(1, math.ceil(len(text) / chars_per_token))
@@ -47,6 +48,7 @@ def estimate_tokens(text: str, *, chars_per_token: float = 4.0) -> int:
 
 def estimate_tokens_from_messages(messages: list[dict[str, Any]]) -> int:
     """Estimate prompt tokens from an OpenAI-compatible message array."""
+
     serialized = json.dumps(messages, ensure_ascii=False, sort_keys=True, default=str)
     return estimate_tokens(serialized)
 
@@ -55,6 +57,7 @@ def resolve_configured_max_output_tokens(
     *candidates: OutputTokenSetting | None,
 ) -> OutputTokenSetting | None:
     """Return the first configured output limit, preserving ``auto``."""
+
     for candidate in candidates:
         if candidate is not None:
             return candidate
@@ -70,6 +73,7 @@ def compute_max_output_tokens(
     hard_max_output_tokens: int | None = None,
 ) -> int:
     """Resolve an integer completion budget without overflowing model context."""
+
     remaining_context = (
         model_max_context_tokens - estimated_input_tokens - safety_margin_tokens
     )
@@ -104,6 +108,7 @@ def truncate_to_budget(
     chars_per_token: float = 4.0,
 ) -> str:
     """Trim text conservatively to fit an approximate token budget."""
+
     max_chars = max(32, math.floor(token_budget * chars_per_token))
     if len(text) <= max_chars:
         return text
@@ -146,23 +151,28 @@ class TokenBudgetManager:
         *,
         requested_budget: int,
         model_max_context_tokens: int,
+        model_max_output_tokens: int | None = None,
+        overhead_tokens: int = 512,
         safety_margin_tokens: int | None = None,
         minimum_output_tokens: int | None = None,
     ) -> int:
-        reserved_safety = (
-            self.policy.safety_margin_tokens
-            if safety_margin_tokens is None
-            else safety_margin_tokens
-        )
-        minimum_output = (
-            self.policy.minimum_output_tokens
-            if minimum_output_tokens is None
-            else minimum_output_tokens
-        )
-        available = model_max_context_tokens - reserved_safety - minimum_output
+        if model_max_output_tokens is not None:
+            available = model_max_context_tokens - model_max_output_tokens - overhead_tokens
+        else:
+            reserved_safety = (
+                self.policy.safety_margin_tokens
+                if safety_margin_tokens is None
+                else safety_margin_tokens
+            )
+            minimum_output = (
+                self.policy.minimum_output_tokens
+                if minimum_output_tokens is None
+                else minimum_output_tokens
+            )
+            available = model_max_context_tokens - reserved_safety - minimum_output
         if available <= 0:
             raise ContextBudgetExceededError(
-                "Model has no usable prompt budget after reserving safety margin and minimum output",
+                "Model has no usable prompt budget after reserving output tokens",
                 required_tokens=requested_budget,
             )
         return min(requested_budget, available)
@@ -173,23 +183,26 @@ class TokenBudgetManager:
         context_tokens: int,
         requested_budget: int,
         model_max_context_tokens: int,
+        model_max_output_tokens: int | None = None,
         configured_max_output_tokens: OutputTokenSetting | None = None,
     ) -> int:
         effective_budget = self.fit_context_budget(
             requested_budget=requested_budget,
             model_max_context_tokens=model_max_context_tokens,
+            model_max_output_tokens=model_max_output_tokens,
         )
         if context_tokens > effective_budget:
             raise ContextBudgetExceededError(
                 "Context exceeds selected model budget and requires compaction",
                 required_tokens=context_tokens,
             )
-        compute_max_output_tokens(
-            model_max_context_tokens=model_max_context_tokens,
-            estimated_input_tokens=context_tokens,
-            configured_max_output_tokens=configured_max_output_tokens,
-            safety_margin_tokens=self.policy.safety_margin_tokens,
-            minimum_output_tokens=self.policy.minimum_output_tokens,
-            hard_max_output_tokens=self.policy.hard_max_output_tokens,
-        )
+        if model_max_output_tokens is None:
+            compute_max_output_tokens(
+                model_max_context_tokens=model_max_context_tokens,
+                estimated_input_tokens=context_tokens,
+                configured_max_output_tokens=configured_max_output_tokens,
+                safety_margin_tokens=self.policy.safety_margin_tokens,
+                minimum_output_tokens=self.policy.minimum_output_tokens,
+                hard_max_output_tokens=self.policy.hard_max_output_tokens,
+            )
         return effective_budget
