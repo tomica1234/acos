@@ -1325,6 +1325,37 @@ def _autonomy_readiness(
             "executable_task_count": len(executable_tasks),
         },
     )
+    task_graph_validation_identity_mismatches = (
+        _task_graph_validation_identity_mismatches(
+            task_graph_validation,
+            {
+                "task_ids": [
+                    task["id"]
+                    for task in planned_tasks
+                    if isinstance(task.get("id"), str)
+                ],
+                "implementation_task_ids": [
+                    task["id"]
+                    for task in implementation_tasks
+                    if isinstance(task.get("id"), str)
+                ],
+                "test_writer_task_ids": [
+                    task["id"]
+                    for task in test_writer_tasks
+                    if isinstance(task.get("id"), str)
+                ],
+                "executable_task_ids": [
+                    task["id"]
+                    for task in executable_tasks
+                    if isinstance(task.get("id"), str)
+                ],
+            },
+        )
+    )
+    task_graph_validation_stale_mismatches = [
+        *task_graph_validation_count_mismatches,
+        *task_graph_validation_identity_mismatches,
+    ]
     unsupported_task_roles = [
         {"task_id": task.get("id"), "role": task.get("role")}
         for task in planned_tasks
@@ -1553,11 +1584,11 @@ def _autonomy_readiness(
         blocking_items.append({"type": "task_graph_validation_missing"})
     elif planned_tasks and task_graph_valid is None:
         warnings.append({"type": "task_graph_validation_missing"})
-    if planned_tasks and task_graph_valid is True and task_graph_validation_count_mismatches:
+    if planned_tasks and task_graph_valid is True and task_graph_validation_stale_mismatches:
         blocking_items.append(
             {
                 "type": "task_graph_validation_stale",
-                "mismatches": task_graph_validation_count_mismatches,
+                "mismatches": task_graph_validation_stale_mismatches,
             }
         )
     if require_acceptance_criteria and missing_acceptance_task_ids:
@@ -1698,7 +1729,7 @@ def _autonomy_readiness(
             "task_graph_valid": task_graph_valid,
             "implementation_task_count": len(implementation_tasks),
             "task_graph_validation_stale_count": len(
-                task_graph_validation_count_mismatches
+                task_graph_validation_stale_mismatches
             ),
             "implementation_tasks_have_acceptance_criteria": (
                 implementation_tasks_have_acceptance_criteria
@@ -1770,6 +1801,40 @@ def _task_graph_validation_count_mismatches(
                 {
                     "field": field,
                     "validation_value": validation_value,
+                    "current_value": current_value,
+                }
+            )
+    return mismatches
+
+
+def _task_graph_validation_identity_mismatches(
+    validation: dict[str, Any] | None,
+    current_ids: dict[str, list[str]],
+) -> list[dict[str, Any]]:
+    if validation is None:
+        return []
+    mismatches: list[dict[str, Any]] = []
+    for field, current_value in current_ids.items():
+        validation_value = validation.get(field)
+        if not isinstance(validation_value, list):
+            continue
+        validation_ids = [
+            item for item in validation_value if isinstance(item, str)
+        ]
+        if len(validation_ids) != len(validation_value):
+            mismatches.append(
+                {
+                    "field": field,
+                    "validation_value": validation_value,
+                    "current_value": current_value,
+                }
+            )
+            continue
+        if validation_ids != current_value:
+            mismatches.append(
+                {
+                    "field": field,
+                    "validation_value": validation_ids,
                     "current_value": current_value,
                 }
             )

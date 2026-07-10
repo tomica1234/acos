@@ -6084,6 +6084,10 @@ class JobRunner:
             "implementation_task_count": len(implementation_task_ids),
             "test_writer_task_count": len(test_writer_task_ids),
             "executable_task_count": len(executable_task_ids),
+            "task_ids": ids,
+            "implementation_task_ids": implementation_task_ids,
+            "test_writer_task_ids": test_writer_task_ids,
+            "executable_task_ids": executable_task_ids,
             "implementation_task_acceptance_criteria_count": (
                 len(implementation_task_ids) - len(tasks_missing_acceptance_criteria)
             ),

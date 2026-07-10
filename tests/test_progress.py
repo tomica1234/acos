@@ -1546,6 +1546,87 @@ def test_summarize_job_progress_blocks_stale_valid_graph_when_validation_counts_
     ] == 3
 
 
+def test_summarize_job_progress_blocks_stale_valid_graph_when_validation_task_ids_do_not_match(
+    tmp_path,
+) -> None:
+    task_graph = TaskGraph(
+        goal="Build incrementally",
+        tasks=[
+            PlannedTask(
+                id="core",
+                title="Core",
+                description="Build core behavior.",
+                role="implementer",
+                acceptance_criteria=["Core behavior returns VALUE"],
+                target_files=["feature.py"],
+                required_artifacts=["feature.py"],
+            ),
+            PlannedTask(
+                id="core-tests",
+                title="Core tests",
+                description="Cover core behavior.",
+                role="test_writer",
+                depends_on=["core"],
+                acceptance_criteria=["Core behavior has regression tests"],
+                target_files=["tests/test_feature.py"],
+                required_artifacts=["tests/test_feature.py"],
+            ),
+        ],
+    )
+    spec = JobSpec(
+        job_id="autonomy-stale-validation-task-ids-job",
+        request_text="Build it carefully",
+        repo_path=str(tmp_path),
+        metadata={"constraints": {"require_task_artifacts": True}},
+    )
+    record = JobRecord(job_id=spec.job_id, spec=spec, status=JobStatus.TESTING)
+    record.outputs["task_graph"] = task_graph.model_dump()
+    record.outputs["task_graph_validation"] = {
+        "valid": True,
+        "task_count": 2,
+        "implementation_task_count": 1,
+        "test_writer_task_count": 1,
+        "executable_task_count": 2,
+        "task_ids": ["old-core", "old-tests"],
+        "implementation_task_ids": ["old-core"],
+        "test_writer_task_ids": ["old-tests"],
+        "executable_task_ids": ["old-core", "old-tests"],
+        "errors": [],
+    }
+
+    payload = summarize_job_progress(record)
+
+    assert payload["autonomy_readiness"]["ready"] is False
+    assert {
+        "type": "task_graph_validation_stale",
+        "mismatches": [
+            {
+                "field": "task_ids",
+                "validation_value": ["old-core", "old-tests"],
+                "current_value": ["core", "core-tests"],
+            },
+            {
+                "field": "implementation_task_ids",
+                "validation_value": ["old-core"],
+                "current_value": ["core"],
+            },
+            {
+                "field": "test_writer_task_ids",
+                "validation_value": ["old-tests"],
+                "current_value": ["core-tests"],
+            },
+            {
+                "field": "executable_task_ids",
+                "validation_value": ["old-core", "old-tests"],
+                "current_value": ["core", "core-tests"],
+            },
+        ],
+    } in payload["autonomy_readiness"]["blocking_items"]
+    assert payload["autonomy_readiness"]["checks"][
+        "task_graph_validation_stale_count"
+    ] == 4
+
+
 def test_summarize_job_progress_blocks_stale_valid_graph_with_duplicate_task_ids(
     tmp_path,
 ) -> None:

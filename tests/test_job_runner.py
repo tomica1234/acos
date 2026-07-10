@@ -3010,6 +3010,10 @@ def test_task_graph_validation_requires_task_artifacts_when_requested() -> None:
 
     assert validation["valid"] is False
     assert validation["require_task_artifacts"] is True
+    assert validation["task_ids"] == ["core"]
+    assert validation["implementation_task_ids"] == ["core"]
+    assert validation["test_writer_task_ids"] == []
+    assert validation["executable_task_ids"] == ["core"]
     assert validation["implementation_task_artifact_count"] == 0
     assert validation["executable_task_artifact_count"] == 0
     assert validation["errors"] == [
