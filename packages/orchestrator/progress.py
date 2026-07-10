@@ -447,7 +447,7 @@ def _last_failed_stage(record: JobRecord) -> dict[str, Any] | None:
         post_review_success = (
             post_review_test_run.get("success") if isinstance(post_review_test_run, dict) else None
         )
-        status = _stage_status(test_success, post_review_success)
+        status = _resolved_stage_status(stage, test_success, post_review_success)
         if status == "failed" and task_id not in later_passed_task_ids:
             return stage
         if status == "passed" and isinstance(task_id, str):
@@ -538,7 +538,7 @@ def _stage_statuses(record: JobRecord) -> list[dict[str, Any]]:
         post_review_success = (
             post_review_test_run.get("success") if isinstance(post_review_test_run, dict) else None
         )
-        status = _stage_status(test_success, post_review_success)
+        status = _resolved_stage_status(stage, test_success, post_review_success)
         if status == "failed" and task_id in later_passed_task_ids:
             status = "superseded"
         resolved_status_by_stage[index] = status
@@ -559,7 +559,10 @@ def _stage_statuses(record: JobRecord) -> list[dict[str, Any]]:
         summary = stage.get("change_summary")
         changed_files = summary.get("changed_files") if isinstance(summary, dict) else []
         patch_count = summary.get("patch_count") if isinstance(summary, dict) else 0
-        status = resolved_status_by_stage.get(index, _stage_status(test_success, post_review_success))
+        status = resolved_status_by_stage.get(
+            index,
+            _resolved_stage_status(stage, test_success, post_review_success),
+        )
         statuses.append(
             {
                 "stage": stage.get("stage"),
@@ -572,6 +575,29 @@ def _stage_statuses(record: JobRecord) -> list[dict[str, Any]]:
             }
         )
     return statuses
+
+
+def _resolved_stage_status(
+    stage: dict[str, Any],
+    test_success: Any,
+    post_review_success: Any,
+) -> str:
+    explicit_status = _explicit_stage_status(stage)
+    if explicit_status is not None:
+        return explicit_status
+    return _stage_status(test_success, post_review_success)
+
+
+def _explicit_stage_status(stage: dict[str, Any]) -> str | None:
+    raw_status = stage.get("status")
+    if not isinstance(raw_status, str):
+        return None
+    status = raw_status.strip().lower()
+    if status == "failed_for_recovery":
+        return "failed"
+    if status in {"failed", "passed", "superseded"}:
+        return status
+    return None
 
 
 def _stage_status(test_success: Any, post_review_success: Any) -> str:

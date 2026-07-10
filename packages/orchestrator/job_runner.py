@@ -428,16 +428,26 @@ class JobRunner:
     def _run_record(self, record: JobRecord, *, resume: bool) -> JobRecord:
         self._active_record = record
         try:
+            recovery_executed = False
             if resume and self._resume_approval_if_ready(record):
                 if record.status == JobStatus.BLOCKED:
                     return self.store.update(record)
             if self._is_terminal_status(record.status) or self._is_waiting_status(record.status):
                 return record
             if resume and self._recover_record_if_needed(record):
+                recovery_executed = True
                 if self._is_terminal_status(record.status) or self._is_waiting_status(record.status):
                     return self.store.update(record)
             if resume:
-                self._consume_completed_recovery_plan(record)
+                if not recovery_executed:
+                    self.recovery_executor.execute_until_ready(record)
+                if self._is_terminal_status(record.status) or self._is_waiting_status(record.status):
+                    return self.store.update(record)
+                if self._has_running_or_pending_recovery_plan(record):
+                    return self.store.update(record)
+                plan = record.runtime_state.get("recovery_plan")
+                if isinstance(plan, dict) and plan.get("status") == "completed":
+                    self._consume_completed_recovery_plan(record)
             if not resume:
                 self._prepare_branch(record)
             prd = self._load_or_refine_prd_for_autonomy(record)
@@ -641,6 +651,13 @@ class JobRunner:
             return False
         next_status = plan.get("next_status")
         return isinstance(next_status, str) and record.status.value == next_status
+
+    @staticmethod
+    def _has_running_or_pending_recovery_plan(record: JobRecord) -> bool:
+        plan = record.runtime_state.get("recovery_plan")
+        if not isinstance(plan, dict):
+            return False
+        return plan.get("status") in {"pending", "running"}
 
     @staticmethod
     def _consume_completed_recovery_plan(record: JobRecord) -> None:

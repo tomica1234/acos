@@ -361,6 +361,138 @@ def test_consume_completed_recovery_plan_keeps_non_file_recovery_context(
     assert record.spec.metadata["constraints"]["missing_artifacts"] == []
 
 
+def test_resume_executes_running_recreate_target_files_plan_before_job_flow(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    recovered_target = "recovered.txt"
+    (workspace / recovered_target).write_text("ready\n", encoding="utf-8")
+    prd = PRD(title="Feature", problem_statement="Need feature")
+    architecture = ArchitecturePlan(summary="Simple architecture")
+    task_graph = TaskGraph(
+        goal="Build feature",
+        tasks=[
+            PlannedTask(
+                id="task-1",
+                title="Write code",
+                description="Write code",
+                role="implementer",
+            )
+        ],
+    )
+    registry = ModelRegistry.from_paths(
+        provider_path=config_dir() / "model_providers.yaml",
+        agents_path=config_dir() / "agents.yaml",
+        routing_path=config_dir() / "model_routing.yaml",
+    )
+    attach_mock_adapter(
+        registry,
+        {
+            "pm": prd.model_dump(),
+            "architect": architecture.model_dump(),
+            "planner": task_graph.model_dump(),
+            "implementer": ImplementationResult(
+                status=ImplementationStatus.IMPLEMENTED,
+                summary="Create module",
+                patches=[
+                    {
+                        "path": "feature.py",
+                        "content": "VALUE = 1\n",
+                        "operation": "create",
+                    }
+                ],
+            ).model_dump(),
+            "test_writer": TestWriterOutput(
+                summary="Add tests",
+                patches=[
+                    {
+                        "path": "tests/test_feature.py",
+                        "content": (
+                            "from feature import VALUE\n\n\n"
+                            "def test_value() -> None:\n"
+                            "    assert VALUE == 1\n"
+                        ),
+                        "operation": "create",
+                    }
+                ],
+            ).model_dump(),
+        },
+    )
+    store = InMemoryJobStore()
+    policy = PolicyEngine.from_path(config_dir() / "policies.yaml")
+    environment = FakeMCPEnvironment(
+        workspace_root=workspace,
+        memory_db_path=workspace / ".memory.sqlite3",
+    )
+    runner = JobRunner(
+        registry=registry,
+        policy=policy,
+        router=environment.build_router(),
+        store=store,
+    )
+    spec = JobSpec(
+        job_id="resume-running-recreate-plan",
+        request_text="Create feature with tests",
+        repo_path=str(workspace),
+        workspace_root=str(workspace),
+        target_branch="acos/resume-running-recreate-plan",
+        metadata={"constraints": {"skip_review": True, "skip_release": True}},
+    )
+    record = store.create(spec)
+    record.status = JobStatus.IMPLEMENTING
+    record.outputs["pm"] = prd.model_dump()
+    record.outputs["architecture"] = architecture.model_dump()
+    record.outputs["planner"] = task_graph.model_dump()
+    record.outputs["task_graph"] = task_graph.model_dump()
+    record.runtime_state["recovery_plan"] = {
+        "id": "plan-resume-recreate-target",
+        "trigger": "target_files_missing",
+        "strategy": "RETURN_TO_IMPLEMENTER",
+        "next_status": JobStatus.IMPLEMENTING.value,
+        "next_actor": "implementer",
+        "steps": ["RETURN_TO_IMPLEMENTER", "RECREATE_TARGET_FILES"],
+        "current_step_index": 1,
+        "status": "running",
+        "constraints": {
+            "required_artifacts": [recovered_target],
+            "target_files": [recovered_target],
+            "missing_target_file": recovered_target,
+            "missing_artifacts": [recovered_target],
+            "patch_operation_hint": "create",
+        },
+    }
+    store.update(record)
+    consumed_statuses: list[str | None] = []
+    original_consume = JobRunner._consume_completed_recovery_plan
+
+    def capture_consume(inner_record: JobRecord) -> None:
+        plan = inner_record.runtime_state.get("recovery_plan")
+        consumed_statuses.append(plan.get("status") if isinstance(plan, dict) else None)
+        original_consume(inner_record)
+
+    monkeypatch.setattr(
+        JobRunner,
+        "_consume_completed_recovery_plan",
+        staticmethod(capture_consume),
+    )
+
+    resumed = runner.resume_job("resume-running-recreate-plan")
+
+    assert consumed_statuses == ["completed"]
+    assert any(
+        checkpoint.get("checkpoint_key")
+        == "recovery:plan-resume-recreate-target:RECREATE_TARGET_FILES"
+        for checkpoint in resumed.checkpoints
+    )
+    assert resumed.status == JobStatus.DONE
+    assert resumed.outputs["test_run"]["success"] is True
+    assert "recovery_plan" not in resumed.runtime_state
+    assert (workspace / recovered_target).read_text(encoding="utf-8") == "ready\n"
+    assert (workspace / "feature.py").read_text(encoding="utf-8") == "VALUE = 1\n"
+
+
 def test_run_structured_role_persists_active_status_before_model_call(
     tmp_path: Path,
 ) -> None:

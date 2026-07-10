@@ -3219,6 +3219,116 @@ def test_summarize_job_progress_marks_post_review_failures_as_failed(tmp_path) -
     assert payload["resume"]["task_id"] == "core"
 
 
+def test_summarize_job_progress_respects_explicit_stage_statuses(tmp_path) -> None:
+    task_graph = TaskGraph(
+        goal="Respect explicit stage status",
+        tasks=[
+            PlannedTask(
+                id="no-change",
+                title="No change",
+                description="Implementation produced no patch.",
+                role="implementer",
+            ),
+            PlannedTask(
+                id="review-rejected",
+                title="Review rejected",
+                description="Review rejected the stage.",
+                role="implementer",
+            ),
+            PlannedTask(
+                id="explicit-pass",
+                title="Explicit pass",
+                description="Explicit status wins.",
+                role="implementer",
+            ),
+        ],
+    )
+    spec = JobSpec(
+        job_id="explicit-stage-status-progress",
+        request_text="Build it",
+        repo_path=str(tmp_path),
+    )
+    record = JobRecord(job_id=spec.job_id, spec=spec, status=JobStatus.TESTING)
+    record.outputs["task_graph"] = task_graph.model_dump()
+    record.outputs["autonomous_stages"] = [
+        {
+            "stage": 1,
+            "task": task_graph.tasks[0].model_dump(),
+            "status": "failed_for_recovery",
+            "failure_reason": "implementation_produced_no_changes",
+            "test_run": {"success": True},
+            "change_summary": {"changed_files": [], "patch_count": 0},
+        },
+        {
+            "stage": 2,
+            "task": task_graph.tasks[1].model_dump(),
+            "status": "failed_for_recovery",
+            "failure_reason": "review_rejected",
+            "stage_review": {"decision": "reject"},
+            "test_run": {"success": True},
+            "change_summary": {"changed_files": ["review.py"], "patch_count": 1},
+        },
+        {
+            "stage": 3,
+            "task": task_graph.tasks[2].model_dump(),
+            "status": "passed",
+            "test_run": {"success": False},
+            "change_summary": {"changed_files": ["explicit.py"], "patch_count": 1},
+        },
+    ]
+
+    payload = summarize_job_progress(record)
+
+    statuses = {item["task_id"]: item["status"] for item in payload["stage_statuses"]}
+    assert statuses == {
+        "no-change": "failed",
+        "review-rejected": "failed",
+        "explicit-pass": "passed",
+    }
+    assert payload["failed_stage"]["stage"] == 2
+    assert payload["failed_stage_task_ids"] == ["no-change", "review-rejected"]
+    assert payload["successful_stage_task_ids"] == ["explicit-pass"]
+
+
+def test_summarize_job_progress_legacy_stage_without_status_uses_test_fallback(
+    tmp_path,
+) -> None:
+    task_graph = TaskGraph(
+        goal="Legacy status fallback",
+        tasks=[
+            PlannedTask(id="legacy-pass", title="Pass", description="Pass", role="implementer"),
+            PlannedTask(id="legacy-fail", title="Fail", description="Fail", role="implementer"),
+        ],
+    )
+    spec = JobSpec(
+        job_id="legacy-stage-status-progress",
+        request_text="Build it",
+        repo_path=str(tmp_path),
+    )
+    record = JobRecord(job_id=spec.job_id, spec=spec, status=JobStatus.TESTING)
+    record.outputs["task_graph"] = task_graph.model_dump()
+    record.outputs["autonomous_stages"] = [
+        {
+            "stage": 1,
+            "task": task_graph.tasks[0].model_dump(),
+            "test_run": {"success": True},
+            "change_summary": {"changed_files": ["feature.py"], "patch_count": 1},
+        },
+        {
+            "stage": 2,
+            "task": task_graph.tasks[1].model_dump(),
+            "test_run": {"success": False},
+            "change_summary": {"changed_files": ["broken.py"], "patch_count": 1},
+        },
+    ]
+
+    payload = summarize_job_progress(record)
+
+    statuses = {item["task_id"]: item["status"] for item in payload["stage_statuses"]}
+    assert statuses == {"legacy-pass": "passed", "legacy-fail": "failed"}
+    assert payload["failed_stage"]["stage"] == 2
+
+
 def test_summarize_job_progress_reports_model_token_metrics(tmp_path) -> None:
     spec = JobSpec(
         job_id="model-metrics-progress",
