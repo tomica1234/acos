@@ -1425,6 +1425,8 @@ def _autonomy_readiness(
     warnings: list[dict[str, Any]] = []
     if not planned_tasks:
         blocking_items.append({"type": "task_graph_missing"})
+    elif not implementation_tasks:
+        blocking_items.append({"type": "missing_implementation_tasks"})
     if require_prd_quality and prd_quality_passed is not True:
         blocking_items.append(
             {
@@ -1546,6 +1548,7 @@ def _autonomy_readiness(
         "checks": {
             "prd_quality_passed": prd_quality_passed,
             "task_graph_valid": task_graph_valid,
+            "implementation_task_count": len(implementation_tasks),
             "implementation_tasks_have_acceptance_criteria": (
                 implementation_tasks_have_acceptance_criteria
             ),
