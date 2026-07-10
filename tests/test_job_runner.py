@@ -3488,6 +3488,47 @@ def test_task_graph_validation_treats_placeholder_acceptance_criteria_as_missing
     ]
 
 
+def test_task_graph_validation_rejects_placeholder_task_title_and_description() -> None:
+    task_graph = TaskGraph(
+        goal="Build feature",
+        tasks=[
+            PlannedTask(
+                id="core",
+                title="TBD",
+                description="TODO",
+                role="implementer",
+                acceptance_criteria=["VALUE equals 1"],
+                target_files=["feature.py"],
+                required_artifacts=["feature.py"],
+            )
+        ],
+    )
+
+    validation = JobRunner._build_task_graph_validation(
+        task_graph,
+        require_acceptance_criteria=True,
+        require_task_artifacts=True,
+    )
+
+    assert validation["valid"] is False
+    assert validation["invalid_task_titles"] == [
+        {"task_id": "core", "role": "implementer", "title": "TBD"}
+    ]
+    assert validation["invalid_task_descriptions"] == [
+        {"task_id": "core", "role": "implementer", "description": "TODO"}
+    ]
+    assert validation["errors"] == [
+        {
+            "type": "invalid_task_titles",
+            "items": validation["invalid_task_titles"],
+        },
+        {
+            "type": "invalid_task_descriptions",
+            "items": validation["invalid_task_descriptions"],
+        },
+    ]
+
+
 def test_task_graph_validation_requires_test_writer_to_cover_prd_acceptance() -> None:
     prd = PRD(
         title="Feature",

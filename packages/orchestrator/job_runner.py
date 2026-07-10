@@ -5358,6 +5358,24 @@ class JobRunner:
                             "expected_roles": sorted(expected_roles),
                         }
                     )
+        invalid_task_titles = [
+            {
+                "task_id": task.id,
+                "role": task.role,
+                "title": task.title,
+            }
+            for task in executable_tasks
+            if JobRunner._looks_like_placeholder_prd_item(task.title)
+        ]
+        invalid_task_descriptions = [
+            {
+                "task_id": task.id,
+                "role": task.role,
+                "description": task.description,
+            }
+            for task in executable_tasks
+            if JobRunner._looks_like_placeholder_prd_item(task.description)
+        ]
         small_part_coverage = JobRunner._semantic_task_coverage(
             implementation_small_parts,
             implementation_tasks,
@@ -5570,6 +5588,25 @@ class JobRunner:
                 {
                     "type": "target_files_missing_required_artifacts",
                     "items": target_files_missing_required_artifacts,
+                }
+            )
+        strict_executable_task_validation = (
+            require_acceptance_criteria
+            or require_task_artifacts
+            or require_executable_task_roles
+        )
+        if strict_executable_task_validation and invalid_task_titles:
+            errors.append(
+                {
+                    "type": "invalid_task_titles",
+                    "items": invalid_task_titles,
+                }
+            )
+        if strict_executable_task_validation and invalid_task_descriptions:
+            errors.append(
+                {
+                    "type": "invalid_task_descriptions",
+                    "items": invalid_task_descriptions,
                 }
             )
         if duplicate_ids:
@@ -5822,6 +5859,8 @@ class JobRunner:
             "executor_order_dependency_violations": (
                 executor_order_dependency_violations
             ),
+            "invalid_task_titles": invalid_task_titles,
+            "invalid_task_descriptions": invalid_task_descriptions,
             "unsupported_task_role_count": len(unsupported_task_roles),
             "small_part_count": len(small_parts),
             "implementation_small_part_count": len(implementation_small_parts),
