@@ -9,6 +9,7 @@ from typing import Any
 from packages.orchestrator.job_constraints import STRICT_JOB_CONSTRAINTS
 from packages.orchestrator.quality_gates import (
     invalid_planning_artifact_paths,
+    looks_like_placeholder_planning_item,
     valid_planning_artifact_paths,
 )
 from packages.schemas.jobs import JobRecord
@@ -1484,53 +1485,7 @@ def _meaningful_task_acceptance_criteria(value: object) -> list[str]:
 
 
 def _looks_like_placeholder_planning_item(item: str) -> bool:
-    value = " ".join(str(item).split())
-    if not value:
-        return True
-    lowered = value.lower().strip(" .:-_[]()")
-    compact = re.sub(r"[^a-z0-9]+", "", lowered)
-    if not compact:
-        return True
-    exact_placeholders = {
-        "coming soon",
-        "fill in later",
-        "fill me in",
-        "fixme",
-        "n/a",
-        "na",
-        "none",
-        "none known",
-        "not applicable",
-        "not specified",
-        "placeholder",
-        "tbd",
-        "to be decided",
-        "to be defined",
-        "to be determined",
-        "todo",
-        "unknown",
-        "unspecified",
-    }
-    compact_placeholders = {
-        "comingsoon",
-        "fillinlater",
-        "fillmein",
-        "fixme",
-        "na",
-        "none",
-        "noneknown",
-        "notapplicable",
-        "notspecified",
-        "placeholder",
-        "tbd",
-        "tobedecided",
-        "tobedefined",
-        "tobedetermined",
-        "todo",
-        "unknown",
-        "unspecified",
-    }
-    return lowered in exact_placeholders or compact in compact_placeholders
+    return looks_like_placeholder_planning_item(item)
 
 
 def _looks_like_generic_task_acceptance_criterion(criterion: str) -> bool:

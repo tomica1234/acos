@@ -52,6 +52,54 @@ EXTENSIONLESS_ARTIFACT_FILENAMES = frozenset(
     }
 )
 
+PLACEHOLDER_PLANNING_ITEMS = frozenset(
+    {
+        "coming soon",
+        "fill in later",
+        "fill me in",
+        "fixme",
+        "n/a",
+        "na",
+        "none",
+        "none known",
+        "no open questions",
+        "not applicable",
+        "not specified",
+        "placeholder",
+        "tbd",
+        "to be decided",
+        "to be defined",
+        "to be determined",
+        "todo",
+        "unknown",
+        "unspecified",
+    }
+)
+
+PLACEHOLDER_PLANNING_COMPACT_ITEMS = frozenset(
+    {
+        "comingsoon",
+        "fillinlater",
+        "fillmein",
+        "fixme",
+        "loremipsum",
+        "na",
+        "none",
+        "noneknown",
+        "noopenquestions",
+        "notapplicable",
+        "notspecified",
+        "placeholder",
+        "tbd",
+        "tobedecided",
+        "tobedefined",
+        "tobedetermined",
+        "todo",
+        "unknown",
+        "unspecified",
+    }
+)
+
 
 def ensure_reviews_pass(
     review: ReviewResult, security_review: SecurityReviewResult
@@ -238,9 +286,26 @@ def invalid_artifact_paths(paths: Iterable[str]) -> list[str]:
     return invalid
 
 
+def looks_like_placeholder_planning_item(item: str) -> bool:
+    value = " ".join(str(item).split())
+    if not value:
+        return True
+    lowered = value.lower().strip(" .:-_[]()")
+    compact = re.sub(r"[^a-z0-9]+", "", lowered)
+    if not compact:
+        return True
+    return (
+        lowered in PLACEHOLDER_PLANNING_ITEMS
+        or compact in PLACEHOLDER_PLANNING_COMPACT_ITEMS
+    )
+
+
 def valid_planning_artifact_paths(paths: Iterable[str]) -> set[str]:
     normalized, _invalid = _normalize_artifact_paths(paths)
-    invalid_planning = set(_directory_like_artifact_paths(normalized))
+    invalid_planning = {
+        *_directory_like_artifact_paths(normalized),
+        *_placeholder_artifact_paths(normalized),
+    }
     return {path for path in normalized if path not in invalid_planning}
 
 
@@ -254,9 +319,19 @@ def invalid_planning_artifact_paths(paths: Iterable[str]) -> list[str]:
         if not normalized_paths:
             continue
         normalized = next(iter(normalized_paths))
-        if _looks_like_directory_artifact_path(normalized):
+        if _looks_like_directory_artifact_path(
+            normalized
+        ) or looks_like_placeholder_artifact_path(normalized):
             invalid.append(normalized)
     return invalid
+
+
+def _placeholder_artifact_paths(paths: Iterable[str]) -> list[str]:
+    return [
+        path
+        for path in paths
+        if looks_like_placeholder_artifact_path(path)
+    ]
 
 
 def _directory_like_artifact_paths(paths: Iterable[str]) -> list[str]:
@@ -279,6 +354,32 @@ def _looks_like_directory_artifact_path(path: str) -> bool:
     if name.startswith(".") and "." not in name[1:]:
         return True
     return "." not in name
+
+
+def looks_like_placeholder_artifact_path(path: str) -> bool:
+    value = str(path).replace("\\", "/").strip()
+    if not value:
+        return False
+    if looks_like_placeholder_planning_item(value):
+        return True
+    name = value.rsplit("/", 1)[-1].strip()
+    if not name:
+        return False
+    stem = name.split(".", 1)[0]
+    compact = re.sub(r"[^a-z0-9]+", "", stem.lower())
+    if compact in {
+        "fixme",
+        "placeholder",
+        "tbd",
+        "tobedecided",
+        "tobedefined",
+        "tobedetermined",
+        "unknown",
+        "unspecified",
+    }:
+        return True
+    parts = set(re.findall(r"[a-z0-9]+", stem.lower()))
+    return bool(parts & {"fixme", "placeholder", "tbd", "unspecified"})
 
 
 def _looks_like_test_path(path: str) -> bool:

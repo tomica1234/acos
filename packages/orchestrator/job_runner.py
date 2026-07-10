@@ -34,6 +34,8 @@ from packages.orchestrator.quality_gates import (
     ensure_test_patch_quality,
     invalid_artifact_paths,
     invalid_planning_artifact_paths,
+    looks_like_placeholder_artifact_path,
+    looks_like_placeholder_planning_item,
     valid_artifact_paths,
     valid_planning_artifact_paths,
 )
@@ -4166,56 +4168,7 @@ class JobRunner:
 
     @staticmethod
     def _looks_like_placeholder_prd_item(item: str) -> bool:
-        value = " ".join(str(item).split())
-        if not value:
-            return True
-        lowered = value.lower().strip(" .:-_[]()")
-        compact = re.sub(r"[^a-z0-9]+", "", lowered)
-        if not compact:
-            return True
-        exact_placeholders = {
-            "coming soon",
-            "fill in later",
-            "fill me in",
-            "fixme",
-            "n/a",
-            "na",
-            "none",
-            "none known",
-            "no open questions",
-            "not applicable",
-            "not specified",
-            "placeholder",
-            "tbd",
-            "to be decided",
-            "to be defined",
-            "to be determined",
-            "todo",
-            "unknown",
-            "unspecified",
-        }
-        compact_placeholders = {
-            "comingsoon",
-            "fillinlater",
-            "fillmein",
-            "fixme",
-            "loremipsum",
-            "na",
-            "none",
-            "noneknown",
-            "noopenquestions",
-            "notapplicable",
-            "notspecified",
-            "placeholder",
-            "tbd",
-            "tobedecided",
-            "tobedefined",
-            "tobedetermined",
-            "todo",
-            "unknown",
-            "unspecified",
-        }
-        return lowered in exact_placeholders or compact in compact_placeholders
+        return looks_like_placeholder_planning_item(item)
 
     def _refine_task_graph_for_autonomy(
         self,
@@ -8812,35 +8765,7 @@ class JobRunner:
 
     @staticmethod
     def _looks_like_placeholder_artifact_path(path: str) -> bool:
-        value = str(path).replace("\\", "/").strip()
-        if not value:
-            return False
-        if JobRunner._looks_like_placeholder_prd_item(value):
-            return True
-        name = value.rsplit("/", 1)[-1].strip()
-        if not name:
-            return False
-        stem = name.split(".", 1)[0]
-        compact = re.sub(r"[^a-z0-9]+", "", stem.lower())
-        if compact in {
-            "fixme",
-            "placeholder",
-            "tbd",
-            "tobedecided",
-            "tobedefined",
-            "tobedetermined",
-            "unknown",
-            "unspecified",
-        }:
-            return True
-        parts = set(re.findall(r"[a-z0-9]+", stem.lower()))
-        strong_placeholder_parts = {
-            "fixme",
-            "placeholder",
-            "tbd",
-            "unspecified",
-        }
-        return bool(parts & strong_placeholder_parts)
+        return looks_like_placeholder_artifact_path(path)
 
     @staticmethod
     def _constraints(record: JobRecord) -> dict[str, Any]:

@@ -58,6 +58,26 @@ def test_planning_artifact_path_helpers_reject_directory_like_files() -> None:
     assert invalid_planning_artifact_paths(paths) == ["frontend/src", ".github"]
 
 
+def test_planning_artifact_path_helpers_reject_placeholder_files() -> None:
+    paths = [
+        "placeholder.ts",
+        "frontend/src/tbd.tsx",
+        "backend/unknown.py",
+        "frontend/src/App.tsx",
+        "README.md",
+    ]
+
+    assert valid_planning_artifact_paths(paths) == {
+        "frontend/src/App.tsx",
+        "README.md",
+    }
+    assert invalid_planning_artifact_paths(paths) == [
+        "placeholder.ts",
+        "frontend/src/tbd.tsx",
+        "backend/unknown.py",
+    ]
+
+
 def test_artifact_path_exists_requires_file_inside_workspace(tmp_path) -> None:
     (tmp_path / "feature.py").write_text("VALUE = 1\n", encoding="utf-8")
     (tmp_path / "docs").mkdir()
