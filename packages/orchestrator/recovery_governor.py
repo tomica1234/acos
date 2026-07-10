@@ -466,6 +466,10 @@ class RecoveryGovernor:
                     else []
                 )
             if invalid_artifacts:
+                required_artifacts = self._clean_string_list(
+                    runtime_state.get("required_artifacts")
+                )
+                target_files = self._clean_string_list(runtime_state.get("target_files"))
                 return RecoveryPlan(
                     trigger=trigger,
                     strategy="REPLAN_TASK_WITH_REQUIRED_ARTIFACTS",
@@ -479,6 +483,12 @@ class RecoveryGovernor:
                         "invalid_artifacts": [
                             str(item) for item in invalid_artifacts if str(item).strip()
                         ],
+                        **(
+                            {"required_artifacts": required_artifacts}
+                            if required_artifacts
+                            else {}
+                        ),
+                        **({"target_files": target_files} if target_files else {}),
                     },
                 )
             failed_role = str(runtime_state.get("failed_patch_role") or "")

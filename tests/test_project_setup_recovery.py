@@ -694,6 +694,59 @@ def test_update_invalid_target_replans_without_create_hint(
     assert not (tmp_path.parent / "outside.py").exists()
 
 
+def test_create_strict_invalid_target_replans_without_applying_patch(
+    tmp_path: Path,
+) -> None:
+    runner, _environment, record = _runner(tmp_path)
+    patch = FilePatch(
+        path=".github",
+        operation="create",
+        content="not a workflow file\n",
+    )
+
+    runner._apply_patches(record, "implementer", [patch])
+
+    plan = record.runtime_state["recovery_plan"]
+    constraints = plan["constraints"]
+    assert plan["strategy"] == "REPLAN_TASK_WITH_REQUIRED_ARTIFACTS"
+    assert plan["next_actor"] == "planner"
+    assert record.status == JobStatus.REPLANNING
+    assert constraints["recovery_mode"] == "invalid_artifacts_replan"
+    assert constraints["invalid_artifacts"] == [".github"]
+    assert constraints["target_files"] == [".github"]
+    assert "patch_operation_hint" not in constraints
+    assert not (tmp_path / ".github").exists()
+    assert not any(
+        event.action == "repo_server.apply_patch"
+        and getattr(event, "tool_name", None) == "repo_server.apply_patch"
+        for event in record.audit_events
+    )
+
+
+def test_update_strict_invalid_target_replans_without_create_hint(
+    tmp_path: Path,
+) -> None:
+    runner, _environment, record = _runner(tmp_path)
+    patch = FilePatch(
+        path="frontend/src",
+        operation="update",
+        content="not an app file\n",
+    )
+
+    runner._apply_patches(record, "implementer", [patch])
+
+    plan = record.runtime_state["recovery_plan"]
+    constraints = plan["constraints"]
+    assert plan["strategy"] == "REPLAN_TASK_WITH_REQUIRED_ARTIFACTS"
+    assert plan["next_actor"] == "planner"
+    assert record.status == JobStatus.REPLANNING
+    assert constraints["recovery_mode"] == "invalid_artifacts_replan"
+    assert constraints["invalid_artifacts"] == ["frontend/src"]
+    assert constraints["target_files"] == ["frontend/src"]
+    assert "patch_operation_hint" not in constraints
+    assert not (tmp_path / "frontend/src").exists()
+
+
 def test_missing_frontend_test_file_create_hint_rewrites_update_to_create(
     tmp_path: Path,
 ) -> None:
@@ -804,6 +857,33 @@ def test_stage_test_gate_rewrites_declared_new_test_file_update_to_create(
             "stage": "structured_output",
         }
     ]
+
+
+def test_missing_target_rewrite_skips_strict_invalid_patch_path(
+    tmp_path: Path,
+) -> None:
+    runner, _environment, record = _runner(tmp_path)
+    record.runtime_state["missing_target_file"] = "frontend/src"
+    result = TestWriterResult(
+        summary="Attempted invalid rewrite.",
+        changed_files=["frontend/src"],
+        patches=[
+            FilePatch(
+                path="frontend/src",
+                operation="update",
+                content="not an app file\n",
+            )
+        ],
+    )
+
+    rewritten = runner._result_with_rewritten_missing_target_patches(
+        record,
+        "test_writer",
+        result,
+    )
+
+    assert rewritten.patches[0].operation == "update"
+    assert "patch_operation_rewrites" not in record.outputs
 
 
 def test_recreate_target_files_recovery_waits_until_artifacts_exist(
@@ -2006,7 +2086,8 @@ def test_stage_checkpoint_rejects_invalid_required_artifact_paths(
     tmp_path: Path,
 ) -> None:
     runner, _environment, record = _runner(tmp_path)
-    (tmp_path / "docs").mkdir()
+    non_file_artifact = "docs/readme.md"
+    (tmp_path / non_file_artifact).mkdir(parents=True)
     implementation = ImplementationResult(
         status=ImplementationStatus.IMPLEMENTED,
         summary="Create feature module",
@@ -2026,7 +2107,12 @@ def test_stage_checkpoint_rejects_invalid_required_artifact_paths(
             title="Core",
             description="Build core",
             role="implementer",
-            required_artifacts=["../outside.py", "C:\\outside.py", "docs"],
+            required_artifacts=[
+                "../outside.py",
+                "C:\\outside.py",
+                non_file_artifact,
+                "frontend/src",
+            ],
         ).model_dump(),
         "implementation": implementation.model_dump(),
         "test_writer_results": [],
@@ -2041,9 +2127,14 @@ def test_stage_checkpoint_rejects_invalid_required_artifact_paths(
     assert stage_result["missing_artifacts"] == [
         "../outside.py",
         "C:\\outside.py",
-        "docs",
+        non_file_artifact,
+        "frontend/src",
     ]
-    assert stage_result["invalid_artifacts"] == ["../outside.py", "C:\\outside.py"]
+    assert stage_result["invalid_artifacts"] == [
+        "../outside.py",
+        "C:\\outside.py",
+        "frontend/src",
+    ]
 
 
 def test_frontend_unlimited_mode_sets_autonomous_until_done() -> None:

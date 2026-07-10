@@ -1722,6 +1722,8 @@ class JobRunner:
                 workspace_root=self._workspace_root(record),
             )
         for patch in patches:
+            if self._recover_invalid_patch_target(record, role, patch):
+                return
             self.policy.assert_patch_target_allowed(role, patch.path)
             if role not in {"fixer", "test_writer"}:
                 ensure_test_patch_quality(
@@ -1752,6 +1754,34 @@ class JobRunner:
                 raise
         self.store.update(record)
 
+    def _recover_invalid_patch_target(
+        self,
+        record: JobRecord,
+        role: str,
+        patch: Any,
+    ) -> bool:
+        patch_path = str(getattr(patch, "path", "") or "").strip()
+        new_path = str(getattr(patch, "new_path", "") or "").strip()
+        paths = [path for path in [patch_path, new_path] if path]
+        invalid_paths = invalid_planning_artifact_paths(paths)
+        if not invalid_paths:
+            return False
+        operation = str(getattr(patch, "operation", "") or "").strip()
+        self._recover_record(
+            record,
+            error=f"target_files_invalid:{invalid_paths[0]}",
+            runtime_state={
+                **record.runtime_state,
+                "failed_patch_role": role,
+                "failed_patch_path": invalid_paths[0],
+                "failed_patch_operation": operation,
+                "invalid_artifacts": invalid_paths,
+                "required_artifacts": invalid_paths,
+                "target_files": invalid_paths,
+            },
+        )
+        return True
+
     def _patch_for_missing_target_operation(
         self,
         record: JobRecord,
@@ -1765,7 +1795,7 @@ class JobRunner:
             return patch
         if artifact_path_exists(patch_path, workspace_root=self._workspace_root(record)):
             return patch
-        invalid_paths = invalid_artifact_paths([patch_path])
+        invalid_paths = invalid_planning_artifact_paths([patch_path])
         if invalid_paths:
             self._recover_record(
                 record,
@@ -1835,7 +1865,7 @@ class JobRunner:
             if (
                 getattr(patch, "operation", None) == "update"
                 and getattr(patch, "content", None) is not None
-                and not invalid_artifact_paths([patch_path])
+                and not invalid_planning_artifact_paths([patch_path])
                 and not artifact_path_exists(
                     patch_path,
                     workspace_root=self._workspace_root(record),
@@ -8358,7 +8388,7 @@ class JobRunner:
             stage_result["failure_reason"] = "implementation_produced_no_changes"
         missing_artifacts = self._missing_artifacts_for_stage(record, task)
         if missing_artifacts:
-            invalid_artifacts = invalid_artifact_paths(missing_artifacts)
+            invalid_artifacts = invalid_planning_artifact_paths(missing_artifacts)
             stage_result["status"] = "failed_for_recovery"
             stage_result["failure_reason"] = "required_artifacts_missing"
             stage_result["missing_artifacts"] = missing_artifacts
