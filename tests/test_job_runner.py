@@ -9612,6 +9612,10 @@ def test_job_runner_refines_sparse_prd_before_implementation_when_required(
     assert record.outputs["prd_quality_attempts"][-1][
         "prd_quality_fingerprint"
     ] == prd_quality_fingerprint(record.outputs["prd"])
+    assert record.outputs["prd_quality_contract"] == {
+        "prd_quality_fingerprint": prd_quality_fingerprint(record.outputs["prd"]),
+        "required_small_part_count": 0,
+    }
     assert record.outputs["prd"]["small_parts"] == [
         "Create feature module",
         "Add focused tests",

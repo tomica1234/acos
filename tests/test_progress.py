@@ -920,6 +920,17 @@ def test_summarize_job_progress_ignores_prd_quality_attempts_from_old_min_small_
 
 
 def test_summarize_job_progress_reports_ready_for_large_autonomy(tmp_path) -> None:
+    prd = {
+        "title": "Feature",
+        "problem_statement": "Need feature",
+        "smallest_working_core": ["Expose VALUE"],
+        "small_parts": ["Create feature module"],
+        "incremental_milestones": ["Module exists"],
+        "acceptance_tests": ["VALUE equals 1"],
+        "definition_of_done": ["Tests pass"],
+        "required_artifacts": ["feature.py", "tests/test_feature.py"],
+        "open_questions": [],
+    }
     task_graph = TaskGraph(
         goal="Build incrementally",
         tasks=[
@@ -961,11 +972,16 @@ def test_summarize_job_progress_reports_ready_for_large_autonomy(tmp_path) -> No
         },
     )
     record = JobRecord(job_id=spec.job_id, spec=spec, status=JobStatus.TESTING)
+    record.outputs["prd"] = prd
     record.outputs["task_graph"] = task_graph.model_dump()
     record.outputs["prd_quality"] = {
         "passed": True,
         "missing": [],
         "warnings": [],
+    }
+    record.outputs["prd_quality_contract"] = {
+        "prd_quality_fingerprint": prd_quality_fingerprint(prd),
+        "required_small_part_count": 0,
     }
     record.outputs["task_graph_validation"] = {
         "valid": True,
@@ -984,6 +1000,7 @@ def test_summarize_job_progress_reports_ready_for_large_autonomy(tmp_path) -> No
         "warnings": [],
         "checks": {
             "prd_quality_passed": True,
+            "prd_quality_stale_count": 0,
             "task_graph_valid": True,
             "implementation_task_count": 1,
             "task_graph_validation_stale_count": 0,
@@ -1016,6 +1033,157 @@ def test_summarize_job_progress_reports_ready_for_large_autonomy(tmp_path) -> No
             "stage_review": True,
         },
     }
+
+
+def test_summarize_job_progress_blocks_stale_prd_quality_contract(
+    tmp_path,
+) -> None:
+    task_graph = TaskGraph(
+        goal="Build incrementally",
+        tasks=[
+            PlannedTask(
+                id="core",
+                title="Core",
+                description="Build core",
+                role="implementer",
+                acceptance_criteria=["VALUE equals 1"],
+            )
+        ],
+    )
+    old_prd = {
+        "title": "Feature",
+        "problem_statement": "Need feature",
+        "smallest_working_core": ["Expose VALUE"],
+        "small_parts": ["Create feature module"],
+        "incremental_milestones": ["Module exists"],
+        "acceptance_tests": ["VALUE equals 1"],
+        "definition_of_done": ["Tests pass"],
+        "required_artifacts": ["feature.py", "tests/test_feature.py"],
+        "open_questions": [],
+    }
+    current_prd = {
+        **old_prd,
+        "acceptance_tests": ["VALUE equals 2"],
+    }
+    old_fingerprint = prd_quality_fingerprint(old_prd)
+    current_fingerprint = prd_quality_fingerprint(current_prd)
+    spec = JobSpec(
+        job_id="autonomy-stale-prd-quality-contract-job",
+        request_text="Build it carefully",
+        repo_path=str(tmp_path),
+        metadata={"constraints": {"require_prd_quality": True}},
+    )
+    record = JobRecord(job_id=spec.job_id, spec=spec, status=JobStatus.PLANNING)
+    record.outputs["prd"] = current_prd
+    record.outputs["task_graph"] = task_graph.model_dump()
+    record.outputs["prd_quality"] = {
+        "passed": True,
+        "missing": [],
+        "warnings": [],
+    }
+    record.outputs["prd_quality_contract"] = {
+        "prd_quality_fingerprint": old_fingerprint,
+        "required_small_part_count": 0,
+    }
+    record.outputs["task_graph_validation"] = {
+        "valid": True,
+        "task_count": 1,
+        "implementation_task_count": 1,
+        "test_writer_task_count": 0,
+        "executable_task_count": 1,
+        "task_ids": ["core"],
+        "implementation_task_ids": ["core"],
+        "test_writer_task_ids": [],
+        "executable_task_ids": ["core"],
+        "errors": [],
+    }
+
+    payload = summarize_job_progress(record)
+
+    assert payload["autonomy_readiness"]["ready"] is False
+    assert {
+        "type": "prd_quality_stale",
+        "mismatches": [
+            {
+                "field": "prd_quality_fingerprint",
+                "validation_value": old_fingerprint,
+                "current_value": current_fingerprint,
+            }
+        ],
+    } in payload["autonomy_readiness"]["blocking_items"]
+    assert payload["autonomy_readiness"]["checks"]["prd_quality_stale_count"] == 1
+
+
+def test_summarize_job_progress_blocks_missing_prd_quality_contract(
+    tmp_path,
+) -> None:
+    prd = {
+        "title": "Feature",
+        "problem_statement": "Need feature",
+        "smallest_working_core": ["Expose VALUE"],
+        "small_parts": ["Create feature module"],
+        "incremental_milestones": ["Module exists"],
+        "acceptance_tests": ["VALUE equals 1"],
+        "definition_of_done": ["Tests pass"],
+        "required_artifacts": ["feature.py"],
+        "open_questions": [],
+    }
+    task_graph = TaskGraph(
+        goal="Build incrementally",
+        tasks=[
+            PlannedTask(
+                id="core",
+                title="Core",
+                description="Build core",
+                role="implementer",
+                acceptance_criteria=["VALUE equals 1"],
+            )
+        ],
+    )
+    spec = JobSpec(
+        job_id="autonomy-missing-prd-quality-contract-job",
+        request_text="Build it carefully",
+        repo_path=str(tmp_path),
+        metadata={"constraints": {"require_prd_quality": True}},
+    )
+    record = JobRecord(job_id=spec.job_id, spec=spec, status=JobStatus.PLANNING)
+    record.outputs["prd"] = prd
+    record.outputs["task_graph"] = task_graph.model_dump()
+    record.outputs["prd_quality"] = {
+        "passed": True,
+        "missing": [],
+        "warnings": [],
+    }
+    record.outputs["task_graph_validation"] = {
+        "valid": True,
+        "task_count": 1,
+        "implementation_task_count": 1,
+        "test_writer_task_count": 0,
+        "executable_task_count": 1,
+        "task_ids": ["core"],
+        "implementation_task_ids": ["core"],
+        "test_writer_task_ids": [],
+        "executable_task_ids": ["core"],
+        "errors": [],
+    }
+
+    payload = summarize_job_progress(record)
+
+    assert payload["autonomy_readiness"]["ready"] is False
+    assert {
+        "type": "prd_quality_stale",
+        "mismatches": [
+            {
+                "field": "prd_quality_contract",
+                "validation_value": None,
+                "current_value": {
+                    "prd_quality_fingerprint": prd_quality_fingerprint(prd),
+                    "required_small_part_count": 0,
+                },
+            }
+        ],
+    } in payload["autonomy_readiness"]["blocking_items"]
+    assert payload["autonomy_readiness"]["checks"]["prd_quality_stale_count"] == 1
 
 
 def test_summarize_job_progress_blocks_autonomy_without_task_acceptance(

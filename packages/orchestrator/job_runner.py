@@ -2790,7 +2790,12 @@ class JobRunner:
             prd,
             min_small_parts=min_small_parts,
         )
-        record.outputs["prd_quality"] = report
+        self._store_prd_quality_report(
+            record,
+            report,
+            prd=prd,
+            min_small_parts=min_small_parts,
+        )
         self._record_prd_quality_attempt(
             record,
             attempt=0,
@@ -2863,7 +2868,12 @@ class JobRunner:
                 current_prd,
                 min_small_parts=min_small_parts,
             )
-            record.outputs["prd_quality"] = report
+            self._store_prd_quality_report(
+                record,
+                report,
+                prd=current_prd,
+                min_small_parts=min_small_parts,
+            )
             self._record_prd_quality_attempt(
                 record,
                 attempt=1,
@@ -2897,7 +2907,12 @@ class JobRunner:
                 current_prd,
                 min_small_parts=min_small_parts,
             )
-            record.outputs["prd_quality"] = report
+            self._store_prd_quality_report(
+                record,
+                report,
+                prd=current_prd,
+                min_small_parts=min_small_parts,
+            )
             self._record_prd_quality_attempt(
                 record,
                 attempt=attempt,
@@ -3822,6 +3837,22 @@ class JobRunner:
         if min_small_parts is not None:
             attempt_record["required_small_part_count"] = min_small_parts
         attempts.append(attempt_record)
+
+    @staticmethod
+    def _store_prd_quality_report(
+        record: JobRecord,
+        report: dict[str, Any],
+        *,
+        prd: PRD,
+        min_small_parts: int,
+    ) -> None:
+        record.outputs["prd_quality"] = report
+        record.outputs["prd_quality_contract"] = {
+            "prd_quality_fingerprint": prd_quality_fingerprint(
+                prd.model_dump(mode="json")
+            ),
+            "required_small_part_count": min_small_parts,
+        }
 
     @staticmethod
     def _build_prd_quality_report(

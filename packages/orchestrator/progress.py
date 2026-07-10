@@ -1298,6 +1298,64 @@ def _prd_quality_attempt_matches_current_contract(
     return True
 
 
+def _prd_quality_contract_mismatches(
+    record: JobRecord,
+    current_prd_quality: dict[str, Any] | None,
+) -> list[dict[str, Any]]:
+    current_contract = _current_prd_quality_contract(record, current_prd_quality)
+    stored_contract = _dict_output(record, "prd_quality_contract")
+    if not isinstance(stored_contract, dict):
+        if (
+            _optional_bool(current_prd_quality, "passed") is True
+            and "prd_quality_fingerprint" in current_contract
+        ):
+            return [
+                {
+                    "field": "prd_quality_contract",
+                    "validation_value": None,
+                    "current_value": current_contract,
+                }
+            ]
+        return []
+    mismatches: list[dict[str, Any]] = []
+    for field, current_value in current_contract.items():
+        validation_value = stored_contract.get(field)
+        if field == "prd_quality_fingerprint":
+            if not isinstance(validation_value, str) or not validation_value:
+                mismatches.append(
+                    {
+                        "field": field,
+                        "validation_value": validation_value,
+                        "current_value": current_value,
+                    }
+                )
+                continue
+        elif field == "required_small_part_count":
+            if isinstance(validation_value, bool) or not isinstance(
+                validation_value,
+                int,
+            ):
+                mismatches.append(
+                    {
+                        "field": field,
+                        "validation_value": validation_value,
+                        "current_value": current_value,
+                    }
+                )
+                continue
+        else:
+            continue
+        if validation_value != current_value:
+            mismatches.append(
+                {
+                    "field": field,
+                    "validation_value": validation_value,
+                    "current_value": current_value,
+                }
+            )
+    return mismatches
+
+
 def _current_task_graph_validation_attempts(
     attempts: list[dict[str, Any]],
     current_validation: dict[str, Any] | None,
@@ -1441,6 +1499,10 @@ def _autonomy_readiness(
     )
 
     prd_quality_passed = _optional_bool(prd_quality, "passed")
+    prd_quality_contract_mismatches = _prd_quality_contract_mismatches(
+        record,
+        prd_quality,
+    )
     task_graph_valid = _optional_bool(task_graph_validation, "valid")
     implementation_roles = {"implementer", "scaffold"}
     executable_roles = {*implementation_roles, "test_writer"}
@@ -1728,11 +1790,25 @@ def _autonomy_readiness(
                 "missing": prd_quality.get("missing", []) if prd_quality else [],
             }
         )
+    elif require_prd_quality and prd_quality_contract_mismatches:
+        blocking_items.append(
+            {
+                "type": "prd_quality_stale",
+                "mismatches": prd_quality_contract_mismatches,
+            }
+        )
     elif prd_quality_passed is False:
         warnings.append(
             {
                 "type": "prd_quality_not_passed",
                 "missing": prd_quality.get("missing", []) if prd_quality else [],
+            }
+        )
+    elif prd_quality_contract_mismatches:
+        warnings.append(
+            {
+                "type": "prd_quality_stale",
+                "mismatches": prd_quality_contract_mismatches,
             }
         )
     if planned_tasks and task_graph_valid is False:
@@ -1890,6 +1966,7 @@ def _autonomy_readiness(
         "warnings": warnings,
         "checks": {
             "prd_quality_passed": prd_quality_passed,
+            "prd_quality_stale_count": len(prd_quality_contract_mismatches),
             "task_graph_valid": task_graph_valid,
             "implementation_task_count": len(implementation_tasks),
             "task_graph_validation_stale_count": len(
