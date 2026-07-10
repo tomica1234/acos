@@ -1271,6 +1271,9 @@ def _autonomy_readiness(
     require_completion_integrity = bool(constraints.get("require_completion_integrity"))
     require_test_evidence = bool(constraints.get("require_test_evidence"))
     require_stage_test_patches = bool(constraints.get("require_stage_test_patches"))
+    require_executable_task_roles = bool(
+        constraints.get("require_executable_task_roles")
+    )
     stage_review = bool(constraints.get("stage_review"))
     strict_controls_enabled = any(
         [
@@ -1280,6 +1283,7 @@ def _autonomy_readiness(
             require_completion_integrity,
             require_test_evidence,
             require_stage_test_patches,
+            require_executable_task_roles,
             stage_review,
         ]
     )
@@ -1296,6 +1300,13 @@ def _autonomy_readiness(
     ]
     executable_tasks = [
         task for task in planned_tasks if task.get("role") in executable_roles
+    ]
+    unsupported_task_roles = [
+        {"task_id": task.get("id"), "role": task.get("role")}
+        for task in planned_tasks
+        if isinstance(task.get("id"), str)
+        and isinstance(task.get("role"), str)
+        and task.get("role") not in executable_roles
     ]
     generic_task_acceptance_criteria = []
     for task in executable_tasks:
@@ -1430,6 +1441,14 @@ def _autonomy_readiness(
                 "items": invalid_task_artifacts,
             }
         )
+    if strict_controls_enabled and unsupported_task_roles:
+        blocking_items.append(
+            {
+                "type": "unsupported_autonomous_task_roles",
+                "items": unsupported_task_roles,
+                "allowed_roles": sorted(executable_roles),
+            }
+        )
 
     return {
         "ready": not blocking_items,
@@ -1448,6 +1467,7 @@ def _autonomy_readiness(
             "implementation_tasks_have_artifacts": implementation_tasks_have_artifacts,
             "executable_tasks_have_artifacts": executable_tasks_have_artifacts,
             "invalid_task_artifact_count": len(invalid_task_artifacts),
+            "unsupported_task_role_count": len(unsupported_task_roles),
             "generic_task_acceptance_criteria_count": len(
                 generic_task_acceptance_criteria
             ),
@@ -1457,6 +1477,7 @@ def _autonomy_readiness(
             "require_completion_integrity": require_completion_integrity,
             "require_test_evidence": require_test_evidence,
             "require_stage_test_patches": require_stage_test_patches,
+            "require_executable_task_roles": require_executable_task_roles,
             "stage_review": stage_review,
         },
     }
