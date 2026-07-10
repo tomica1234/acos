@@ -6,7 +6,10 @@ from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import Any
 
-from packages.orchestrator.quality_gates import artifact_path_exists, invalid_artifact_paths
+from packages.orchestrator.quality_gates import (
+    artifact_path_exists,
+    invalid_planning_artifact_paths,
+)
 from packages.schemas.jobs import JobRecord
 from packages.schemas.models import ReviewDecision
 
@@ -36,7 +39,7 @@ class DefinitionOfDoneVerifier:
             missing.append(f"planned_task_not_done:{task_id}")
 
         for artifact in self._required_artifacts(record):
-            if invalid_artifact_paths([artifact]):
+            if invalid_planning_artifact_paths([artifact]):
                 missing.append(f"required_artifact_invalid:{artifact}")
             elif self._artifact_is_non_file(record, artifact):
                 missing.append(f"required_artifact_non_file:{artifact}")
@@ -45,7 +48,7 @@ class DefinitionOfDoneVerifier:
             elif self._artifact_is_empty(record, artifact):
                 missing.append(f"required_artifact_empty:{artifact}")
         for target in self._target_files(record):
-            if invalid_artifact_paths([target]):
+            if invalid_planning_artifact_paths([target]):
                 missing.append(f"target_file_invalid:{target}")
             elif self._artifact_is_non_file(record, target):
                 missing.append(f"target_file_non_file:{target}")
@@ -207,7 +210,7 @@ class DefinitionOfDoneVerifier:
 
     @staticmethod
     def _artifact_is_non_file(record: JobRecord, relative_path: str) -> bool:
-        if invalid_artifact_paths([relative_path]):
+        if invalid_planning_artifact_paths([relative_path]):
             return False
         value = str(relative_path).replace("\\", "/").strip()
         normalized = PurePosixPath(value)
@@ -219,7 +222,7 @@ class DefinitionOfDoneVerifier:
 
     @classmethod
     def _artifact_is_empty(cls, record: JobRecord, relative_path: str) -> bool:
-        if invalid_artifact_paths([relative_path]):
+        if invalid_planning_artifact_paths([relative_path]):
             return False
         value = str(relative_path).replace("\\", "/").strip()
         normalized = PurePosixPath(value)

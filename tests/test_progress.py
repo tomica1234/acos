@@ -1056,6 +1056,60 @@ def test_summarize_job_progress_blocks_autonomy_with_invalid_task_artifacts(
     ] is False
 
 
+def test_summarize_job_progress_blocks_stale_valid_graph_with_strict_invalid_artifacts(
+    tmp_path,
+) -> None:
+    task_graph = TaskGraph(
+        goal="Build incrementally",
+        tasks=[
+            PlannedTask(
+                id="core",
+                title="Core",
+                description="Build core",
+                role="implementer",
+                acceptance_criteria=["Core source is implemented"],
+                target_files=["frontend/src", ".github"],
+                required_artifacts=["frontend/src", ".github"],
+            ),
+        ],
+    )
+    spec = JobSpec(
+        job_id="autonomy-stale-strict-invalid-artifacts-job",
+        request_text="Build it carefully",
+        repo_path=str(tmp_path),
+        metadata={"constraints": {"require_task_artifacts": True}},
+    )
+    record = JobRecord(job_id=spec.job_id, spec=spec, status=JobStatus.TESTING)
+    record.outputs["task_graph"] = task_graph.model_dump()
+    record.outputs["task_graph_validation"] = {
+        "valid": True,
+        "task_count": 1,
+        "implementation_task_count": 1,
+        "implementation_task_artifact_count": 1,
+        "executable_task_artifact_count": 1,
+        "errors": [],
+    }
+
+    payload = summarize_job_progress(record)
+
+    assert payload["autonomy_readiness"]["ready"] is False
+    assert {
+        "type": "invalid_task_artifacts",
+        "items": [
+            {"task_id": "core", "paths": ["frontend/src", ".github"]},
+        ],
+    } in payload["autonomy_readiness"]["blocking_items"]
+    assert payload["autonomy_readiness"]["checks"][
+        "invalid_task_artifact_count"
+    ] == 1
+    assert payload["autonomy_readiness"]["checks"][
+        "implementation_tasks_have_artifacts"
+    ] is False
+    assert payload["autonomy_readiness"]["checks"][
+        "executable_tasks_have_artifacts"
+    ] is False
+
+
 def test_summarize_job_progress_recommends_planning_repair_for_prd_quality_gate(
     tmp_path,
 ) -> None:

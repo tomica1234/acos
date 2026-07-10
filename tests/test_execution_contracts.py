@@ -146,6 +146,8 @@ def test_synthesize_job_metadata_filters_invalid_required_artifacts(tmp_path) ->
         problem_statement="Build a feature.",
         required_artifacts=[
             "src/feature.py",
+            "frontend/src",
+            ".github",
             "../outside.py",
             "C:\\outside.py",
             "docs/",
@@ -154,7 +156,7 @@ def test_synthesize_job_metadata_filters_invalid_required_artifacts(tmp_path) ->
 
     metadata = synthesize_job_metadata_from_prd(
         prd,
-        {"required_artifacts": ["tests/test_feature.py", "/absolute.py"]},
+        {"required_artifacts": ["tests", "tests/test_feature.py", "/absolute.py"]},
         workspace_root=workspace,
     )
 

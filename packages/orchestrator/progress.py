@@ -8,8 +8,8 @@ from typing import Any
 
 from packages.orchestrator.job_constraints import STRICT_JOB_CONSTRAINTS
 from packages.orchestrator.quality_gates import (
-    invalid_artifact_paths,
-    valid_artifact_paths,
+    invalid_planning_artifact_paths,
+    valid_planning_artifact_paths,
 )
 from packages.schemas.jobs import JobRecord
 
@@ -1592,11 +1592,17 @@ def _task_artifact_paths(task: dict[str, Any]) -> list[str]:
 
 
 def _valid_artifact_paths(paths: list[str]) -> list[str]:
-    return list(valid_artifact_paths(paths))
+    return list(valid_planning_artifact_paths(paths))
 
 
 def _invalid_artifact_paths(paths: list[str]) -> list[str]:
-    return invalid_artifact_paths(paths)
+    seen: set[str] = set()
+    unique: list[str] = []
+    for path in invalid_planning_artifact_paths(paths):
+        if path and path not in seen:
+            unique.append(path)
+            seen.add(path)
+    return unique
 
 
 def _execution_limits(record: JobRecord) -> dict[str, Any]:

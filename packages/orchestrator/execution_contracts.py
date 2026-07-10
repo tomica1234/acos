@@ -9,7 +9,7 @@ from typing import Any, Mapping
 
 from packages.orchestrator.framework_profiles import resolve_framework_profile
 from packages.orchestrator.framework_scaffolds import resolve_framework_scaffold
-from packages.orchestrator.quality_gates import valid_artifact_paths
+from packages.orchestrator.quality_gates import valid_planning_artifact_paths
 from packages.schemas.agent_outputs import PRD
 from packages.schemas.runtime import RuntimeHttpCheck
 
@@ -163,7 +163,9 @@ def _merge_required_artifacts(
 
 
 def _normalized_artifacts(values: list[str]) -> set[str]:
-    return valid_artifact_paths(item for item in values if isinstance(item, str))
+    return valid_planning_artifact_paths(
+        item for item in values if isinstance(item, str)
+    )
 
 
 def _mentions_readme(prd: PRD) -> bool:

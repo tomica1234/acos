@@ -1664,7 +1664,8 @@ def test_completion_integrity_passes_non_file_artifacts_to_recovery(
     tmp_path: Path,
 ) -> None:
     runner, _environment, record = _runner(tmp_path)
-    (tmp_path / "docs").mkdir()
+    non_file_artifact = "docs/readme.md"
+    (tmp_path / non_file_artifact).mkdir(parents=True)
     record.spec.metadata["constraints"] = {
         "require_completion_integrity": True,
         "require_test_evidence": True,
@@ -1677,8 +1678,8 @@ def test_completion_integrity_passes_non_file_artifacts_to_recovery(
                 title="Build core",
                 description="Create the implementation artifact.",
                 role="implementer",
-                target_files=["docs"],
-                required_artifacts=["docs"],
+                target_files=[non_file_artifact],
+                required_artifacts=[non_file_artifact],
             )
         ],
     )
@@ -1700,16 +1701,16 @@ def test_completion_integrity_passes_non_file_artifacts_to_recovery(
 
     assert passed is False
     report = record.outputs["completion_integrity"]
-    assert "required_artifact_non_file:docs" in report["failure_reasons"]
-    assert "target_file_non_file:docs" in report["failure_reasons"]
+    assert f"required_artifact_non_file:{non_file_artifact}" in report["failure_reasons"]
+    assert f"target_file_non_file:{non_file_artifact}" in report["failure_reasons"]
     plan = record.runtime_state["recovery_plan"]
     constraints = plan["constraints"]
     assert plan["trigger"] == "completion_integrity_failed"
     assert plan["strategy"] == "REPLAN_TASK_WITH_REQUIRED_ARTIFACTS"
     assert record.status == JobStatus.REPLANNING
-    assert constraints["required_artifacts"] == ["docs"]
-    assert constraints["target_files"] == ["docs"]
-    assert constraints["non_file_artifacts"] == ["docs"]
+    assert constraints["required_artifacts"] == [non_file_artifact]
+    assert constraints["target_files"] == [non_file_artifact]
+    assert constraints["non_file_artifacts"] == [non_file_artifact]
     assert "missing_artifacts" not in constraints
 
 

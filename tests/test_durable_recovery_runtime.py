@@ -326,7 +326,8 @@ def test_completion_verifier_requires_metadata_target_files(
 def test_completion_verifier_rejects_invalid_and_non_file_artifacts(
     tmp_path: Path,
 ) -> None:
-    (tmp_path / "docs").mkdir()
+    non_file_artifact = "docs/readme.md"
+    (tmp_path / non_file_artifact).mkdir(parents=True)
     record = _record(tmp_path, status=JobStatus.FINALIZING, error="")
     record.completed_task_ids.append("core")
     record.outputs["task_graph"] = {
@@ -337,8 +338,8 @@ def test_completion_verifier_rejects_invalid_and_non_file_artifacts(
                 "title": "Core",
                 "description": "Core",
                 "role": "implementer",
-                "target_files": ["C:\\outside.py", "docs"],
-                "required_artifacts": ["../outside.py", "docs"],
+                "target_files": ["C:\\outside.py", non_file_artifact],
+                "required_artifacts": ["../outside.py", non_file_artifact],
             }
         ],
     }
@@ -350,9 +351,40 @@ def test_completion_verifier_rejects_invalid_and_non_file_artifacts(
 
     assert not result.passed
     assert "required_artifact_invalid:../outside.py" in result.missing_evidence
-    assert "required_artifact_non_file:docs" in result.missing_evidence
+    assert f"required_artifact_non_file:{non_file_artifact}" in result.missing_evidence
     assert "target_file_invalid:C:\\outside.py" in result.missing_evidence
-    assert "target_file_non_file:docs" in result.missing_evidence
+    assert f"target_file_non_file:{non_file_artifact}" in result.missing_evidence
+
+
+def test_completion_verifier_rejects_strict_invalid_artifact_declarations(
+    tmp_path: Path,
+) -> None:
+    record = _record(tmp_path, status=JobStatus.FINALIZING, error="")
+    record.completed_task_ids.append("core")
+    record.outputs["task_graph"] = {
+        "goal": "Build it",
+        "tasks": [
+            {
+                "id": "core",
+                "title": "Core",
+                "description": "Core",
+                "role": "implementer",
+                "target_files": ["frontend/src"],
+                "required_artifacts": [".github"],
+            }
+        ],
+    }
+    record.outputs["test_run"] = {"success": True, "executed_test_count": 1}
+    record.audit_events.append({"event": "verified"})
+    record.checkpoints.append({"kind": "stage"})
+
+    result = DefinitionOfDoneVerifier().verify(record)
+
+    assert not result.passed
+    assert "required_artifact_invalid:.github" in result.missing_evidence
+    assert "target_file_invalid:frontend/src" in result.missing_evidence
+    assert "required_artifact_missing:.github" not in result.missing_evidence
+    assert "target_file_missing:frontend/src" not in result.missing_evidence
 
 
 def test_completion_verifier_rejects_empty_artifacts_but_allows_markers(
