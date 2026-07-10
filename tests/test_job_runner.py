@@ -5027,6 +5027,19 @@ def test_task_graph_validation_attempt_preserves_artifact_role_details(
     )
 
     attempt = record.outputs["task_graph_validation_attempts"][0]
+    assert attempt["task_count"] == 2
+    assert attempt["implementation_task_count"] == 1
+    assert attempt["test_writer_task_count"] == 1
+    assert attempt["executable_task_count"] == 2
+    assert attempt["task_ids"] == ["core", "tests"]
+    assert attempt["implementation_task_ids"] == ["core"]
+    assert attempt["test_writer_task_ids"] == ["tests"]
+    assert attempt["executable_task_ids"] == ["core", "tests"]
+    assert attempt["task_graph_fingerprint"] == validation["task_graph_fingerprint"]
+    assert attempt["prd_fingerprint"] == validation["prd_fingerprint"]
+    assert attempt["require_acceptance_criteria"] is True
+    assert attempt["require_task_artifacts"] is True
+    assert attempt["require_executable_task_roles"] is False
     assert attempt["role_mismatched_target_files"] == [
         {
             "task_id": "core",

@@ -45,6 +45,22 @@ TASK_GRAPH_VALIDATION_CONTEXT_KEYS = (
     *TASK_GRAPH_VALIDATION_DETAIL_KEYS,
 )
 
+TASK_GRAPH_VALIDATION_CONTRACT_KEYS = (
+    "task_count",
+    "implementation_task_count",
+    "test_writer_task_count",
+    "executable_task_count",
+    "task_ids",
+    "implementation_task_ids",
+    "test_writer_task_ids",
+    "executable_task_ids",
+    "task_graph_fingerprint",
+    "prd_fingerprint",
+    "require_acceptance_criteria",
+    "require_task_artifacts",
+    "require_executable_task_roles",
+)
+
 _TASK_GRAPH_FINGERPRINT_FIELDS = (
     "id",
     "title",
@@ -118,6 +134,7 @@ def _fingerprint_value(value: Any) -> Any:
 
 
 __all__ = [
+    "TASK_GRAPH_VALIDATION_CONTRACT_KEYS",
     "TASK_GRAPH_VALIDATION_CONTEXT_KEYS",
     "TASK_GRAPH_VALIDATION_DETAIL_KEYS",
     "prd_validation_fingerprint",

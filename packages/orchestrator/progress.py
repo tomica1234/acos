@@ -13,6 +13,7 @@ from packages.orchestrator.quality_gates import (
     valid_planning_artifact_paths,
 )
 from packages.orchestrator.task_graph_validation import (
+    TASK_GRAPH_VALIDATION_CONTRACT_KEYS,
     prd_validation_fingerprint,
     task_graph_validation_fingerprint,
 )
@@ -1082,6 +1083,10 @@ def _planning_quality(record: JobRecord) -> dict[str, Any]:
     task_graph_validation = _dict_output(record, "task_graph_validation")
     prd_attempts = _list_output(record, "prd_quality_attempts")
     task_graph_attempts = _list_output(record, "task_graph_validation_attempts")
+    current_task_graph_attempts = _current_task_graph_validation_attempts(
+        task_graph_attempts,
+        task_graph_validation,
+    )
     return {
         "prd_quality": prd_quality,
         "prd_quality_attempt_count": len(prd_attempts),
@@ -1089,9 +1094,14 @@ def _planning_quality(record: JobRecord) -> dict[str, Any]:
         "task_graph_validation": task_graph_validation,
         "task_graph_validation_attempt_count": len(task_graph_attempts),
         "last_task_graph_validation_attempt": (
-            task_graph_attempts[-1] if task_graph_attempts else None
+            current_task_graph_attempts[-1]
+            if current_task_graph_attempts
+            else None
         ),
-        "planning_repair": _planning_repair_summary(prd_attempts, task_graph_attempts),
+        "planning_repair": _planning_repair_summary(
+            prd_attempts,
+            current_task_graph_attempts,
+        ),
     }
 
 
@@ -1209,6 +1219,52 @@ def _planning_repair_summary(
             or consecutive_task_graph_failure_count >= 3
         ),
     }
+
+
+def _current_task_graph_validation_attempts(
+    attempts: list[dict[str, Any]],
+    current_validation: dict[str, Any] | None,
+) -> list[dict[str, Any]]:
+    if current_validation is None:
+        return attempts
+    comparable_contract = {
+        key: current_validation.get(key)
+        for key in TASK_GRAPH_VALIDATION_CONTRACT_KEYS
+        if _is_comparable_task_graph_validation_contract_value(
+            current_validation.get(key)
+        )
+    }
+    if not comparable_contract:
+        return attempts
+    return [
+        attempt
+        for attempt in attempts
+        if _task_graph_attempt_matches_current_validation(
+            attempt,
+            comparable_contract,
+        )
+    ]
+
+
+def _task_graph_attempt_matches_current_validation(
+    attempt: dict[str, Any],
+    current_contract: dict[str, Any],
+) -> bool:
+    for key, current_value in current_contract.items():
+        attempt_value = attempt.get(key)
+        if not _is_comparable_task_graph_validation_contract_value(attempt_value):
+            continue
+        if attempt_value != current_value:
+            return False
+    return True
+
+
+def _is_comparable_task_graph_validation_contract_value(value: Any) -> bool:
+    if isinstance(value, (bool, int, str)):
+        return not (isinstance(value, str) and not value)
+    if isinstance(value, list):
+        return all(isinstance(item, str) for item in value)
+    return False
 
 
 def _consecutive_attempt_count(

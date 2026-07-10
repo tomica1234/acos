@@ -654,6 +654,103 @@ def test_summarize_job_progress_recommends_strategy_change_after_repeated_planni
     }
 
 
+def test_summarize_job_progress_ignores_stale_task_graph_validation_attempts_for_repair(
+    tmp_path,
+) -> None:
+    task_graph = TaskGraph(
+        goal="Build incrementally",
+        tasks=[
+            PlannedTask(
+                id="core",
+                title="Core",
+                description="Build core behavior.",
+                role="implementer",
+                acceptance_criteria=["VALUE equals 1"],
+                target_files=["feature.py"],
+                required_artifacts=["feature.py"],
+            )
+        ],
+    )
+    current_fingerprint = task_graph_validation_fingerprint(
+        [task.model_dump(mode="json") for task in task_graph.tasks]
+    )
+    old_fingerprint = task_graph_validation_fingerprint(
+        [
+            {
+                **task.model_dump(mode="json"),
+                "target_files": ["old_feature.py"],
+                "required_artifacts": ["old_feature.py"],
+            }
+            for task in task_graph.tasks
+        ]
+    )
+    spec = JobSpec(
+        job_id="planning-repair-stale-attempts-job",
+        request_text="Build it carefully",
+        repo_path=str(tmp_path),
+    )
+    record = JobRecord(job_id=spec.job_id, spec=spec, status=JobStatus.DESIGNING)
+    record.outputs["task_graph"] = task_graph.model_dump()
+    record.outputs["task_graph_validation"] = {
+        "valid": False,
+        "task_count": 1,
+        "implementation_task_count": 1,
+        "test_writer_task_count": 0,
+        "executable_task_count": 1,
+        "task_ids": ["core"],
+        "implementation_task_ids": ["core"],
+        "test_writer_task_ids": [],
+        "executable_task_ids": ["core"],
+        "task_graph_fingerprint": current_fingerprint,
+        "errors": [{"type": "missing_required_artifacts"}],
+    }
+    record.outputs["task_graph_validation_attempts"] = [
+        {
+            "attempt": 0,
+            "action": "initial",
+            "valid": False,
+            "task_graph_fingerprint": old_fingerprint,
+            "errors": [{"type": "unknown_dependencies"}],
+        },
+        {
+            "attempt": 1,
+            "action": "repair",
+            "valid": False,
+            "task_graph_fingerprint": old_fingerprint,
+            "errors": [{"type": "unknown_dependencies"}],
+        },
+        {
+            "attempt": 2,
+            "action": "repair",
+            "valid": False,
+            "task_graph_fingerprint": old_fingerprint,
+            "errors": [{"type": "unknown_dependencies"}],
+        },
+        {
+            "attempt": 3,
+            "action": "repair",
+            "valid": False,
+            "task_graph_fingerprint": current_fingerprint,
+            "errors": [{"type": "missing_required_artifacts"}],
+        },
+    ]
+
+    payload = summarize_job_progress(record)
+
+    assert payload["planning_quality"]["last_task_graph_validation_attempt"][
+        "errors"
+    ] == [{"type": "missing_required_artifacts"}]
+    assert payload["planning_quality"]["planning_repair"] == {
+        "consecutive_prd_failure_count": 0,
+        "consecutive_task_graph_failure_count": 1,
+        "last_prd_missing": [],
+        "last_task_graph_error_types": ["missing_required_artifacts"],
+        "repeated_prd_missing": [],
+        "repeated_task_graph_error_types": [],
+        "strategy_change_recommended": False,
+    }
+
+
 def test_summarize_job_progress_reports_ready_for_large_autonomy(tmp_path) -> None:
     task_graph = TaskGraph(
         goal="Build incrementally",

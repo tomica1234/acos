@@ -50,6 +50,7 @@ from packages.orchestrator.runtime import RuntimeManager
 from packages.orchestrator.scaffolds import build_scaffold
 from packages.orchestrator.states import apply_transition
 from packages.orchestrator.task_graph_validation import (
+    TASK_GRAPH_VALIDATION_CONTRACT_KEYS as TASK_GRAPH_VALIDATION_CONTRACT_KEYS_SOURCE,
     TASK_GRAPH_VALIDATION_CONTEXT_KEYS as TASK_GRAPH_VALIDATION_CONTEXT_KEYS_SOURCE,
     TASK_GRAPH_VALIDATION_DETAIL_KEYS as TASK_GRAPH_VALIDATION_DETAIL_KEYS_SOURCE,
     prd_validation_fingerprint,
@@ -261,6 +262,7 @@ class JobRunner:
         "view",
         "web",
     }
+    TASK_GRAPH_VALIDATION_CONTRACT_KEYS = TASK_GRAPH_VALIDATION_CONTRACT_KEYS_SOURCE
     TASK_GRAPH_VALIDATION_CONTEXT_KEYS = TASK_GRAPH_VALIDATION_CONTEXT_KEYS_SOURCE
     TASK_GRAPH_VALIDATION_DETAIL_KEYS = TASK_GRAPH_VALIDATION_DETAIL_KEYS_SOURCE
 
@@ -5370,6 +5372,14 @@ class JobRunner:
                 validation.get("uncovered_test_writer_acceptance_tests", [])
             ),
         }
+        for key in self.TASK_GRAPH_VALIDATION_CONTRACT_KEYS:
+            if key not in validation:
+                continue
+            value = validation.get(key)
+            if isinstance(value, list):
+                attempt_record[key] = list(value)
+            elif isinstance(value, (str, int, bool)) or value is None:
+                attempt_record[key] = value
         for key in self.TASK_GRAPH_VALIDATION_DETAIL_KEYS:
             attempt_record[key] = list(validation.get(key, []))
         attempts.append(attempt_record)
