@@ -36,6 +36,7 @@ class RecoveryExecutor:
     STALE_RECOVERY_CONSTRAINT_KEYS = {
         "deterministic_creation_attempted",
         "deterministically_created_files",
+        "empty_artifacts",
         "completion_integrity_failure_reasons",
         "failed_stage_ids",
         "failed_stages",

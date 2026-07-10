@@ -5470,6 +5470,31 @@ def test_completion_integrity_recovery_state_preserves_missing_task_ids(
     ]
 
 
+def test_completion_integrity_recovery_state_preserves_empty_artifacts(
+    tmp_path: Path,
+) -> None:
+    store = InMemoryJobStore()
+    spec = JobSpec(
+        request_text="Create feature with tests",
+        repo_path=str(tmp_path),
+        target_branch="acos/completion-integrity-empty-artifact-context",
+    )
+    record = store.create(spec)
+
+    runtime_state = JobRunner._completion_integrity_recovery_state(
+        record,
+        ["required_artifact_empty:src/app.py", "target_file_empty:tests/test_app.py"],
+    )
+
+    assert runtime_state["required_artifacts"] == ["src/app.py"]
+    assert runtime_state["target_files"] == ["tests/test_app.py"]
+    assert runtime_state["empty_artifacts"] == ["src/app.py", "tests/test_app.py"]
+    assert runtime_state["completion_integrity_failure_reasons"] == [
+        "required_artifact_empty:src/app.py",
+        "target_file_empty:tests/test_app.py",
+    ]
+
+
 def test_completion_integrity_recovery_state_preserves_stage_context(
     tmp_path: Path,
 ) -> None:

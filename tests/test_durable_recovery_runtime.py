@@ -353,3 +353,45 @@ def test_completion_verifier_rejects_invalid_and_non_file_artifacts(
     assert "required_artifact_non_file:docs" in result.missing_evidence
     assert "target_file_invalid:C:\\outside.py" in result.missing_evidence
     assert "target_file_non_file:docs" in result.missing_evidence
+
+
+def test_completion_verifier_rejects_empty_artifacts_but_allows_markers(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "src").mkdir()
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "shared").mkdir()
+    (tmp_path / "src" / "app.py").write_text("", encoding="utf-8")
+    (tmp_path / "tests" / "test_app.py").write_text("", encoding="utf-8")
+    (tmp_path / "shared" / ".gitkeep").write_text("", encoding="utf-8")
+    record = _record(tmp_path, status=JobStatus.FINALIZING, error="")
+    record.completed_task_ids.append("core")
+    record.outputs["task_graph"] = {
+        "goal": "Build it",
+        "tasks": [
+            {
+                "id": "core",
+                "title": "Core",
+                "description": "Core",
+                "role": "implementer",
+                "target_files": ["src/app.py", "tests/test_app.py"],
+                "required_artifacts": [
+                    "src/app.py",
+                    "tests/test_app.py",
+                    "shared/.gitkeep",
+                ],
+            }
+        ],
+    }
+    record.outputs["test_run"] = {"success": True, "executed_test_count": 1}
+    record.audit_events.append({"event": "verified"})
+    record.checkpoints.append({"kind": "stage"})
+
+    result = DefinitionOfDoneVerifier().verify(record)
+
+    assert not result.passed
+    assert "required_artifact_empty:src/app.py" in result.missing_evidence
+    assert "required_artifact_empty:tests/test_app.py" in result.missing_evidence
+    assert "target_file_empty:src/app.py" in result.missing_evidence
+    assert "target_file_empty:tests/test_app.py" in result.missing_evidence
+    assert "required_artifact_empty:shared/.gitkeep" not in result.missing_evidence

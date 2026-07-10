@@ -143,6 +143,7 @@ class JobRunner:
         "failed_patch_operation",
         "failed_patch_path",
         "failed_patch_role",
+        "empty_artifacts",
         "missing_artifacts",
         "missing_target_file",
         "patch_operation_hint",
@@ -8204,6 +8205,7 @@ class JobRunner:
             "missing_artifacts": [],
             "non_file_artifacts": [],
             "invalid_artifacts": [],
+            "empty_artifacts": [],
         }
         for key in (
             *parsed.keys(),
@@ -8219,6 +8221,8 @@ class JobRunner:
             "target_file_non_file": ("target_files", "non_file_artifacts"),
             "required_artifact_invalid": ("required_artifacts", "invalid_artifacts"),
             "target_file_invalid": ("target_files", "invalid_artifacts"),
+            "required_artifact_empty": ("required_artifacts", "empty_artifacts"),
+            "target_file_empty": ("target_files", "empty_artifacts"),
         }
         for reason in failure_reasons:
             if not isinstance(reason, str) or ":" not in reason:

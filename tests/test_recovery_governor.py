@@ -374,6 +374,35 @@ def test_recovery_governor_preserves_completion_missing_task_context() -> None:
     assert constraints["missing_task_ids"] == ["core-tests", "prd-tests"]
 
 
+def test_recovery_governor_preserves_empty_artifact_context_and_invalidates_done_ids() -> None:
+    record = _record("completion_integrity_failed:required_artifact_empty:src/app.py")
+    record.completed_task_ids = ["core", "core-tests"]
+
+    RecoveryGovernor().recover(
+        record,
+        error="completion_integrity_failed:required_artifact_empty:src/app.py",
+        runtime_state={
+            "completion_integrity_failure_reasons": [
+                "required_artifact_empty:src/app.py",
+            ],
+            "required_artifacts": ["src/app.py"],
+            "empty_artifacts": ["src/app.py"],
+        },
+    )
+
+    plan = record.runtime_state["recovery_plan"]
+    constraints = plan["constraints"]
+    assert plan["strategy"] == "REPLAN_TASK_WITH_REQUIRED_ARTIFACTS"
+    assert constraints["recovery_mode"] == "required_artifacts_replan"
+    assert constraints["required_artifacts"] == ["src/app.py"]
+    assert constraints["empty_artifacts"] == ["src/app.py"]
+    assert record.completed_task_ids == []
+    assert record.runtime_state["invalidated_completed_task_ids"] == [
+        "core",
+        "core-tests",
+    ]
+
+
 def test_recovery_governor_preserves_completion_stage_context() -> None:
     record = _record(
         "completion_integrity_failed:missing_stage_test_patches:1,failed_stages:2"

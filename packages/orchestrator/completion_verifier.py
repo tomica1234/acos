@@ -21,6 +21,8 @@ class CompletionVerification:
 class DefinitionOfDoneVerifier:
     """Check whether a job has enough evidence to enter DONE."""
 
+    ALLOW_EMPTY_ARTIFACT_NAMES = frozenset({".gitkeep", ".keep", "__init__.py"})
+
     def verify(self, record: JobRecord) -> CompletionVerification:
         missing: list[str] = []
         unresolved: list[str] = []
@@ -40,6 +42,8 @@ class DefinitionOfDoneVerifier:
                 missing.append(f"required_artifact_non_file:{artifact}")
             elif not self._artifact_exists(record, artifact):
                 missing.append(f"required_artifact_missing:{artifact}")
+            elif self._artifact_is_empty(record, artifact):
+                missing.append(f"required_artifact_empty:{artifact}")
         for target in self._target_files(record):
             if invalid_artifact_paths([target]):
                 missing.append(f"target_file_invalid:{target}")
@@ -47,6 +51,8 @@ class DefinitionOfDoneVerifier:
                 missing.append(f"target_file_non_file:{target}")
             elif not self._artifact_exists(record, target):
                 missing.append(f"target_file_missing:{target}")
+            elif self._artifact_is_empty(record, target):
+                missing.append(f"target_file_empty:{target}")
 
         test_run = outputs.get("test_run")
         if not isinstance(test_run, dict) or test_run.get("success") is not True:
@@ -210,3 +216,17 @@ class DefinitionOfDoneVerifier:
         if workspace not in [target, *target.parents]:
             return False
         return target.exists() and not target.is_file()
+
+    @classmethod
+    def _artifact_is_empty(cls, record: JobRecord, relative_path: str) -> bool:
+        if invalid_artifact_paths([relative_path]):
+            return False
+        value = str(relative_path).replace("\\", "/").strip()
+        normalized = PurePosixPath(value)
+        if normalized.name in cls.ALLOW_EMPTY_ARTIFACT_NAMES:
+            return False
+        workspace = Path(record.spec.workspace_root or record.spec.repo_path).resolve()
+        target = (workspace / Path(*normalized.parts)).resolve()
+        if workspace not in [target, *target.parents] or not target.is_file():
+            return False
+        return target.stat().st_size == 0

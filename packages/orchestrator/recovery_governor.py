@@ -206,6 +206,7 @@ class RecoveryGovernor:
         constraints["recovery_step_count"] = len(history)
         self._invalidate_checkpoints(record, plan)
         self._invalidate_outputs(record, plan)
+        self._invalidate_completed_tasks(record, plan)
         record.status = plan.next_status
         record.history.append(plan.next_status)
         if plan.hard_stop:
@@ -619,6 +620,7 @@ class RecoveryGovernor:
                 constraints[key] = value
         for key in (
             "completion_integrity_failure_reasons",
+            "empty_artifacts",
             "failed_stage_ids",
             "missing_artifacts",
             "invalid_artifacts",
@@ -798,6 +800,24 @@ class RecoveryGovernor:
             record.outputs.pop(key, None)
         if invalidated:
             record.runtime_state["invalidated_outputs"] = invalidated
+
+    @staticmethod
+    def _invalidate_completed_tasks(record: JobRecord, plan: RecoveryPlan) -> None:
+        replanning_strategies = {
+            "REPLAN_TASK_WITH_REQUIRED_ARTIFACTS",
+            "REVISE_PRD_AND_ARCHITECTURE",
+        }
+        if (
+            plan.checkpoint_policy != "invalidate_planning"
+            and plan.strategy not in replanning_strategies
+        ):
+            return
+        if not record.completed_task_ids:
+            return
+        record.runtime_state["invalidated_completed_task_ids"] = list(
+            record.completed_task_ids
+        )
+        record.completed_task_ids = []
 
 
 __all__ = [
