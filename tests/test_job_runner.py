@@ -9975,6 +9975,145 @@ def test_prd_quality_ignores_placeholder_open_questions() -> None:
     assert report["warnings"] == []
 
 
+def test_prd_quality_rejects_duplicate_planning_items() -> None:
+    prd = PRD(
+        title="Quiz API",
+        problem_statement="Students need generated quiz questions.",
+        smallest_working_core=["Generate quizzes"],
+        small_parts=[
+            "Quiz generation endpoint",
+            "Quiz generation endpoint",
+        ],
+        incremental_milestones=[
+            "Quiz generation endpoint returns questions",
+            "Quiz generation endpoint returns questions",
+        ],
+        acceptance_tests=[
+            "Quiz generation endpoint returns questions",
+            "Quiz generation endpoint returns questions",
+        ],
+        definition_of_done=["All generated tests pass"],
+        required_artifacts=[
+            "backend/src/routes/quiz.py",
+            "tests/test_quiz.py",
+        ],
+    )
+
+    report = JobRunner._build_prd_quality_report(prd)
+
+    assert report["passed"] is False
+    assert report["missing"] == ["prd_items_unique"]
+    assert report["duplicate_prd_items"] == {
+        "small_parts": [
+            {
+                "item": "Quiz generation endpoint",
+                "first_index": 1,
+                "duplicate_indices": [2],
+            }
+        ],
+        "incremental_milestones": [
+            {
+                "item": "Quiz generation endpoint returns questions",
+                "first_index": 1,
+                "duplicate_indices": [2],
+            }
+        ],
+        "acceptance_tests": [
+            {
+                "item": "Quiz generation endpoint returns questions",
+                "first_index": 1,
+                "duplicate_indices": [2],
+            }
+        ],
+    }
+
+
+def test_prd_quality_deterministically_repairs_duplicate_planning_items(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    registry = ModelRegistry.from_paths(
+        provider_path=config_dir() / "model_providers.yaml",
+        agents_path=config_dir() / "agents.yaml",
+        routing_path=config_dir() / "model_routing.yaml",
+    )
+    policy = PolicyEngine.from_path(config_dir() / "policies.yaml")
+    environment = FakeMCPEnvironment(
+        workspace_root=workspace,
+        memory_db_path=workspace / ".memory.sqlite3",
+    )
+    runner = JobRunner(registry=registry, policy=policy, router=environment.build_router())
+    record = runner.store.create(
+        JobSpec(
+            request_text="Build quiz API",
+            repo_path=str(workspace),
+            metadata={"constraints": {"require_prd_quality": True}},
+        )
+    )
+    prd = PRD(
+        title="Quiz API",
+        problem_statement="Students need generated quiz questions.",
+        smallest_working_core=["Generate quizzes"],
+        small_parts=[
+            "Quiz generation endpoint",
+            "Quiz generation endpoint",
+        ],
+        incremental_milestones=[
+            "Quiz generation endpoint returns questions",
+            "Quiz generation endpoint returns questions",
+        ],
+        acceptance_tests=[
+            "Quiz generation endpoint returns questions",
+            "Quiz generation endpoint returns questions",
+        ],
+        definition_of_done=["All generated tests pass"],
+        required_artifacts=[
+            "backend/src/routes/quiz.py",
+            "tests/test_quiz.py",
+        ],
+    )
+
+    repaired = runner._refine_prd_quality_for_autonomy(record, prd)
+
+    assert repaired is not None
+    assert record.outputs["prd_quality"]["passed"] is True
+    assert [
+        attempt["action"] for attempt in record.outputs["prd_quality_attempts"]
+    ] == ["initial", "deterministic_repair"]
+    assert repaired.small_parts == ["Quiz generation endpoint"]
+    assert repaired.incremental_milestones == [
+        "Quiz generation endpoint returns questions"
+    ]
+    assert repaired.acceptance_tests == ["Quiz generation endpoint returns questions"]
+    assert record.outputs["prd_quality_deterministic_repair"] == {
+        "applied": True,
+        "removed_duplicate_prd_items": {
+            "small_parts": [
+                {
+                    "item": "Quiz generation endpoint",
+                    "first_index": 1,
+                    "duplicate_indices": [2],
+                }
+            ],
+            "incremental_milestones": [
+                {
+                    "item": "Quiz generation endpoint returns questions",
+                    "first_index": 1,
+                    "duplicate_indices": [2],
+                }
+            ],
+            "acceptance_tests": [
+                {
+                    "item": "Quiz generation endpoint returns questions",
+                    "first_index": 1,
+                    "duplicate_indices": [2],
+                }
+            ],
+        },
+    }
+
+
 def test_prd_quality_blocks_unresolved_open_questions() -> None:
     prd = PRD(
         title="Feature",

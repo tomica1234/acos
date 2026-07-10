@@ -2779,6 +2779,11 @@ class JobRunner:
             record.outputs["prd_quality_deterministic_repair"] = {
                 "applied": True,
             }
+            duplicate_prd_items = report.get("duplicate_prd_items")
+            if isinstance(duplicate_prd_items, dict) and duplicate_prd_items:
+                record.outputs["prd_quality_deterministic_repair"][
+                    "removed_duplicate_prd_items"
+                ] = duplicate_prd_items
             if added_acceptance_tests:
                 record.outputs["prd_quality_deterministic_repair"][
                     "added_acceptance_tests"
@@ -2888,6 +2893,7 @@ class JobRunner:
             "uncovered_implementation_artifact_domain_small_parts",
             "uncovered_test_artifact_domain_small_parts",
             "non_observable_acceptance_tests",
+            "duplicate_prd_items",
             "invalid_required_artifacts",
             "prd_required_artifacts",
             "required_incremental_milestone_count",
@@ -2936,6 +2942,7 @@ class JobRunner:
             "uncovered_test_artifact_domain_small_parts"
         )
         non_observable = report.get("non_observable_acceptance_tests")
+        duplicate_prd_items = report.get("duplicate_prd_items")
         if missing:
             runtime_state["prd_quality_missing"] = missing
         if warnings:
@@ -2973,6 +2980,8 @@ class JobRunner:
             )
         if isinstance(non_observable, list) and non_observable:
             runtime_state["non_observable_acceptance_tests"] = non_observable
+        if isinstance(duplicate_prd_items, dict) and duplicate_prd_items:
+            runtime_state["duplicate_prd_items"] = duplicate_prd_items
         if invalid_required_artifacts:
             runtime_state["invalid_required_artifacts"] = invalid_required_artifacts
         if prd_required_artifacts:
@@ -3010,16 +3019,44 @@ class JobRunner:
             "incremental_milestones",
             "incremental_milestones_cover_small_parts",
             "incremental_milestones_semantically_cover_small_parts",
+            "prd_items_unique",
         }
         missing = set(report.get("missing") or [])
         if not missing or not missing.issubset(repairable_missing):
             return None
-        acceptance_tests = cls._meaningful_prd_items(prd.acceptance_tests)
-        incremental_milestones = cls._meaningful_prd_items(prd.incremental_milestones)
-        small_parts = cls._meaningful_prd_items(prd.small_parts)
+        original_smallest_working_core = cls._meaningful_prd_items(
+            prd.smallest_working_core
+        )
+        original_small_parts = cls._meaningful_prd_items(prd.small_parts)
+        original_incremental_milestones = cls._meaningful_prd_items(
+            prd.incremental_milestones
+        )
+        original_acceptance_tests = cls._meaningful_prd_items(prd.acceptance_tests)
+        original_definition_of_done = cls._meaningful_prd_items(prd.definition_of_done)
+        original_required_artifacts = cls._meaningful_prd_items(prd.required_artifacts)
+
+        smallest_working_core = cls._dedupe_planning_items(
+            original_smallest_working_core
+        )
+        small_parts = cls._dedupe_planning_items(original_small_parts)
+        incremental_milestones = cls._dedupe_planning_items(
+            original_incremental_milestones
+        )
+        acceptance_tests = cls._dedupe_planning_items(original_acceptance_tests)
+        definition_of_done = cls._dedupe_planning_items(original_definition_of_done)
+        required_artifacts = cls._dedupe_planning_items(original_required_artifacts)
         changed = False
         added_tests: list[str] = []
         added_milestones: list[str] = []
+        if (
+            smallest_working_core != original_smallest_working_core
+            or small_parts != original_small_parts
+            or incremental_milestones != original_incremental_milestones
+            or acceptance_tests != original_acceptance_tests
+            or definition_of_done != original_definition_of_done
+            or required_artifacts != original_required_artifacts
+        ):
+            changed = True
         if {
             "incremental_milestones",
             "incremental_milestones_cover_small_parts",
@@ -3092,10 +3129,18 @@ class JobRunner:
         if not changed:
             return None
         updates: dict[str, Any] = {}
-        if added_tests:
-            updates["acceptance_tests"] = acceptance_tests
-        if added_milestones:
+        if smallest_working_core != original_smallest_working_core:
+            updates["smallest_working_core"] = smallest_working_core
+        if small_parts != original_small_parts:
+            updates["small_parts"] = small_parts
+        if incremental_milestones != original_incremental_milestones or added_milestones:
             updates["incremental_milestones"] = incremental_milestones
+        if acceptance_tests != original_acceptance_tests or added_tests:
+            updates["acceptance_tests"] = acceptance_tests
+        if definition_of_done != original_definition_of_done:
+            updates["definition_of_done"] = definition_of_done
+        if required_artifacts != original_required_artifacts:
+            updates["required_artifacts"] = required_artifacts
         return prd.model_copy(update=updates)
 
     @staticmethod
@@ -3413,6 +3458,38 @@ class JobRunner:
                     "Rewrite each acceptance_test as an observable result, for example exists, "
                     "returns, renders, contains, validates, persists, or passes."
                 )
+        duplicate_prd_items = report.get("duplicate_prd_items")
+        if isinstance(duplicate_prd_items, dict) and duplicate_prd_items:
+            summaries = []
+            for section, duplicates in duplicate_prd_items.items():
+                if not isinstance(duplicates, list):
+                    continue
+                items = []
+                for duplicate in duplicates:
+                    if not isinstance(duplicate, dict):
+                        continue
+                    item = duplicate.get("item")
+                    duplicate_indices = duplicate.get("duplicate_indices")
+                    if not isinstance(item, str) or not item.strip():
+                        continue
+                    indices_text = ""
+                    if isinstance(duplicate_indices, list) and duplicate_indices:
+                        indices_text = (
+                            " duplicated at "
+                            + ", ".join(str(index) for index in duplicate_indices)
+                        )
+                    items.append(f"{item}{indices_text}")
+                if items:
+                    summaries.append(f"{section}: " + " | ".join(items))
+            if summaries:
+                logs.append(
+                    "Duplicate PRD items are not valid coverage: "
+                    + " ; ".join(summaries)
+                )
+                logs.append(
+                    "Remove duplicate PRD entries and replace any padding with distinct, "
+                    "independently verifiable work, milestone, or acceptance-test items."
+                )
         if prd.acceptance_tests:
             logs.append(
                 "Current acceptance_tests: "
@@ -3616,9 +3693,13 @@ class JobRunner:
         smallest_working_core = JobRunner._meaningful_prd_items(
             prd.smallest_working_core
         )
+        duplicate_smallest_working_core = JobRunner._duplicate_planning_items(
+            smallest_working_core
+        )
         if not smallest_working_core:
             missing.append("smallest_working_core")
         small_parts = JobRunner._meaningful_prd_items(prd.small_parts)
+        duplicate_small_parts = JobRunner._duplicate_planning_items(small_parts)
         if not small_parts:
             missing.append("small_parts")
         elif len(small_parts) == 1:
@@ -3640,6 +3721,9 @@ class JobRunner:
             missing.append("small_parts_split_for_autonomy")
         incremental_milestones = JobRunner._meaningful_prd_items(
             prd.incremental_milestones
+        )
+        duplicate_incremental_milestones = JobRunner._duplicate_planning_items(
+            incremental_milestones
         )
         if not incremental_milestones:
             missing.append("incremental_milestones")
@@ -3664,6 +3748,9 @@ class JobRunner:
         ):
             missing.append("incremental_milestones_semantically_cover_small_parts")
         acceptance_tests = JobRunner._meaningful_prd_items(prd.acceptance_tests)
+        duplicate_acceptance_tests = JobRunner._duplicate_planning_items(
+            acceptance_tests
+        )
         acceptance_test_small_part_coverage = JobRunner._semantic_item_coverage(
             small_parts,
             acceptance_tests,
@@ -3691,10 +3778,17 @@ class JobRunner:
             missing.append("acceptance_tests_semantically_cover_small_parts")
         if acceptance_tests and non_observable_acceptance_tests:
             missing.append("acceptance_tests_observable")
-        if not JobRunner._meaningful_prd_items(prd.definition_of_done):
+        definition_of_done = JobRunner._meaningful_prd_items(prd.definition_of_done)
+        duplicate_definition_of_done = JobRunner._duplicate_planning_items(
+            definition_of_done
+        )
+        if not definition_of_done:
             missing.append("definition_of_done")
         required_artifact_items = JobRunner._meaningful_prd_items(
             prd.required_artifacts
+        )
+        duplicate_required_artifacts = JobRunner._duplicate_planning_items(
+            required_artifact_items
         )
         required_artifacts = set(
             JobRunner._valid_unique_planning_artifact_paths(required_artifact_items)
@@ -3785,6 +3879,20 @@ class JobRunner:
             and uncovered_test_artifact_domain_small_parts
         ):
             missing.append("test_artifacts_semantically_cover_small_parts")
+        duplicate_prd_items = {
+            key: duplicates
+            for key, duplicates in {
+                "smallest_working_core": duplicate_smallest_working_core,
+                "small_parts": duplicate_small_parts,
+                "incremental_milestones": duplicate_incremental_milestones,
+                "acceptance_tests": duplicate_acceptance_tests,
+                "definition_of_done": duplicate_definition_of_done,
+                "required_artifacts": duplicate_required_artifacts,
+            }.items()
+            if duplicates
+        }
+        if duplicate_prd_items:
+            missing.append("prd_items_unique")
         if JobRunner._meaningful_prd_items(prd.open_questions):
             missing.append("open_questions_resolved")
             warnings.append("open_questions_present")
@@ -3829,7 +3937,7 @@ class JobRunner:
             "uncovered_acceptance_small_parts": uncovered_acceptance_small_parts,
             "non_observable_acceptance_tests": non_observable_acceptance_tests,
             "definition_of_done_count": len(
-                JobRunner._meaningful_prd_items(prd.definition_of_done)
+                definition_of_done
             ),
             "required_artifact_count": len(required_artifacts),
             "required_artifacts": sorted(required_artifacts),
@@ -3868,6 +3976,8 @@ class JobRunner:
             ),
             "invalid_required_artifacts": invalid_required_artifacts,
         }
+        if duplicate_prd_items:
+            report["duplicate_prd_items"] = duplicate_prd_items
         if min_small_parts > 0:
             report["required_small_part_count"] = min_small_parts
             report["small_parts_split_for_autonomy"] = len(small_parts) >= min_small_parts
@@ -3888,6 +3998,45 @@ class JobRunner:
             for item in cls._non_empty_items(items)
             if not cls._looks_like_placeholder_prd_item(item)
         ]
+
+    @staticmethod
+    def _planning_item_identity(item: str) -> str:
+        return " ".join(str(item).split()).lower()
+
+    @classmethod
+    def _duplicate_planning_items(cls, items: list[str]) -> list[dict[str, Any]]:
+        first_seen: dict[str, tuple[int, str]] = {}
+        duplicates_by_key: dict[str, dict[str, Any]] = {}
+        for index, item in enumerate(items, start=1):
+            key = cls._planning_item_identity(item)
+            if not key:
+                continue
+            if key not in first_seen:
+                first_seen[key] = (index, item)
+                continue
+            first_index, first_item = first_seen[key]
+            duplicate = duplicates_by_key.setdefault(
+                key,
+                {
+                    "item": first_item,
+                    "first_index": first_index,
+                    "duplicate_indices": [],
+                },
+            )
+            duplicate["duplicate_indices"].append(index)
+        return list(duplicates_by_key.values())
+
+    @classmethod
+    def _dedupe_planning_items(cls, items: list[str]) -> list[str]:
+        seen: set[str] = set()
+        unique: list[str] = []
+        for item in items:
+            key = cls._planning_item_identity(item)
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            unique.append(item)
+        return unique
 
     @staticmethod
     def _looks_like_placeholder_prd_item(item: str) -> bool:
