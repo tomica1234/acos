@@ -1316,6 +1316,15 @@ def _autonomy_readiness(
     executable_tasks = [
         task for task in planned_tasks if task.get("role") in executable_roles
     ]
+    task_graph_validation_count_mismatches = _task_graph_validation_count_mismatches(
+        task_graph_validation,
+        {
+            "task_count": len(planned_tasks),
+            "implementation_task_count": len(implementation_tasks),
+            "test_writer_task_count": len(test_writer_tasks),
+            "executable_task_count": len(executable_tasks),
+        },
+    )
     unsupported_task_roles = [
         {"task_id": task.get("id"), "role": task.get("role")}
         for task in planned_tasks
@@ -1544,6 +1553,13 @@ def _autonomy_readiness(
         blocking_items.append({"type": "task_graph_validation_missing"})
     elif planned_tasks and task_graph_valid is None:
         warnings.append({"type": "task_graph_validation_missing"})
+    if planned_tasks and task_graph_valid is True and task_graph_validation_count_mismatches:
+        blocking_items.append(
+            {
+                "type": "task_graph_validation_stale",
+                "mismatches": task_graph_validation_count_mismatches,
+            }
+        )
     if require_acceptance_criteria and missing_acceptance_task_ids:
         blocking_items.append(
             {
@@ -1681,6 +1697,9 @@ def _autonomy_readiness(
             "prd_quality_passed": prd_quality_passed,
             "task_graph_valid": task_graph_valid,
             "implementation_task_count": len(implementation_tasks),
+            "task_graph_validation_stale_count": len(
+                task_graph_validation_count_mismatches
+            ),
             "implementation_tasks_have_acceptance_criteria": (
                 implementation_tasks_have_acceptance_criteria
             ),
@@ -1733,6 +1752,28 @@ def _optional_bool(payload: dict[str, Any] | None, key: str) -> bool | None:
         return None
     value = payload.get(key)
     return value if isinstance(value, bool) else None
+
+
+def _task_graph_validation_count_mismatches(
+    validation: dict[str, Any] | None,
+    current_counts: dict[str, int],
+) -> list[dict[str, Any]]:
+    if validation is None:
+        return []
+    mismatches: list[dict[str, Any]] = []
+    for field, current_value in current_counts.items():
+        validation_value = validation.get(field)
+        if isinstance(validation_value, bool) or not isinstance(validation_value, int):
+            continue
+        if validation_value != current_value:
+            mismatches.append(
+                {
+                    "field": field,
+                    "validation_value": validation_value,
+                    "current_value": current_value,
+                }
+            )
+    return mismatches
 
 
 def _non_empty_strings(value: object) -> list[str]:

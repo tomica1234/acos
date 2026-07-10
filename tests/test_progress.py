@@ -717,6 +717,7 @@ def test_summarize_job_progress_reports_ready_for_large_autonomy(tmp_path) -> No
             "prd_quality_passed": True,
             "task_graph_valid": True,
             "implementation_task_count": 1,
+            "task_graph_validation_stale_count": 0,
             "implementation_tasks_have_acceptance_criteria": True,
             "test_writer_tasks_have_acceptance_criteria": True,
             "implementation_tasks_have_artifacts": True,
@@ -1471,6 +1472,78 @@ def test_summarize_job_progress_blocks_stale_valid_graph_without_implementation_
         "type": "missing_implementation_tasks",
     } in payload["autonomy_readiness"]["blocking_items"]
     assert payload["autonomy_readiness"]["checks"]["implementation_task_count"] == 0
+
+
+def test_summarize_job_progress_blocks_stale_valid_graph_when_validation_counts_do_not_match(
+    tmp_path,
+) -> None:
+    task_graph = TaskGraph(
+        goal="Build incrementally",
+        tasks=[
+            PlannedTask(
+                id="core",
+                title="Core",
+                description="Build core behavior.",
+                role="implementer",
+                acceptance_criteria=["Core behavior returns VALUE"],
+                target_files=["feature.py"],
+                required_artifacts=["feature.py"],
+            ),
+            PlannedTask(
+                id="core-tests",
+                title="Core tests",
+                description="Cover core behavior.",
+                role="test_writer",
+                depends_on=["core"],
+                acceptance_criteria=["Core behavior has regression tests"],
+                target_files=["tests/test_feature.py"],
+                required_artifacts=["tests/test_feature.py"],
+            ),
+        ],
+    )
+    spec = JobSpec(
+        job_id="autonomy-stale-validation-counts-job",
+        request_text="Build it carefully",
+        repo_path=str(tmp_path),
+        metadata={"constraints": {"require_task_artifacts": True}},
+    )
+    record = JobRecord(job_id=spec.job_id, spec=spec, status=JobStatus.TESTING)
+    record.outputs["task_graph"] = task_graph.model_dump()
+    record.outputs["task_graph_validation"] = {
+        "valid": True,
+        "task_count": 1,
+        "implementation_task_count": 1,
+        "test_writer_task_count": 0,
+        "executable_task_count": 1,
+        "errors": [],
+    }
+
+    payload = summarize_job_progress(record)
+
+    assert payload["autonomy_readiness"]["ready"] is False
+    assert {
+        "type": "task_graph_validation_stale",
+        "mismatches": [
+            {
+                "field": "task_count",
+                "validation_value": 1,
+                "current_value": 2,
+            },
+            {
+                "field": "test_writer_task_count",
+                "validation_value": 0,
+                "current_value": 1,
+            },
+            {
+                "field": "executable_task_count",
+                "validation_value": 1,
+                "current_value": 2,
+            },
+        ],
+    } in payload["autonomy_readiness"]["blocking_items"]
+    assert payload["autonomy_readiness"]["checks"][
+        "task_graph_validation_stale_count"
+    ] == 3
 
 
 def test_summarize_job_progress_blocks_stale_valid_graph_with_duplicate_task_ids(
