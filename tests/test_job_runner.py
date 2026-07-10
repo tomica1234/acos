@@ -3060,6 +3060,41 @@ def test_task_graph_validation_rejects_target_files_not_required() -> None:
     } in validation["errors"]
 
 
+def test_task_graph_validation_rejects_placeholder_task_artifacts() -> None:
+    task_graph = TaskGraph(
+        goal="Build feature",
+        tasks=[
+            PlannedTask(
+                id="core",
+                title="Build core",
+                description="Create feature module.",
+                role="implementer",
+                acceptance_criteria=["VALUE equals 1"],
+                target_files=["src/placeholder.py"],
+                required_artifacts=["src/placeholder.py"],
+            )
+        ],
+    )
+
+    validation = JobRunner._build_task_graph_validation(
+        task_graph,
+        require_acceptance_criteria=True,
+        require_task_artifacts=True,
+    )
+
+    assert validation["valid"] is False
+    assert validation["implementation_task_artifact_count"] == 0
+    assert validation["implementation_tasks_missing_target_files"] == ["core"]
+    assert validation["executable_tasks_missing_required_artifacts"] == ["core"]
+    assert validation["invalid_task_artifacts"] == [
+        {"task_id": "core", "paths": ["src/placeholder.py"]}
+    ]
+    assert {
+        "type": "invalid_task_artifacts",
+        "items": validation["invalid_task_artifacts"],
+    } in validation["errors"]
+
+
 def test_task_graph_validation_requires_test_writer_artifacts_when_requested() -> None:
     task_graph = TaskGraph(
         goal="Build feature",
@@ -9696,6 +9731,35 @@ def test_prd_quality_rejects_invalid_required_artifact_paths() -> None:
     assert report["test_required_artifact_count"] == 0
     assert report["test_required_artifacts"] == []
     assert report["invalid_required_artifacts"] == ["../outside.py", "C:\\outside.py"]
+
+
+def test_prd_quality_rejects_placeholder_required_artifact_paths() -> None:
+    prd = PRD(
+        title="Feature",
+        problem_statement="Need feature",
+        smallest_working_core=["Expose a feature module"],
+        small_parts=["Create feature module"],
+        incremental_milestones=["Module exists"],
+        acceptance_tests=["Feature module exists"],
+        definition_of_done=["All tests pass"],
+        required_artifacts=["placeholder.py", "tests/TBD.test.ts"],
+    )
+
+    report = JobRunner._build_prd_quality_report(prd)
+
+    assert report["passed"] is False
+    assert report["missing"] == [
+        "required_artifacts",
+        "required_artifacts_valid_paths",
+    ]
+    assert report["required_artifact_count"] == 0
+    assert report["required_artifacts"] == []
+    assert report["source_required_artifact_count"] == 0
+    assert report["test_required_artifact_count"] == 0
+    assert report["invalid_required_artifacts"] == [
+        "placeholder.py",
+        "tests/TBD.test.ts",
+    ]
 
 
 def test_prd_quality_requires_required_artifacts() -> None:

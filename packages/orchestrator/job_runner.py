@@ -1551,7 +1551,7 @@ class JobRunner:
             f"Validation errors: {validation['errors']}",
             f"PRD small_parts: {cls._meaningful_prd_items(prd.small_parts)}",
         ]
-        prd_required_artifacts = cls._valid_unique_artifact_paths(
+        prd_required_artifacts = cls._valid_unique_planning_artifact_paths(
             cls._meaningful_prd_items(prd.required_artifacts)
         )
         if prd_required_artifacts:
@@ -3418,7 +3418,9 @@ class JobRunner:
                 "Current acceptance_tests: "
                 + " | ".join(self_item for self_item in prd.acceptance_tests)
             )
-        required_artifacts = JobRunner._valid_unique_artifact_paths(prd.required_artifacts)
+        required_artifacts = JobRunner._valid_unique_planning_artifact_paths(
+            prd.required_artifacts
+        )
         if required_artifacts:
             logs.append("Current required_artifacts: " + " | ".join(required_artifacts))
         missing = set(report.get("missing") or [])
@@ -3694,8 +3696,12 @@ class JobRunner:
         required_artifact_items = JobRunner._meaningful_prd_items(
             prd.required_artifacts
         )
-        required_artifacts = valid_artifact_paths(required_artifact_items)
-        invalid_required_artifacts = invalid_artifact_paths(required_artifact_items)
+        required_artifacts = set(
+            JobRunner._valid_unique_planning_artifact_paths(required_artifact_items)
+        )
+        invalid_required_artifacts = JobRunner._invalid_planning_artifact_paths(
+            required_artifact_items
+        )
         if not required_artifacts:
             missing.append("required_artifacts")
         if invalid_required_artifacts:
@@ -3968,8 +3974,10 @@ class JobRunner:
             ],
             *prd.required_artifacts,
         ]
-        source_target_files = self._valid_unique_artifact_paths(raw_source_target_files)
-        source_required_artifacts = self._valid_unique_artifact_paths(
+        source_target_files = self._valid_unique_planning_artifact_paths(
+            raw_source_target_files
+        )
+        source_required_artifacts = self._valid_unique_planning_artifact_paths(
             raw_source_required_artifacts
         )
         source_implementation_artifacts = [
@@ -3986,7 +3994,7 @@ class JobRunner:
             path for path in source_required_artifacts if self._looks_like_test_path(path)
         ]
         invalid_inherited_artifacts = self._unique_paths(
-            invalid_artifact_paths(
+            self._invalid_planning_artifact_paths(
                 [*raw_source_target_files, *raw_source_required_artifacts]
             )
         )
@@ -4091,7 +4099,7 @@ class JobRunner:
     ) -> TaskGraph:
         acceptance_tests = self._meaningful_prd_items(prd.acceptance_tests)
         definition_of_done = self._meaningful_prd_items(prd.definition_of_done)
-        source_required_artifacts = self._valid_unique_artifact_paths(
+        source_required_artifacts = self._valid_unique_planning_artifact_paths(
             self._meaningful_prd_items(prd.required_artifacts)
         )
         source_implementation_artifacts = [
@@ -4373,12 +4381,16 @@ class JobRunner:
             target_owners = [
                 index
                 for index in implementation_indexes()
-                if artifact in valid_artifact_paths(updated_tasks[index].target_files)
+                if artifact
+                in cls._valid_unique_planning_artifact_paths(
+                    updated_tasks[index].target_files
+                )
             ]
             required_owners = [
                 index
                 for index in implementation_indexes()
-                if artifact in valid_artifact_paths(
+                if artifact
+                in cls._valid_unique_planning_artifact_paths(
                     updated_tasks[index].required_artifacts
                 )
             ]
@@ -5248,20 +5260,26 @@ class JobRunner:
             task for task in task_graph.tasks if task.role in executable_roles
         ]
         prd_required_artifacts = (
-            valid_artifact_paths(prd.required_artifacts) if prd is not None else set()
+            set(JobRunner._valid_unique_planning_artifact_paths(prd.required_artifacts))
+            if prd is not None
+            else set()
         )
         invalid_prd_required_artifacts = (
-            invalid_artifact_paths(prd.required_artifacts) if prd is not None else []
+            JobRunner._invalid_planning_artifact_paths(prd.required_artifacts)
+            if prd is not None
+            else []
         )
         prd_test_required_artifacts = sorted(
             path for path in prd_required_artifacts if JobRunner._looks_like_test_path(path)
         )
-        assigned_artifacts = valid_artifact_paths(
-            [
-                path
-                for task in executable_tasks
-                for path in [*task.target_files, *task.required_artifacts]
-            ]
+        assigned_artifacts = set(
+            JobRunner._valid_unique_planning_artifact_paths(
+                [
+                    path
+                    for task in executable_tasks
+                    for path in [*task.target_files, *task.required_artifacts]
+                ]
+            )
         )
         unassigned_required_artifacts = sorted(
             prd_required_artifacts - assigned_artifacts
@@ -5269,7 +5287,7 @@ class JobRunner:
         target_artifacts_by_role: dict[str, set[str]] = {}
         for task in executable_tasks:
             target_artifacts_by_role.setdefault(task.role, set()).update(
-                valid_artifact_paths(task.target_files)
+                JobRunner._valid_unique_planning_artifact_paths(task.target_files)
             )
         unowned_required_artifacts: list[dict[str, Any]] = []
         for artifact in sorted(prd_required_artifacts):
@@ -5292,8 +5310,14 @@ class JobRunner:
         required_artifacts_missing_target_files: list[dict[str, Any]] = []
         target_files_missing_required_artifacts: list[dict[str, Any]] = []
         for task in executable_tasks:
-            task_target_files = valid_artifact_paths(task.target_files)
-            task_required_artifacts = valid_artifact_paths(task.required_artifacts)
+            task_target_files = set(
+                JobRunner._valid_unique_planning_artifact_paths(task.target_files)
+            )
+            task_required_artifacts = set(
+                JobRunner._valid_unique_planning_artifact_paths(
+                    task.required_artifacts
+                )
+            )
             missing_target_files = sorted(task_required_artifacts - task_target_files)
             if missing_target_files:
                 required_artifacts_missing_target_files.append(
@@ -5591,7 +5615,7 @@ class JobRunner:
             task.id
             for task in task_graph.tasks
             if task.role in executable_roles
-            and not valid_artifact_paths(
+            and not JobRunner._valid_unique_planning_artifact_paths(
                 [*task.target_files, *task.required_artifacts]
             )
         ]
@@ -5606,7 +5630,9 @@ class JobRunner:
             task.id
             for task in task_graph.tasks
             if task.role in executable_roles
-            and not valid_artifact_paths(task.required_artifacts)
+            and not JobRunner._valid_unique_planning_artifact_paths(
+                task.required_artifacts
+            )
         ]
         if require_task_artifacts and executable_tasks_missing_required_artifacts:
             errors.append(
@@ -5619,7 +5645,7 @@ class JobRunner:
             task.id
             for task in task_graph.tasks
             if task.role in JobRunner.TEST_TASK_ROLES
-            and not valid_artifact_paths(task.target_files)
+            and not JobRunner._valid_unique_planning_artifact_paths(task.target_files)
         ]
         if require_task_artifacts and test_writer_tasks_missing_target_files:
             errors.append(
@@ -5639,7 +5665,7 @@ class JobRunner:
             task.id
             for task in task_graph.tasks
             if task.role in JobRunner.IMPLEMENTATION_TASK_ROLES
-            and not valid_artifact_paths(task.target_files)
+            and not JobRunner._valid_unique_planning_artifact_paths(task.target_files)
         ]
         if require_task_artifacts and implementation_tasks_missing_target_files:
             errors.append(
@@ -5673,7 +5699,7 @@ class JobRunner:
             task.id
             for task in task_graph.tasks
             if task.role in JobRunner.IMPLEMENTATION_TASK_ROLES
-            and not valid_artifact_paths(
+            and not JobRunner._valid_unique_planning_artifact_paths(
                 [*task.target_files, *task.required_artifacts]
             )
         ]
@@ -5681,7 +5707,7 @@ class JobRunner:
         for task in task_graph.tasks:
             if task.role not in executable_roles:
                 continue
-            invalid_paths = invalid_artifact_paths(
+            invalid_paths = JobRunner._invalid_planning_artifact_paths(
                 [*task.target_files, *task.required_artifacts]
             )
             if invalid_paths:
@@ -8129,6 +8155,66 @@ class JobRunner:
                 unique.append(normalized)
                 seen.add(normalized)
         return unique
+
+    @classmethod
+    def _valid_unique_planning_artifact_paths(cls, paths: list[str]) -> list[str]:
+        return cls._valid_unique_artifact_paths(cls._meaningful_artifact_items(paths))
+
+    @classmethod
+    def _invalid_planning_artifact_paths(cls, paths: list[str]) -> list[str]:
+        invalid = [
+            *invalid_artifact_paths(paths),
+            *cls._placeholder_artifact_paths(paths),
+        ]
+        return cls._unique_paths(invalid)
+
+    @classmethod
+    def _meaningful_artifact_items(cls, paths: list[str]) -> list[str]:
+        return [
+            item
+            for item in cls._non_empty_items(paths)
+            if not cls._looks_like_placeholder_artifact_path(item)
+        ]
+
+    @classmethod
+    def _placeholder_artifact_paths(cls, paths: list[str]) -> list[str]:
+        return [
+            item
+            for item in cls._non_empty_items(paths)
+            if cls._looks_like_placeholder_artifact_path(item)
+        ]
+
+    @staticmethod
+    def _looks_like_placeholder_artifact_path(path: str) -> bool:
+        value = str(path).replace("\\", "/").strip()
+        if not value:
+            return False
+        if JobRunner._looks_like_placeholder_prd_item(value):
+            return True
+        name = value.rsplit("/", 1)[-1].strip()
+        if not name:
+            return False
+        stem = name.split(".", 1)[0]
+        compact = re.sub(r"[^a-z0-9]+", "", stem.lower())
+        if compact in {
+            "fixme",
+            "placeholder",
+            "tbd",
+            "tobedecided",
+            "tobedefined",
+            "tobedetermined",
+            "unknown",
+            "unspecified",
+        }:
+            return True
+        parts = set(re.findall(r"[a-z0-9]+", stem.lower()))
+        strong_placeholder_parts = {
+            "fixme",
+            "placeholder",
+            "tbd",
+            "unspecified",
+        }
+        return bool(parts & strong_placeholder_parts)
 
     @staticmethod
     def _constraints(record: JobRecord) -> dict[str, Any]:
