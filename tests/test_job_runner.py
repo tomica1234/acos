@@ -3338,6 +3338,49 @@ def test_task_graph_validation_rejects_directory_like_test_artifacts() -> None:
     } in validation["errors"]
 
 
+def test_task_graph_validation_rejects_hidden_directory_artifacts() -> None:
+    task_graph = TaskGraph(
+        goal="Build CI config",
+        tasks=[
+            PlannedTask(
+                id="ci-config",
+                title="Build CI config",
+                description="Create GitHub Actions workflow config.",
+                role="implementer",
+                acceptance_criteria=["CI workflow validates tests"],
+                target_files=[".github"],
+                required_artifacts=[".github"],
+            )
+        ],
+    )
+
+    validation = JobRunner._build_task_graph_validation(
+        task_graph,
+        require_acceptance_criteria=True,
+        require_task_artifacts=True,
+    )
+
+    assert validation["valid"] is False
+    assert validation["invalid_task_artifacts"] == [
+        {"task_id": "ci-config", "paths": [".github"]}
+    ]
+    assert {
+        "type": "invalid_task_artifacts",
+        "items": validation["invalid_task_artifacts"],
+    } in validation["errors"]
+
+
+def test_task_graph_validation_allows_hidden_file_artifacts() -> None:
+    paths = [
+        ".gitignore",
+        ".env.example",
+        ".github/workflows/ci.yml",
+    ]
+
+    assert JobRunner._invalid_planning_artifact_paths(paths) == []
+    assert JobRunner._valid_unique_planning_artifact_paths(paths) == paths
+
+
 def test_task_graph_validation_requires_test_writer_artifacts_when_requested() -> None:
     task_graph = TaskGraph(
         goal="Build feature",
@@ -10354,6 +10397,29 @@ def test_prd_quality_rejects_directory_like_required_artifact_paths() -> None:
     assert report["source_required_artifact_count"] == 0
     assert report["test_required_artifact_count"] == 0
     assert report["invalid_required_artifacts"] == ["backend", "tests"]
+
+
+def test_prd_quality_rejects_hidden_directory_required_artifact_paths() -> None:
+    prd = PRD(
+        title="CI Config",
+        problem_statement="Need automated validation.",
+        smallest_working_core=["Create CI workflow"],
+        small_parts=["Create CI workflow"],
+        incremental_milestones=["CI workflow file exists"],
+        acceptance_tests=["CI workflow file exists and runs project tests"],
+        definition_of_done=["CI config is committed"],
+        required_artifacts=[".github", ".vscode"],
+    )
+
+    report = JobRunner._build_prd_quality_report(prd)
+
+    assert report["passed"] is False
+    assert report["missing"] == [
+        "required_artifacts",
+        "required_artifacts_valid_paths",
+    ]
+    assert report["required_artifacts"] == []
+    assert report["invalid_required_artifacts"] == [".github", ".vscode"]
 
 
 def test_prd_quality_rejects_placeholder_required_artifact_paths() -> None:

@@ -129,6 +129,12 @@ class JobRunner:
         ".nvmrc",
         ".prettierignore",
         ".prettierrc",
+        ".pylintrc",
+        ".python-version",
+        ".ruby-version",
+        ".tool-versions",
+        ".watchmanconfig",
+        ".yarnrc",
         "Brewfile",
         "Dockerfile",
         "Gemfile",
@@ -8819,6 +8825,8 @@ class JobRunner:
             return False
         if name in cls.EXTENSIONLESS_PLANNING_ARTIFACT_FILENAMES:
             return False
+        if name.startswith(".") and "." not in name[1:]:
+            return True
         return "." not in name
 
     @staticmethod
