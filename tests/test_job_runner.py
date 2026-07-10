@@ -3651,6 +3651,67 @@ def test_task_graph_validation_treats_placeholder_acceptance_criteria_as_missing
     ]
 
 
+def test_task_graph_validation_treats_generic_acceptance_criteria_as_missing() -> None:
+    task_graph = TaskGraph(
+        goal="Build feature",
+        tasks=[
+            PlannedTask(
+                id="core",
+                title="Build core",
+                description="Create feature module.",
+                role="implementer",
+                acceptance_criteria=["All tests pass"],
+                target_files=["feature.py"],
+                required_artifacts=["feature.py"],
+            ),
+            PlannedTask(
+                id="tests",
+                title="Test core",
+                description="Add focused regression tests.",
+                role="test_writer",
+                depends_on=["core"],
+                acceptance_criteria=["Tests pass"],
+                target_files=["tests/test_feature.py"],
+                required_artifacts=["tests/test_feature.py"],
+            ),
+        ],
+    )
+
+    validation = JobRunner._build_task_graph_validation(
+        task_graph,
+        require_acceptance_criteria=True,
+    )
+
+    assert validation["valid"] is False
+    assert validation["implementation_task_acceptance_criteria_count"] == 0
+    assert validation["test_writer_task_acceptance_criteria_count"] == 0
+    assert validation["generic_task_acceptance_criteria"] == [
+        {
+            "task_id": "core",
+            "role": "implementer",
+            "acceptance_criteria": "All tests pass",
+        },
+        {
+            "task_id": "tests",
+            "role": "test_writer",
+            "acceptance_criteria": "Tests pass",
+        },
+    ]
+    error_types = {error["type"] for error in validation["errors"]}
+    assert {
+        "missing_acceptance_criteria",
+        "missing_test_writer_acceptance_criteria",
+        "generic_task_acceptance_criteria",
+    }.issubset(error_types)
+    assert (
+        "task_graph_validation_detail: generic_task_acceptance_criteria="
+        f"{validation['generic_task_acceptance_criteria']}"
+    ) in JobRunner._task_graph_validation_repair_logs(
+        PRD(title="Feature", problem_statement="Need feature"),
+        validation,
+    )
+
+
 def test_task_graph_validation_rejects_duplicate_task_acceptance_criteria() -> None:
     task_graph = TaskGraph(
         goal="Build feature",

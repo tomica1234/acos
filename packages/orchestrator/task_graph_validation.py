@@ -18,6 +18,7 @@ TASK_GRAPH_VALIDATION_DETAIL_KEYS = (
     "executable_tasks_missing_required_artifacts",
     "test_writer_tasks_missing_acceptance_criteria",
     "duplicate_task_acceptance_criteria",
+    "generic_task_acceptance_criteria",
     "implementation_tasks_missing_target_files",
     "test_writer_tasks_missing_target_files",
     "test_writer_missing_implementation_dependencies",

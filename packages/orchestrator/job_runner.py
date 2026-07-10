@@ -3239,35 +3239,63 @@ class JobRunner:
         if not tokens:
             return True
         generic_tokens = {
+            "a",
             "all",
+            "an",
             "app",
             "application",
             "as",
+            "acceptance",
             "automated",
+            "be",
             "behavior",
             "behaviour",
             "check",
             "checks",
+            "code",
+            "complete",
+            "completed",
             "correctly",
+            "criteria",
+            "done",
             "expected",
             "feature",
+            "functionality",
             "generated",
+            "implementation",
+            "is",
             "it",
             "module",
             "pass",
             "passes",
             "passing",
             "properly",
+            "should",
             "screen",
             "service",
             "system",
+            "task",
             "test",
             "tests",
+            "the",
             "work",
             "working",
             "works",
         }
         return tokens <= generic_tokens
+
+    @classmethod
+    def _looks_like_generic_task_acceptance_criterion(cls, criterion: str) -> bool:
+        tokens = set(re.findall(r"[a-z0-9_]+", criterion.lower()))
+        return cls._looks_like_generic_acceptance_test(tokens)
+
+    @classmethod
+    def _meaningful_task_acceptance_criteria(cls, items: list[str]) -> list[str]:
+        return [
+            item
+            for item in cls._meaningful_planning_items(items)
+            if not cls._looks_like_generic_task_acceptance_criterion(item)
+        ]
 
     @classmethod
     def _smallest_working_core_coverage(
@@ -5562,6 +5590,18 @@ class JobRunner:
                 )
             )
         ]
+        generic_task_acceptance_criteria = [
+            {
+                "task_id": task.id,
+                "role": task.role,
+                "acceptance_criteria": criterion,
+            }
+            for task in executable_tasks
+            for criterion in JobRunner._meaningful_planning_items(
+                task.acceptance_criteria
+            )
+            if JobRunner._looks_like_generic_task_acceptance_criterion(criterion)
+        ]
         small_part_coverage = JobRunner._semantic_task_coverage(
             implementation_small_parts,
             implementation_tasks,
@@ -5826,7 +5866,9 @@ class JobRunner:
             task.id
             for task in task_graph.tasks
             if task.role in JobRunner.IMPLEMENTATION_TASK_ROLES
-            and not JobRunner._meaningful_planning_items(task.acceptance_criteria)
+            and not JobRunner._meaningful_task_acceptance_criteria(
+                task.acceptance_criteria
+            )
         ]
         if require_acceptance_criteria and tasks_missing_acceptance_criteria:
             errors.append(
@@ -5839,7 +5881,9 @@ class JobRunner:
             task.id
             for task in task_graph.tasks
             if task.role in JobRunner.TEST_TASK_ROLES
-            and not JobRunner._meaningful_planning_items(task.acceptance_criteria)
+            and not JobRunner._meaningful_task_acceptance_criteria(
+                task.acceptance_criteria
+            )
         ]
         if require_acceptance_criteria and test_writer_tasks_missing_acceptance_criteria:
             errors.append(
@@ -5853,6 +5897,13 @@ class JobRunner:
                 {
                     "type": "duplicate_task_acceptance_criteria",
                     "items": duplicate_task_acceptance_criteria,
+                }
+            )
+        if require_acceptance_criteria and generic_task_acceptance_criteria:
+            errors.append(
+                {
+                    "type": "generic_task_acceptance_criteria",
+                    "items": generic_task_acceptance_criteria,
                 }
             )
         tasks_missing_artifacts = [
@@ -6054,6 +6105,7 @@ class JobRunner:
             "duplicate_task_acceptance_criteria": (
                 duplicate_task_acceptance_criteria
             ),
+            "generic_task_acceptance_criteria": generic_task_acceptance_criteria,
             "implementation_tasks_missing_target_files": (
                 implementation_tasks_missing_target_files
             ),
