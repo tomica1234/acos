@@ -5531,6 +5531,15 @@ class JobRunner:
             for task in executable_tasks
             if JobRunner._looks_like_placeholder_prd_item(task.description)
         ]
+        invalid_task_ids = [
+            {
+                "task_id": task.id,
+                "role": task.role,
+                "reason": JobRunner._invalid_task_id_reason(task.id),
+            }
+            for task in task_graph.tasks
+            if JobRunner._invalid_task_id_reason(task.id)
+        ]
         duplicate_task_acceptance_criteria = [
             {
                 "task_id": task.id,
@@ -5782,6 +5791,13 @@ class JobRunner:
                 {
                     "type": "invalid_task_descriptions",
                     "items": invalid_task_descriptions,
+                }
+            )
+        if strict_executable_task_validation and invalid_task_ids:
+            errors.append(
+                {
+                    "type": "invalid_task_ids",
+                    "items": invalid_task_ids,
                 }
             )
         if duplicate_ids:
@@ -6049,6 +6065,7 @@ class JobRunner:
             ),
             "invalid_task_titles": invalid_task_titles,
             "invalid_task_descriptions": invalid_task_descriptions,
+            "invalid_task_ids": invalid_task_ids,
             "unsupported_task_role_count": len(unsupported_task_roles),
             "unsupported_task_roles": unsupported_task_roles,
             "small_part_count": len(small_parts),
@@ -6129,6 +6146,16 @@ class JobRunner:
             return False
 
         return visit(task_id)
+
+    @staticmethod
+    def _invalid_task_id_reason(task_id: str) -> str | None:
+        raw = str(task_id)
+        value = raw.strip()
+        if JobRunner._looks_like_placeholder_prd_item(value):
+            return "placeholder"
+        if raw != value or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]*", value):
+            return "unsafe_task_id_format"
+        return None
 
     @staticmethod
     def _test_writer_dependency_semantic_mismatches(

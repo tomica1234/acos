@@ -26,6 +26,7 @@ TASK_GRAPH_VALIDATION_DETAIL_KEYS = (
     "executor_order_dependency_violations",
     "invalid_task_titles",
     "invalid_task_descriptions",
+    "invalid_task_ids",
     "invalid_task_artifacts",
     "ignored_project_setup_artifacts",
     "unsupported_task_roles",

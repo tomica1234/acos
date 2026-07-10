@@ -3659,6 +3659,74 @@ def test_task_graph_validation_rejects_unsupported_role_under_strict_artifact_ga
     } in validation["errors"]
 
 
+def test_task_graph_validation_rejects_placeholder_task_ids() -> None:
+    task_graph = TaskGraph(
+        goal="Build feature",
+        tasks=[
+            PlannedTask(
+                id="TBD",
+                title="Build core",
+                description="Create feature module.",
+                role="implementer",
+                acceptance_criteria=["VALUE equals 1"],
+                target_files=["feature.py"],
+                required_artifacts=["feature.py"],
+            )
+        ],
+    )
+
+    validation = JobRunner._build_task_graph_validation(
+        task_graph,
+        require_acceptance_criteria=True,
+        require_task_artifacts=True,
+    )
+
+    assert validation["valid"] is False
+    assert validation["invalid_task_ids"] == [
+        {"task_id": "TBD", "role": "implementer", "reason": "placeholder"}
+    ]
+    assert {
+        "type": "invalid_task_ids",
+        "items": validation["invalid_task_ids"],
+    } in validation["errors"]
+
+
+def test_task_graph_validation_rejects_unsafe_task_ids() -> None:
+    task_graph = TaskGraph(
+        goal="Build feature",
+        tasks=[
+            PlannedTask(
+                id="Task 1",
+                title="Build core",
+                description="Create feature module.",
+                role="implementer",
+                acceptance_criteria=["VALUE equals 1"],
+                target_files=["feature.py"],
+                required_artifacts=["feature.py"],
+            )
+        ],
+    )
+
+    validation = JobRunner._build_task_graph_validation(
+        task_graph,
+        require_acceptance_criteria=True,
+        require_task_artifacts=True,
+    )
+
+    assert validation["valid"] is False
+    assert validation["invalid_task_ids"] == [
+        {
+            "task_id": "Task 1",
+            "role": "implementer",
+            "reason": "unsafe_task_id_format",
+        }
+    ]
+    assert {
+        "type": "invalid_task_ids",
+        "items": validation["invalid_task_ids"],
+    } in validation["errors"]
+
+
 def test_task_graph_validation_rejects_placeholder_task_title_and_description() -> None:
     task_graph = TaskGraph(
         goal="Build feature",
