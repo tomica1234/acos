@@ -50,8 +50,6 @@ _TASK_GRAPH_FINGERPRINT_FIELDS = (
     "title",
     "description",
     "role",
-    "status",
-    "complexity",
     "depends_on",
     "acceptance_criteria",
     "target_files",
