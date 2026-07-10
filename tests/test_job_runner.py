@@ -3616,6 +3616,49 @@ def test_task_graph_validation_rejects_duplicate_task_acceptance_criteria() -> N
     } in validation["errors"]
 
 
+def test_task_graph_validation_rejects_unsupported_role_under_strict_artifact_gate() -> None:
+    task_graph = TaskGraph(
+        goal="Build feature",
+        tasks=[
+            PlannedTask(
+                id="core",
+                title="Build core",
+                description="Create feature module.",
+                role="implementer",
+                acceptance_criteria=["VALUE equals 1"],
+                target_files=["feature.py"],
+                required_artifacts=["feature.py"],
+            ),
+            PlannedTask(
+                id="notes",
+                title="Write release notes",
+                description="Draft release notes after implementation.",
+                role="release_manager",
+                acceptance_criteria=["Release notes summarize VALUE behavior"],
+                target_files=["CHANGELOG.md"],
+                required_artifacts=["CHANGELOG.md"],
+            ),
+        ],
+    )
+
+    validation = JobRunner._build_task_graph_validation(
+        task_graph,
+        require_acceptance_criteria=True,
+        require_task_artifacts=True,
+    )
+
+    assert validation["valid"] is False
+    assert validation["require_executable_task_roles"] is False
+    assert validation["unsupported_task_roles"] == [
+        {"task_id": "notes", "role": "release_manager"}
+    ]
+    assert {
+        "type": "unsupported_autonomous_task_roles",
+        "items": validation["unsupported_task_roles"],
+        "allowed_roles": ["implementer", "scaffold", "test_writer"],
+    } in validation["errors"]
+
+
 def test_task_graph_validation_rejects_placeholder_task_title_and_description() -> None:
     task_graph = TaskGraph(
         goal="Build feature",

@@ -5952,7 +5952,7 @@ class JobRunner:
             for task in task_graph.tasks
             if task.role not in executable_roles
         ]
-        if require_executable_task_roles and unsupported_task_roles:
+        if strict_executable_task_validation and unsupported_task_roles:
             errors.append(
                 {
                     "type": "unsupported_autonomous_task_roles",
@@ -6050,6 +6050,7 @@ class JobRunner:
             "invalid_task_titles": invalid_task_titles,
             "invalid_task_descriptions": invalid_task_descriptions,
             "unsupported_task_role_count": len(unsupported_task_roles),
+            "unsupported_task_roles": unsupported_task_roles,
             "small_part_count": len(small_parts),
             "implementation_small_part_count": len(implementation_small_parts),
             "test_focused_small_parts": test_focused_small_parts,

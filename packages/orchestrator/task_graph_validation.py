@@ -28,6 +28,7 @@ TASK_GRAPH_VALIDATION_DETAIL_KEYS = (
     "invalid_task_descriptions",
     "invalid_task_artifacts",
     "ignored_project_setup_artifacts",
+    "unsupported_task_roles",
 )
 
 TASK_GRAPH_VALIDATION_CONTEXT_KEYS = (
